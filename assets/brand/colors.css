@@ -1,0 +1,15 @@
+/* BitDinghy shared visual tokens; values from the supplied palette */
+:root {
+  --bd-navy: #071A2B;
+  --bd-surface: #1E3146;
+  --bd-soft-gray: #D6D9DE;
+  --bd-green: #57F000;
+  --bd-bright-green: #7BFF3A;
+  --bd-mint: #B6FFC7;
+  --bd-deep-green: #1F8F46;
+  --bd-teal: #38C7A3;
+  --bd-font: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --bd-radius: 12px;
+  --bd-radius-card: 16px;
+  --bd-focus-ring: 0 0 0 3px rgba(56,199,163,.55);
+}

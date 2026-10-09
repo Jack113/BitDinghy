@@ -1,0 +1,41 @@
+/* BitDinghy light and dark theme tokens. Set data-theme on <html>. */
+@import url('../brand/colors.css');
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #071A2B;
+  --surface: #1E3146;
+  --surface-raised: #253C50;
+  --text: #F7FAFC;
+  --text-muted: #D6D9DE;
+  --border: #35516A;
+  --link: #B6FFC7;
+  --accent: #57F000;
+  --accent-foreground: #071A2B;
+  --success: #57F000;
+  --info: #38C7A3;
+  --warning: #FFE84A;
+  --danger: #FF373E;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F5F7F9;
+  --surface: #FFFFFF;
+  --surface-raised: #EAF0F3;
+  --text: #071A2B;
+  --text-muted: #465C6E;
+  --border: #C7D2DC;
+  --link: #136A4D;
+  --accent: #1F8F46; /* darker green for readable light-theme text and buttons */
+  --accent-foreground: #FFFFFF;
+  --success: #17733B;
+  --info: #126A63;
+  --warning: #956200;
+  --danger: #B3262C;
+}
+html { background: var(--bg); color: var(--text); font-family: var(--bd-font); }
+body { margin:0; background:var(--bg); color:var(--text); }
+a { color:var(--link); }
+.button-primary { background:var(--accent);color:var(--accent-foreground); border:0; border-radius:var(--bd-radius); font-weight:700;padding:.8rem 1.2rem; }
+.button-primary:focus-visible, a:focus-visible {outline:0;box-shadow:var(--bd-focus-ring);}
+.card { background:var(--surface);border:1px solid var(--border);border-radius:var(--bd-radius-card); }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after {animation-duration:.01ms !important;transition-duration:.01ms !important;} }

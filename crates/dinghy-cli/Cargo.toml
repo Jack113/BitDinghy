@@ -20,6 +20,9 @@ clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 
+[build-dependencies]
+winresource.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 # Used only by the tests, to run a pretend "seeder" on this computer.

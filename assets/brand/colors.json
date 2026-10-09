@@ -1,0 +1,20 @@
+{
+  "name": "BitDinghy",
+  "colors": {
+    "background": "#071A2B",
+    "surface": "#1E3146",
+    "softGray": "#D6D9DE",
+    "primaryGreen": "#57F000",
+    "brightGreen": "#7BFF3A",
+    "mint": "#B6FFC7",
+    "deepGreen": "#1F8F46",
+    "accentTeal": "#38C7A3"
+  },
+  "fontFamily": "Inter, system-ui, sans-serif",
+  "fontWeights": {
+    "regular": 400,
+    "medium": 500,
+    "bold": 700,
+    "extraBold": 800
+  }
+}

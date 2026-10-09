@@ -45,6 +45,10 @@ url = "2"
 directories = "6"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 tempfile = "3"
+# Reads the window icon and logo pictures (already part of the build through egui).
+png = "0.18"
+# Windows only, build time only: puts the icon and the "Details" information into the .exe files.
+winresource = "0.1"
 
 # The window toolkit. `glow` = OpenGL drawing (smaller and quicker to start than wgpu).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }

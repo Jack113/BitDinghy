@@ -4,6 +4,8 @@
 // (Debug builds keep the console so log messages are visible while developing.)
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod brand;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +16,9 @@ use eframe::egui;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(224, 92, 92);
 const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(214, 170, 60);
+
+/// How tall the logo is drawn at the top of the window, in points.
+const LOGO_HEIGHT: f32 = 48.0;
 
 /// The whole window's state.
 ///
@@ -27,6 +32,8 @@ struct BitDinghyApp {
     profile: Profile,
     /// `Err` holds the reason the engine couldn't start, so the window can show it.
     engine: Result<Arc<Engine>, String>,
+    /// The logo pictures. `None` if they couldn't be read, in which case plain text is shown.
+    logos: Option<brand::Logos>,
     /// The text in the link box.
     link: String,
     /// A problem with the link just pasted.
@@ -38,7 +45,10 @@ struct BitDinghyApp {
 }
 
 impl BitDinghyApp {
-    fn new() -> Self {
+    fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+        brand::apply(&creation_context.egui_ctx);
+        let logos = brand::Logos::load(&creation_context.egui_ctx);
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -57,6 +67,7 @@ impl BitDinghyApp {
             runtime,
             profile,
             engine,
+            logos,
             link: String::new(),
             link_problem: None,
             folder_text,
@@ -96,6 +107,26 @@ impl BitDinghyApp {
                 )
             }
             Err(error) => (error.to_string(), true),
+        });
+    }
+
+    /// The logo (or, if it couldn't be loaded, the name) with the version beside it.
+    fn draw_header(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            match &self.logos {
+                Some(logos) => {
+                    let texture = logos.for_theme(ui.ctx().theme());
+                    let size = egui::vec2(LOGO_HEIGHT * texture.aspect_ratio(), LOGO_HEIGHT);
+                    ui.add(
+                        egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
+                            .fit_to_exact_size(size),
+                    );
+                }
+                None => {
+                    ui.heading(dinghy_core::APP_NAME);
+                }
+            }
+            ui.weak(format!("version {}", dinghy_core::VERSION));
         });
     }
 
@@ -148,7 +179,7 @@ impl BitDinghyApp {
 
 impl eframe::App for BitDinghyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.heading(dinghy_core::about());
+        self.draw_header(ui);
         for notice in self.profile.notices() {
             ui.colored_label(WARNING_COLOR, notice);
         }
@@ -238,10 +269,17 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
             ui.colored_label(ERROR_COLOR, message);
         }
         DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Finished => {
-            ui.add(
-                egui::ProgressBar::new(fraction(download.progress_bytes, download.total_bytes))
-                    .show_percentage(),
-            );
+            let done = fraction(download.progress_bytes, download.total_bytes);
+            ui.horizontal(|ui| {
+                // The percentage sits beside the bar, where it is always readable.
+                let bar_width = (ui.available_width() - 64.0).max(80.0);
+                ui.add(
+                    egui::ProgressBar::new(done)
+                        .fill(brand::progress_fill(ui.ctx().theme()))
+                        .desired_width(bar_width),
+                );
+                ui.label(format!("{:.1}%", done * 100.0));
+            });
             if download.status == DownloadStatus::Finished {
                 let folder = download
                     .save_folder
@@ -273,16 +311,20 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
 }
 
 fn main() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([820.0, 600.0])
+        .with_min_inner_size([480.0, 340.0]);
+    if let Some(icon) = brand::window_icon() {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([820.0, 560.0])
-            .with_min_inner_size([480.0, 320.0]),
+        viewport,
         ..Default::default()
     };
 
     eframe::run_native(
         dinghy_core::APP_NAME,
         options,
-        Box::new(|_creation_context| Ok(Box::new(BitDinghyApp::new()))),
+        Box::new(|creation_context| Ok(Box::new(BitDinghyApp::new(creation_context)))),
     )
 }

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="BitDinghy digital sailboat">
+
+<defs>
+ <linearGradient id="sb" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#B6FFC7"/><stop offset=".65" stop-color="#7BFF3A"/><stop offset="1" stop-color="#57F000"/></linearGradient>
+ <linearGradient id="hb" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#7BFF3A"/><stop offset="1" stop-color="#1F8F46"/></linearGradient>
+</defs>
+<path d="M276 74 L301 309" stroke="#1F8F46" stroke-width="17" stroke-linecap="round"/>
+<path d="M284 85 Q363 138 400 297 L305 298 Z" fill="url(#sb)"/>
+<path d="M285 91 Q333 132 358 192 Q330 243 304 295 Z" fill="#B6FFC7"/>
+<path d="M118 324 Q278 317 435 304 Q419 374 343 393 Q205 420 149 368Z" fill="url(#hb)"/>
+<path d="M124 326 Q267 331 428 308" stroke="#B6FFC7" stroke-width="12" fill="none" stroke-linecap="round"/>
+<path d="M73 389 Q151 350 206 390 Q266 428 356 394 Q406 378 444 391 Q378 441 293 424 Q230 413 187 409 Q134 383 73 389" fill="#38C7A3"/>
+<path d="M100 413 Q163 396 206 426 Q291 455 365 418" stroke="#B6FFC7" stroke-width="13" fill="none" stroke-linecap="round"/>
+<path d="M68 313 L207 279" stroke="#38C7A3" stroke-width="11" stroke-linecap="round" opacity=".95"/>
+<path d="M119 285 L254 255" stroke="#57F000" stroke-width="13" stroke-linecap="round" opacity=".85"/>
+<g fill="#7BFF3A" font-weight="800" font-family="DejaVu Sans Mono, monospace"><text x="131" y="256" font-size="32">1</text><text x="192" y="248" font-size="25">0</text></g>
+
+</svg>

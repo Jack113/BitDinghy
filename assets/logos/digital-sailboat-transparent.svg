@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 440" width="800" height="440" role="img" aria-label="BitDinghy digital sailboat">
+
+ <defs>
+  <linearGradient id="sail" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#B6FFC7"/><stop offset=".55" stop-color="#7BFF3A"/><stop offset="1" stop-color="#57F000"/></linearGradient>
+  <linearGradient id="hull" x1="0" y1=".2" x2="1" y2="1"><stop stop-color="#7BFF3A"/><stop offset=".5" stop-color="#57F000"/><stop offset="1" stop-color="#1F8F46"/></linearGradient>
+  <linearGradient id="wake" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#38C7A3" stop-opacity=".15"/><stop offset=".45" stop-color="#38C7A3"/><stop offset=".83" stop-color="#B6FFC7"/></linearGradient>
+  <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#1F8F46" stop-opacity="0"/><stop offset=".7" stop-color="#57F000" stop-opacity=".7"/><stop offset="1" stop-color="#7BFF3A"/></linearGradient>
+ </defs>
+ <!-- digital speed streaks: packet of ones and zeroes with forward-leaning shape -->
+ <g opacity=".97">
+  <path d="M38 258 L468 177" stroke="url(#trail)" stroke-width="9" stroke-linecap="round"/>
+  <path d="M95 280 L470 215" stroke="url(#trail)" stroke-width="14" stroke-linecap="round" opacity=".85"/>
+  <path d="M140 300 L468 256" stroke="url(#trail)" stroke-width="8" stroke-linecap="round" opacity=".6"/>
+  <path d="M212 220 L461 170" stroke="url(#trail)" stroke-width="4" stroke-linecap="round" opacity=".8"/>
+  <path d="M85 322 L362 303" stroke="#38C7A3" stroke-width="5" stroke-linecap="round" opacity=".7"/>
+  <g font-family="DejaVu Sans Mono, monospace" font-weight="bold" fill="#7BFF3A">
+   <text x="174" y="230" font-size="25" transform="rotate(-9 174 230)">1  0  1</text>
+   <text x="258" y="199" font-size="20" transform="rotate(-9 258 199)">0  1  0  1</text>
+   <text x="182" y="263" font-size="37" transform="rotate(-8 182 263)">1</text>
+   <text x="276" y="248" font-size="34" transform="rotate(-8 276 248)">0</text>
+   <text x="365" y="227" font-size="29" transform="rotate(-8 365 227)">1</text>
+   <text x="228" y="292" font-size="20" transform="rotate(-6 228 292)">0  1  0  1</text>
+   <text x="408" y="179" font-size="27" transform="rotate(-8 408 179)">0</text>
+  </g>
+  <rect x="303" y="207" width="18" height="8" rx="2" fill="#38C7A3" opacity=".7"/>
+  <rect x="384" y="257" width="20" height="12" rx="2" fill="#57F000"/>
+  <rect x="124" y="287" width="17" height="9" rx="2" fill="#38C7A3" opacity=".7"/>
+ </g>
+ <!-- mast and aerodynamic sail -->
+ <path d="M504 73 L544 287" stroke="#1F8F46" stroke-width="13" stroke-linecap="round"/>
+ <path d="M511 78 Q603 124 666 284 Q601 264 540 280 Z" fill="url(#sail)"/>
+ <path d="M510 80 Q561 110 609 175 Q572 233 540 279 Z" fill="#B6FFC7" opacity=".9"/>
+ <path d="M510 78 L538 278" stroke="#0A6C47" stroke-width="7" stroke-linecap="round"/>
+ <!-- sharp planing hull -->
+ <path d="M335 293 Q459 289 709 277 Q702 313 650 337 Q518 361 401 332 Q362 319 335 293 Z" fill="url(#hull)"/>
+ <path d="M345 296 Q536 296 705 277" stroke="#B6FFC7" stroke-width="10" stroke-linecap="round" fill="none"/>
+ <path d="M405 333 Q526 350 648 336 Q571 382 462 351 Z" fill="#1F8F46" opacity=".86"/>
+ <path d="M638 299 L694 286 Q677 309 644 317 Z" fill="#7BFF3A" opacity=".85"/>
+ <!-- breaking high-speed wakes -->
+ <path d="M80 347 C162 324 201 361 279 348 C353 329 379 385 486 371 C551 362 604 391 693 357 C662 399 575 399 485 385 C370 404 331 357 272 366 C179 384 133 340 80 347Z" fill="url(#wake)"/>
+ <path d="M141 369 C202 367 252 400 319 381 C378 370 412 413 506 400 C415 425 363 390 319 398 C246 413 180 383 141 369 Z" fill="#38C7A3" opacity=".87"/>
+ <path d="M91 329 C127 310 143 313 174 340 C143 333 126 347 91 329Z" fill="#B6FFC7"/>
+ <path d="M235 333 C258 315 270 323 297 350 C269 336 248 353 235 333Z" fill="#38C7A3"/>
+ <path d="M700 350 Q731 327 766 341 Q731 351 709 368Z" fill="#B6FFC7"/>
+ <ellipse cx="162" cy="316" rx="6" ry="4" fill="#B6FFC7"/>
+ <ellipse cx="748" cy="374" rx="9" ry="5" fill="#38C7A3"/>
+
+</svg>
