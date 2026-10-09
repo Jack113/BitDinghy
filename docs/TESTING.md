@@ -21,9 +21,14 @@ below are official, openly licensed Linux downloads.
   4 GB. By default files go to `Downloads\BitDinghy`.
 
 ### 1. The command line
+Run this in the `E:\Ferry` folder (in the VS Code terminal):
 ```
-dinghy get "<the magnet link in quotes>" --dir C:\BitDinghy-test
+cargo run --bin dinghy -- get "<the magnet link in quotes>" --dir C:\BitDinghy-test
 ```
+`dinghy` is not installed anywhere yet, so we start it through `cargo`. (The built program is also
+at `C:\cargo-target\debug\dinghy.exe`, so `C:\cargo-target\debug\dinghy.exe get "<link>"` works
+from any folder.) The `--` separates cargo's own options from `dinghy`'s.
+
 You should see:
 1. `Saving to C:\BitDinghy-test`
 2. `Looking for people sharing this torrent... 3s` (usually under 10 seconds)
@@ -34,8 +39,8 @@ You should see:
 Also try:
 - **Stop and resume:** press Ctrl+C part-way. It prints "Stopped...". Run the same command again:
   it first says "checking files already on disk" and then carries on from where it stopped.
-- **A typo:** `dinghy get hello` should print "That isn't a magnet link..." at once and create
-  nothing.
+- **A typo:** `cargo run --bin dinghy -- get hello` should print "That isn't a magnet link..." at
+  once and create nothing.
 - **Check the file is intact** (after it finishes). Compare with the SHA256 on the Arch page:
   ```
   Get-FileHash C:\BitDinghy-test\archlinux-2026.10.01-x86_64.iso -Algorithm SHA256
