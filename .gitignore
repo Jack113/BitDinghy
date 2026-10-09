@@ -1,0 +1,23 @@
+# Build output (we also redirect this to C:\cargo-target on the dev machine)
+/target
+
+# Data that BitDinghy creates next to the program when run from the repo folder
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# Crash reports written while testing
+/crash-reports/
+
+# Editor and OS clutter (shared VS Code files are re-included on purpose)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.DS_Store
+Thumbs.db
+
+# Local tool settings
+.claude/settings.local.json
