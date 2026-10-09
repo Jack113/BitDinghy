@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug dinghy (command line)",
+      "cargo": { "args": ["build", "--bin=dinghy"], "filter": { "name": "dinghy", "kind": "bin" } },
+      "args": ["--version"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug BitDinghy (window)",
+      "cargo": { "args": ["build", "--bin=BitDinghy"], "filter": { "name": "BitDinghy", "kind": "bin" } },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
