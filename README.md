@@ -2,9 +2,10 @@
 
 A fast, lightweight, portable download client for BitTorrent and magnet links, written in Rust.
 
-> **Status: early development.** Nothing downloads yet. The project skeleton is in place and
-> features are being added one at a time (see [CHANGELOG.md](CHANGELOG.md) and
-> [TODO.md](TODO.md)).
+> **Status: early development.** You can download from a magnet link in the window or with
+> `dinghy get`. Everything else is being added one feature at a time (see
+> [CHANGELOG.md](CHANGELOG.md) and [TODO.md](TODO.md)). To try it, see
+> [docs/TESTING.md](docs/TESTING.md).
 
 ## Goals
 

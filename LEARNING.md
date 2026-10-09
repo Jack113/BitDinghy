@@ -16,6 +16,21 @@ Go, and why BitDinghy uses it. New rows are added as new ideas appear in the cod
 | **`#[derive(...)]` and attributes** | Like C# attributes, but many generate real code at compile time. | `clap` builds the command-line parser from a struct. |
 | **Immediate-mode UI** | Not retained widgets. The screen is described from scratch every frame. | How egui works: see `ui()` in `crates/bitdinghy-app/src/main.rs`. |
 
+## Seen in M1 (downloading)
+
+| Where | Idea | In your languages |
+|---|---|---|
+| `engine.rs` `DownloadStatus`, `EntryState` | **Enums that carry data**, handled with `match` | Like a C# `switch` over a sealed class hierarchy, or a Go interface with a type switch, but the compiler checks you covered every case. |
+| `engine.rs` `Mutex<...>`, `Arc<Entry>` | **Shared state across threads** | `Arc` = shared reference-counted pointer; `Mutex` = lock that *owns* the data it protects, so you can't touch the data without holding the lock. |
+| `engine.rs` `async fn add_checked` | **async/await** | Like C# `async`/`await`: `.await` marks where the task may pause. The runtime (tokio) plays the role of the thread pool. |
+| `engine.rs` `runtime.spawn(async move { ... })` | **Background tasks and `move` closures** | Like `Task.Run` or `go func()`. `move` hands the captured variables to the task, so it can outlive the function that started it. |
+| `magnet.rs`, `safety.rs` | **`Result` and `?`**, custom error types | No exceptions: a function returns `Ok(value)` or `Err(error)`; `?` means "on error, return it to my caller". |
+| `magnet.rs` `let Some(x) = ... else { return ... }` | **`let ... else`** | An early-return guard, like `if (x == null) return ...;` but it also gives you the unwrapped value. |
+| `safety.rs` `Platform` argument | **Testing code for another OS** | Passing the platform in as a parameter lets Linux tests check Windows rules. |
+| `tests/engine.rs` | **Integration tests** | Files in a crate's `tests/` folder are compiled as separate programs that use only the public API, like a separate test project. |
+| `tests/engine.rs` `#[tokio::test]` | **Async tests** | The test body runs inside a tokio runtime. |
+| `bitdinghy-app` `ui()` | **Immediate-mode UI** | The whole screen is described again every frame from the latest data; there are no widgets to keep in sync. |
+
 ## Seen so far in the skeleton
 
 - `Cargo.toml` at the root: the workspace. `workspace = true` in a crate means "use the version

@@ -17,6 +17,28 @@ project is built **one feature at a time**.
   because that would break the privacy promise.
 - Optional download source types (web links, PC-to-PC) can reuse the same engine slot. Not planned.
 
+## Noticed while building M1
+- Names that are fine on Linux but impossible on Windows (for example `Album: Title.mp3`) are
+  currently refused with a clear message. A friendlier fix is to rename them while saving, which
+  needs a custom storage layer in `dinghy-core`.
+- Overwrite policy: files that already exist in the download folder are reused or overwritten,
+  which is what makes resuming work. Consider a folder per torrent for single-file torrents, or
+  remembering which files we created (M3).
+- Seeds versus peers: librqbit reports connected and known peers but not which of them are seeds.
+  The brief asks for both, so compute it from the peers' progress if the engine allows.
+- Cancel/remove a download (M3 together with pause and resume).
+- Report to the librqbit project that `Magnet::parse` accepts an unbounded `so=` range (memory
+  exhaustion). We already work around it; whether to report it is the owner's call.
+- Keep the DHT's saved contacts in the data folder (M2). A cold start sometimes takes 30 s or more
+  to find peers.
+- Allow trackers on a private network (we drop them by default so a magnet link can't make
+  BitDinghy send requests to the router).
+- "Open folder" button on finished downloads.
+- The first run triggers a Windows Firewall prompt. Explain it in the app when port and UPnP
+  settings arrive (M11).
+- librqbit reserves each file's full size on disk at the start. On FAT32, or when the disk is
+  nearly full, that fails; give a plain-language message (M12).
+
 ## Engineering
 - Decide on accessibility (`accesskit` feature of eframe) before the first release.
 - Test the window on a VM or Remote Desktop session without a GPU. If OpenGL fails, add a `wgpu`

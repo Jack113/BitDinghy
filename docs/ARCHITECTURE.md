@@ -69,6 +69,23 @@ Crate names are the Cargo packages in `crates/`:
 - Privacy by construction: nothing in the design opens a connection except peers, trackers, the
   DHT and the user's router (UPnP).
 
+## How a download starts (M1)
+
+Everything a magnet link or torrent says comes from a stranger, so it passes three gates before
+anything is written to disk:
+
+1. **Clean the link** (`magnet.rs`). The pasted text is never given to the engine as it is. We read
+   out the fingerprint (strictly validated), a tidied name and a few ordinary internet trackers,
+   then build a fresh minimal link from only those.
+2. **Ask for the file list only** (`engine.rs`). The engine finds peers and fetches the list of
+   file names and sizes. It creates nothing on disk in this step.
+3. **Check every file name** (`safety.rs`). Names that could end up outside the download folder, or
+   that Windows treats specially (`C:evil`, `NUL`, ...), stop the download with a plain message.
+   Only after this does the real download start, reusing the file list already fetched.
+
+While it runs, `Engine::snapshot()` gives a plain picture of every download (progress, smoothed
+speed, time left, people connected) that the window and the command line both draw from.
+
 ## Where each piece appears
 
 | Milestone | What lands |
