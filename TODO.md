@@ -3,6 +3,12 @@
 Things noticed along the way. They are written here instead of being built early, because the
 project is built **one feature at a time**.
 
+## Owner checks still open
+- M1: check the downloaded Arch ISO against the SHA256 on archlinux.org (see `docs/TESTING.md`).
+  Not done yet as of the M1 merge.
+- M1: try the window (`cargo run --bin BitDinghy`) and the Windows Firewall prompt. Not reported
+  yet.
+
 ## Planned later (from the original brief)
 - "Check for updates" button that looks at the website.
 - "Only download while my VPN is connected".

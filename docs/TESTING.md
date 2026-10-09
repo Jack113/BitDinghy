@@ -41,7 +41,9 @@ Also try:
   it first says "checking files already on disk" and then carries on from where it stopped.
 - **A typo:** `cargo run --bin dinghy -- get hello` should print "That isn't a magnet link..." at
   once and create nothing.
-- **Check the file is intact** (after it finishes). Compare with the SHA256 on the Arch page:
+- **Check the file is intact** (after it finishes). *Not done by the owner yet as of the M1
+  merge.* Compare with the SHA256 on the Arch page (at the time of writing it was
+  `684ded26c63240ff4a41e8c25ee84ea6da233f557364821f13d12c2b0a9059a5`):
   ```
   Get-FileHash C:\BitDinghy-test\archlinux-2026.10.01-x86_64.iso -Algorithm SHA256
   ```
