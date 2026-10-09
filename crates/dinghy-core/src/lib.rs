@@ -9,14 +9,20 @@
 
 use std::path::PathBuf;
 
+pub mod data_dir;
 pub mod display;
 pub mod engine;
 pub mod error;
 pub mod magnet;
+pub mod profile;
 pub mod safety;
+pub mod settings;
 
+pub use data_dir::{DataDir, DataKind};
 pub use engine::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
 pub use error::{Error, Result};
+pub use profile::Profile;
+pub use settings::Settings;
 
 /// The program's display name.
 pub const APP_NAME: &str = "BitDinghy";

@@ -3,13 +3,13 @@
 
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
-use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, EngineConfig, magnet};
+use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, Profile, magnet};
 
 /// BitDinghy on the command line.
 #[derive(Parser)]
@@ -23,6 +23,32 @@ struct Cli {
 enum Command {
     /// Download a magnet link, showing progress, and stop when it is finished
     Get(GetArgs),
+    /// Show where BitDinghy keeps its files and what it remembers, or change a setting
+    Settings(SettingsArgs),
+}
+
+#[derive(Args)]
+struct SettingsArgs {
+    #[command(subcommand)]
+    action: Option<SettingsAction>,
+}
+
+#[derive(Subcommand)]
+enum SettingsAction {
+    /// Change a setting (it is remembered for next time, in the window too)
+    Set {
+        /// Which setting to change
+        key: SettingKey,
+        /// The new value, or the word "default" to go back to the standard one
+        value: String,
+    },
+}
+
+/// The settings that can be changed. More arrive with later features.
+#[derive(Clone, Copy, ValueEnum)]
+enum SettingKey {
+    /// The folder downloads are saved in
+    DownloadDir,
 }
 
 #[derive(Args)]
@@ -30,7 +56,7 @@ struct GetArgs {
     /// The magnet link. Put it in quotes, because it contains & characters
     link: String,
 
-    /// Folder to save into [default: the BitDinghy folder inside your Downloads folder]
+    /// Folder to save into, just this once [default: your remembered download folder]
     #[arg(short, long, value_name = "FOLDER")]
     dir: Option<PathBuf>,
 
@@ -55,10 +81,73 @@ struct GetArgs {
 async fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
+        Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
             println!("Try: dinghy get \"<magnet link>\"     (or dinghy --help)");
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Prints anything the user should know about their saved settings (for example a damaged file).
+fn print_notices(profile: &Profile) {
+    for notice in profile.notices() {
+        eprintln!("Note: {notice}");
+    }
+}
+
+/// `dinghy settings`: show where BitDinghy's files are and what it remembers.
+fn show_settings(profile: &Profile) {
+    println!("{} settings", dinghy_core::about());
+    match profile.data_dir() {
+        Some(dir) => println!(
+            "Data folder:   {}  ({})",
+            dir.path().display(),
+            dir.kind().describe()
+        ),
+        None => println!("Data folder:   none available, so nothing can be remembered"),
+    }
+    if let Some(path) = profile.settings_path() {
+        println!("Settings file: {}", path.display());
+    }
+    let remembered = profile.settings().download_dir.is_some();
+    println!(
+        "download-dir:  {}{}",
+        profile.settings().download_dir_or_default().display(),
+        if remembered {
+            ""
+        } else {
+            "  (standard folder)"
+        }
+    );
+}
+
+/// `dinghy settings` and `dinghy settings set <key> <value>`.
+fn settings(args: SettingsArgs) -> ExitCode {
+    let mut profile = Profile::load();
+    print_notices(&profile);
+
+    let Some(SettingsAction::Set { key, value }) = args.action else {
+        show_settings(&profile);
+        return ExitCode::SUCCESS;
+    };
+
+    let result = match key {
+        SettingKey::DownloadDir if value.eq_ignore_ascii_case("default") => {
+            profile.set_download_dir(None)
+        }
+        SettingKey::DownloadDir => profile.set_download_dir(Some(Path::new(&value))),
+    };
+    match result {
+        Ok(()) => {
+            println!("Saved. It will be used from now on, in the window too.");
+            show_settings(&profile);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -80,7 +169,13 @@ async fn get(args: GetArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut config = EngineConfig::new(args.dir.unwrap_or_else(dinghy_core::default_download_dir));
+    // Remembered settings first; `--dir` overrides the folder for this run only.
+    let profile = Profile::load();
+    print_notices(&profile);
+    let mut config = profile.engine_config();
+    if let Some(dir) = args.dir {
+        config.download_dir = dir;
+    }
     config.use_dht = !args.no_dht;
     config.accept_incoming = !args.no_listen;
     let engine = match Engine::start(config).await {

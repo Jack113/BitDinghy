@@ -29,6 +29,14 @@ pub enum Error {
 
     #[error("The download folder can't be used ({}): {reason}", .path.display())]
     DownloadDir { path: PathBuf, reason: String },
+
+    /// BitDinghy's own data folder (where settings are kept) can't be created or written to.
+    #[error("BitDinghy can't keep its files in {}: {reason}", .path.display())]
+    DataDir { path: PathBuf, reason: String },
+
+    /// Settings couldn't be saved (or must not be, for example when a newer version wrote them).
+    #[error("{0}")]
+    Settings(String),
 }
 
 /// Shorthand used throughout the crate.

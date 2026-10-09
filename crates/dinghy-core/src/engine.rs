@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use librqbit::dht::DhtPersistenceConfig;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
@@ -39,6 +40,9 @@ pub struct EngineConfig {
     pub accept_incoming: bool,
     /// Find other BitTorrent programs on the local network.
     pub local_discovery: bool,
+    /// Where the DHT keeps its saved contacts between runs, so the next start finds people faster.
+    /// It must be inside BitDinghy's own data folder. `None` means the contacts are not saved.
+    pub dht_state_file: Option<PathBuf>,
 }
 
 impl EngineConfig {
@@ -48,6 +52,7 @@ impl EngineConfig {
             use_dht: true,
             accept_incoming: true,
             local_discovery: true,
+            dht_state_file: None,
         }
     }
 }
@@ -179,11 +184,17 @@ impl Engine {
         })?;
 
         let options = SessionOptions {
-            // The DHT normally remembers its contacts in a file in the user's profile. We turn
-            // that off: BitDinghy must not write anywhere we didn't choose (portable data
-            // folders arrive in a later milestone).
+            // By default the DHT would remember its contacts in a file in the user's profile.
+            // BitDinghy must not write anywhere we didn't choose, so we either point it at a file
+            // inside our own data folder, or (when none is given) turn remembering off.
             dht: config.use_dht.then(|| DhtSessionConfig {
-                persistence: None,
+                persistence: config
+                    .dht_state_file
+                    .clone()
+                    .map(|file| DhtPersistenceConfig {
+                        dump_interval: None,
+                        config_filename: Some(file),
+                    }),
                 ..Default::default()
             }),
             persistence: None,

@@ -4,19 +4,16 @@
 // (Debug builds keep the console so log messages are visible while developing.)
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
-use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
+use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, Profile};
 use eframe::egui;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(224, 92, 92);
-
-/// A message shown under the link box.
-struct Notice {
-    text: String,
-}
+const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(214, 170, 60);
 
 /// The whole window's state.
 ///
@@ -26,11 +23,18 @@ struct Notice {
 struct BitDinghyApp {
     /// Owns the background threads the engine runs on. It must outlive the engine.
     runtime: tokio::runtime::Runtime,
+    /// Where BitDinghy's files are and what it remembers (shared with the command line).
+    profile: Profile,
     /// `Err` holds the reason the engine couldn't start, so the window can show it.
     engine: Result<Arc<Engine>, String>,
     /// The text in the link box.
     link: String,
-    notice: Option<Notice>,
+    /// A problem with the link just pasted.
+    link_problem: Option<String>,
+    /// The text in the "Download folder" box of the settings.
+    folder_text: String,
+    /// The result of the last settings change: the message, and whether it is an error.
+    settings_message: Option<(String, bool)>,
 }
 
 impl BitDinghyApp {
@@ -39,16 +43,24 @@ impl BitDinghyApp {
             .enable_all()
             .build()
             .expect("couldn't start BitDinghy's background threads");
-        let config = EngineConfig::new(dinghy_core::default_download_dir());
+        let profile = Profile::load();
         let engine = runtime
-            .block_on(Engine::start(config))
+            .block_on(Engine::start(profile.engine_config()))
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        let folder_text = profile
+            .settings()
+            .download_dir_or_default()
+            .display()
+            .to_string();
         Self {
             runtime,
+            profile,
             engine,
             link: String::new(),
-            notice: None,
+            link_problem: None,
+            folder_text,
+            settings_message: None,
         }
     }
 
@@ -56,13 +68,80 @@ impl BitDinghyApp {
         match engine.add_magnet(&self.link, Vec::new()) {
             Ok(_) => {
                 self.link.clear();
-                self.notice = None;
+                self.link_problem = None;
             }
-            Err(error) => {
-                self.notice = Some(Notice {
-                    text: error.to_string(),
+            Err(error) => self.link_problem = Some(error.to_string()),
+        }
+    }
+
+    /// Remembers the folder typed in the settings (or the standard folder when `use_standard`).
+    fn save_download_folder(&mut self, use_standard: bool) {
+        // People often paste a path with quotation marks around it.
+        let typed = self.folder_text.trim().trim_matches('"').trim();
+        let result = if use_standard || typed.is_empty() {
+            self.profile.set_download_dir(None)
+        } else {
+            self.profile.set_download_dir(Some(Path::new(typed)))
+        };
+        self.settings_message = Some(match result {
+            Ok(()) => {
+                let now = self.profile.settings().download_dir_or_default();
+                self.folder_text = now.display().to_string();
+                (
+                    format!(
+                        "Saved: {}. It is used the next time you start BitDinghy.",
+                        now.display()
+                    ),
+                    false,
+                )
+            }
+            Err(error) => (error.to_string(), true),
+        });
+    }
+
+    /// The settings section: where BitDinghy keeps its files, and the download folder.
+    fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        let mut save = false;
+        let mut use_standard = false;
+        // Open it by default when the engine couldn't start, because the fix is probably here.
+        egui::CollapsingHeader::new("Settings")
+            .default_open(self.engine.is_err())
+            .show(ui, |ui| {
+                match self.profile.data_dir() {
+                    Some(dir) => {
+                        ui.label(format!(
+                            "BitDinghy keeps its files in {} ({}).",
+                            dir.path().display(),
+                            dir.kind().describe()
+                        ));
+                    }
+                    None => {
+                        ui.colored_label(
+                            ERROR_COLOR,
+                            "There is nowhere to keep BitDinghy's files, so settings can't be \
+                             remembered.",
+                        );
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Download folder:");
+                    let width = (ui.available_width() - 230.0).max(120.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.folder_text).desired_width(width));
+                    save |= ui.button("Save").clicked();
+                    use_standard |= ui.button("Use the standard folder").clicked();
                 });
-            }
+                ui.small("A new download folder is used the next time you start BitDinghy.");
+                if let Some((message, is_error)) = &self.settings_message {
+                    let color = if *is_error {
+                        ERROR_COLOR
+                    } else {
+                        ui.visuals().text_color()
+                    };
+                    ui.colored_label(color, message);
+                }
+            });
+        if save || use_standard {
+            self.save_download_folder(use_standard);
         }
     }
 }
@@ -70,6 +149,11 @@ impl BitDinghyApp {
 impl eframe::App for BitDinghyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.heading(dinghy_core::about());
+        for notice in self.profile.notices() {
+            ui.colored_label(WARNING_COLOR, notice);
+        }
+        self.draw_settings(ui);
+        ui.separator();
 
         // If the engine couldn't start there is nothing else to show.
         let engine = match &self.engine {
@@ -100,8 +184,8 @@ impl eframe::App for BitDinghyApp {
                 self.submit_link(&engine);
             }
         });
-        if let Some(notice) = &self.notice {
-            ui.colored_label(ERROR_COLOR, &notice.text);
+        if let Some(problem) = &self.link_problem {
+            ui.colored_label(ERROR_COLOR, problem);
         }
 
         ui.add_space(4.0);
@@ -191,8 +275,8 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([820.0, 520.0])
-            .with_min_inner_size([480.0, 300.0]),
+            .with_inner_size([820.0, 560.0])
+            .with_min_inner_size([480.0, 320.0]),
         ..Default::default()
     };
 

@@ -1,0 +1,3 @@
+# BitDinghy settings. It is safe to edit this by hand while BitDinghy is closed.
+version = 1
+download_dir = "C:/Games/Downloads"

@@ -32,6 +32,11 @@ librqbit = { version = "=9.0.1", default-features = false, features = ["rust-tls
 
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
+# Reading and writing the settings file. Cargo.lock holds toml at 1.1.6 (a month old) rather than
+# the release published on the day it was added. Two of its helper crates (toml_parser,
+# toml_datetime) are newer than we'd like but are required by toml 1.1.6 itself; see TODO.md.
+toml = "1"
+serde = { version = "1", features = ["derive"] }
 # Our own tokio use (librqbit already brings tokio in; we just ask for the parts we call directly).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 # Parses magnet links (we validate them ourselves, see dinghy-core/src/magnet.rs).
