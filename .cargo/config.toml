@@ -1,0 +1,10 @@
+# Settings that apply to every cargo command run inside this repository.
+
+# Windows: link the C runtime into the .exe. Without this, the program needs the
+# "Visual C++ Redistributable" installed on the PC. With it, BitDinghy only uses DLLs that
+# ship with Windows itself, so "download, unzip, run" works on a clean machine.
+# (Tested on a practice build: VCRUNTIME140.dll disappears from the dependency list.)
+#
+# Note: setting the RUSTFLAGS environment variable REPLACES this, so CI must not set it.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

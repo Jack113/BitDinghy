@@ -1,0 +1,19 @@
+[package]
+name = "bitdinghy-app"
+description = "The BitDinghy window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# The crate is called bitdinghy-app, but the program people double-click is BitDinghy.exe.
+[[bin]]
+name = "BitDinghy"
+path = "src/main.rs"
+
+[dependencies]
+dinghy-core.workspace = true
+eframe.workspace = true

@@ -1,0 +1,41 @@
+# BitDinghy: one Cargo "workspace" (like a .sln or a Go workspace) holding three crates.
+#   dinghy-core    - the shared engine. All real logic lives here.
+#   dinghy-cli     - the `dinghy` command-line program (thin front-end).
+#   bitdinghy-app  - the `BitDinghy` window (thin front-end).
+[workspace]
+resolver = "3"
+members = [
+    "crates/dinghy-core",
+    "crates/dinghy-cli",
+    "crates/bitdinghy-app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+# eframe 0.36 needs Rust 1.95, so that is our floor too.
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Jack113/BitDinghy"
+authors = ["BitDinghy contributors"]
+publish = false
+
+# Dependency versions are chosen once, here, and each crate opts in with `workspace = true`.
+[workspace.dependencies]
+dinghy-core = { path = "crates/dinghy-core" }
+
+# The BitTorrent engine. Pinned to ONE exact version on purpose: a new version may change
+# its behaviour or saved files, so upgrading is a deliberate step, never automatic.
+# `rust-tls` = pure-Rust TLS and hardware-accelerated SHA-1 (no OpenSSL to install, which keeps
+# the program self-contained). We turn off the default features we don't use (HTTP API client).
+librqbit = { version = "=9.0.1", default-features = false, features = ["rust-tls"] }
+
+clap = { version = "4", features = ["derive"] }
+
+# The window toolkit. `glow` = OpenGL drawing (smaller and quicker to start than wgpu).
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+
+[profile.release]
+# Slower to compile, smaller and faster to run. Size/speed tuning is revisited at the first release.
+lto = "fat"
+codegen-units = 1

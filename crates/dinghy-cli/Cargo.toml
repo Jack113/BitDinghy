@@ -1,0 +1,19 @@
+[package]
+name = "dinghy-cli"
+description = "The `dinghy` command-line program."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# The crate is called dinghy-cli, but the program people type is `dinghy`.
+[[bin]]
+name = "dinghy"
+path = "src/main.rs"
+
+[dependencies]
+dinghy-core.workspace = true
+clap.workspace = true
