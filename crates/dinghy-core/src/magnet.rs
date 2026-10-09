@@ -68,9 +68,13 @@ pub fn clean_display_name(name: &str) -> Option<String> {
     Some(collapsed.chars().take(MAX_NAME_CHARS).collect())
 }
 
-/// Accepts only ordinary internet trackers. Addresses that point back at this computer or at
-/// the local network are dropped, so a magnet link can't make BitDinghy send requests to your
-/// router or other devices.
+/// Accepts only ordinary internet trackers. Trackers written as an address that points back at
+/// this computer or at the local network (or with an obviously local name such as `localhost` or
+/// `printer.local`) are dropped.
+///
+/// This is a first line of defence, not a complete one: it looks at how the tracker is WRITTEN. A
+/// normal-looking host name that an attacker has pointed at a local address would still get
+/// through, and closing that needs control over the engine's own connections (see `TODO.md`).
 fn clean_tracker(value: &str) -> Option<String> {
     if value.len() > MAX_TRACKER_BYTES {
         return None;

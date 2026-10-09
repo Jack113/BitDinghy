@@ -31,8 +31,17 @@ project is built **one feature at a time**.
   exhaustion). We already work around it; whether to report it is the owner's call.
 - Keep the DHT's saved contacts in the data folder (M2). A cold start sometimes takes 30 s or more
   to find peers.
-- Allow trackers on a private network (we drop them by default so a magnet link can't make
-  BitDinghy send requests to the router).
+- Tracker filter gap (found in the M1 security review): we drop trackers written as a local
+  address, but a normal-looking host name that an attacker points at `192.168.x.x` still gets
+  through, and the engine would send a web request to it. Closing it properly needs control over
+  the engine's own connections (a custom connector that checks the address it resolved to).
+  Peers handed out by trackers, the DHT or PEX can also be local addresses; that is true of every
+  BitTorrent client.
+- Allow trackers on a private network (we drop them by default).
+- Same-name overwrite (M1 security review): because downloads reuse files that already exist
+  (needed for resuming), a torrent that has a file with the same name as an earlier download in
+  the same folder will replace it. Fix with M3: remember which files each torrent created, or give
+  every torrent its own folder.
 - "Open folder" button on finished downloads.
 - The first run triggers a Windows Firewall prompt. Explain it in the app when port and UPnP
   settings arrive (M11).

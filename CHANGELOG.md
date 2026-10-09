@@ -19,7 +19,8 @@ format is called out here.
   (`NUL`, `CON`).
 - **Magnet links are cleaned before use.** Only the torrent fingerprint, a tidied name and a few
   ordinary internet trackers are kept. This blocks a hostile `so=` file-range that could make the
-  engine run out of memory, and trackers that point at your own computer or local network.
+  engine run out of memory, and trackers written as an address on your own computer or local
+  network. (A host name that is secretly pointed at a local address is not caught yet.)
 - Project skeleton: a Cargo workspace with the shared engine (`dinghy-core`), the `dinghy`
   command line and the `BitDinghy` window.
 - Automatic checks on Windows and Linux: formatting, lints, tests, plus a license and
