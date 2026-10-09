@@ -4,25 +4,78 @@
 //! `crates/bitdinghy-app/assets` are made from them by `tools/make-app-images.ps1`. They are
 //! compiled into the program, so there are no extra files to carry around.
 //!
-//! The colors are the ones printed on the brand palette sheet (`assets/brand/palette.png`).
+//! The colors are the brand's own design tokens from `assets/themes/themes.css` (the names match),
+//! and a test checks them against `assets/brand/colors.json` so the two can't drift apart.
 
 use std::io::Cursor;
 
 use eframe::egui::{self, Color32, Stroke, Theme};
 
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x07, 0x1A, 0x2B);
-pub const SURFACE: Color32 = Color32::from_rgb(0x1E, 0x31, 0x46);
-pub const SOFT_GRAY: Color32 = Color32::from_rgb(0xD6, 0xD9, 0xDF);
-pub const PRIMARY_GREEN: Color32 = Color32::from_rgb(0x57, 0xF0, 0x00);
-pub const MINT: Color32 = Color32::from_rgb(0xB6, 0xFF, 0xC7);
-pub const DEEP_GREEN: Color32 = Color32::from_rgb(0x1F, 0x8F, 0x46);
-pub const ACCENT_TEAL: Color32 = Color32::from_rgb(0x38, 0xC7, 0xA3);
+/// The colors of one theme.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub background: Color32,
+    pub surface: Color32,
+    pub surface_raised: Color32,
+    pub text: Color32,
+    pub text_muted: Color32,
+    pub border: Color32,
+    pub link: Color32,
+    /// The brand green used for buttons and progress.
+    pub accent: Color32,
+    /// Text drawn on top of `accent`.
+    pub accent_foreground: Color32,
+    pub success: Color32,
+    pub info: Color32,
+    pub warning: Color32,
+    pub danger: Color32,
+}
 
-/// A line colour that sits quietly on the dark surfaces.
-const DARK_LINE: Color32 = Color32::from_rgb(0x2C, 0x45, 0x5F);
-const LIGHT_BACKGROUND: Color32 = Color32::from_rgb(0xF4, 0xF8, 0xFB);
-const LIGHT_SURFACE: Color32 = Color32::from_rgb(0xE6, 0xEE, 0xF4);
-const LIGHT_LINE: Color32 = Color32::from_rgb(0xC9, 0xD6, 0xE0);
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// The dark theme (the brand's main look).
+pub const DARK: Palette = Palette {
+    background: rgb(0x071A2B),
+    surface: rgb(0x1E3146),
+    surface_raised: rgb(0x253C50),
+    text: rgb(0xF7FAFC),
+    text_muted: rgb(0xD6D9DE),
+    border: rgb(0x35516A),
+    link: rgb(0xB6FFC7),
+    accent: rgb(0x57F000),
+    accent_foreground: rgb(0x071A2B),
+    success: rgb(0x57F000),
+    info: rgb(0x38C7A3),
+    warning: rgb(0xFFE84A),
+    danger: rgb(0xFF373E),
+};
+
+/// The light theme. It uses the darker Deep Green, because the bright green is hard to read on
+/// white.
+pub const LIGHT: Palette = Palette {
+    background: rgb(0xF5F7F9),
+    surface: rgb(0xFFFFFF),
+    surface_raised: rgb(0xEAF0F3),
+    text: rgb(0x071A2B),
+    text_muted: rgb(0x465C6E),
+    border: rgb(0xC7D2DC),
+    link: rgb(0x136A4D),
+    accent: rgb(0x1F8F46),
+    accent_foreground: rgb(0xFFFFFF),
+    success: rgb(0x17733B),
+    info: rgb(0x126A63),
+    warning: rgb(0x956200),
+    danger: rgb(0xB3262C),
+};
+
+pub fn palette(theme: Theme) -> Palette {
+    match theme {
+        Theme::Dark => DARK,
+        Theme::Light => LIGHT,
+    }
+}
 
 const LOGO_ON_DARK: &[u8] = include_bytes!("../assets/logo-on-dark.png");
 const LOGO_ON_LIGHT: &[u8] = include_bytes!("../assets/logo-on-light.png");
@@ -47,11 +100,15 @@ fn decode_png(bytes: &[u8]) -> Option<Rgba> {
     let pixels = match info.color_type {
         png::ColorType::Rgba => data.to_vec(),
         png::ColorType::Rgb => data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         png::ColorType::GrayscaleAlpha => data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
@@ -107,64 +164,49 @@ impl Logos {
     }
 }
 
-/// The colour of the filled part of a progress bar.
-pub fn progress_fill(theme: Theme) -> Color32 {
-    match theme {
-        Theme::Dark => PRIMARY_GREEN,
-        Theme::Light => DEEP_GREEN,
-    }
-}
-
 /// Gives the window the brand look, in both the dark and the light theme. The window follows the
 /// computer's own light/dark setting.
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_visuals_of(Theme::Dark, dark_visuals());
-    ctx.set_visuals_of(Theme::Light, light_visuals());
+    ctx.set_visuals_of(Theme::Dark, visuals_for(Theme::Dark));
+    ctx.set_visuals_of(Theme::Light, visuals_for(Theme::Light));
 }
 
-fn dark_visuals() -> egui::Visuals {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BACKGROUND;
-    visuals.window_fill = SURFACE;
-    visuals.faint_bg_color = SURFACE;
-    visuals.extreme_bg_color = Color32::from_rgb(0x04, 0x11, 0x1D);
-    visuals.hyperlink_color = ACCENT_TEAL;
-    visuals.selection.bg_fill = DEEP_GREEN;
-    visuals.selection.stroke = Stroke::new(1.0, MINT);
+fn visuals_for(theme: Theme) -> egui::Visuals {
+    let p = palette(theme);
+    let mut visuals = match theme {
+        Theme::Dark => egui::Visuals::dark(),
+        Theme::Light => egui::Visuals::light(),
+    };
+    visuals.panel_fill = p.background;
+    visuals.window_fill = p.surface;
+    visuals.faint_bg_color = p.surface_raised;
+    // The inside of text boxes: a touch darker than the page in the dark theme, white in the light.
+    visuals.extreme_bg_color = match theme {
+        Theme::Dark => rgb(0x04111D),
+        Theme::Light => p.surface,
+    };
+    visuals.hyperlink_color = p.link;
+    // Secondary text (hints, the version number) is the brand's muted gray.
+    visuals.weak_text_color = Some(p.text_muted);
+    visuals.selection.bg_fill = match theme {
+        Theme::Dark => rgb(0x1F8F46),
+        Theme::Light => rgb(0xB6FFC7),
+    };
+    visuals.selection.stroke = Stroke::new(1.0, p.text);
 
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, SOFT_GRAY);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, DARK_LINE);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, SOFT_GRAY);
-    visuals.widgets.inactive.weak_bg_fill = SURFACE;
-    visuals.widgets.inactive.bg_fill = SURFACE;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, DARK_LINE);
-    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x2A, 0x44, 0x5E);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, Color32::WHITE);
-    visuals.widgets.active.weak_bg_fill = DEEP_GREEN;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
-    visuals
-}
-
-fn light_visuals() -> egui::Visuals {
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = LIGHT_BACKGROUND;
-    visuals.window_fill = Color32::WHITE;
-    visuals.faint_bg_color = LIGHT_SURFACE;
-    visuals.extreme_bg_color = Color32::WHITE;
-    visuals.hyperlink_color = DEEP_GREEN;
-    visuals.selection.bg_fill = MINT;
-    visuals.selection.stroke = Stroke::new(1.0, DEEP_GREEN);
-
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, BACKGROUND);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LIGHT_LINE);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, BACKGROUND);
-    visuals.widgets.inactive.weak_bg_fill = LIGHT_SURFACE;
-    visuals.widgets.inactive.bg_fill = LIGHT_SURFACE;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, LIGHT_LINE);
-    visuals.widgets.hovered.weak_bg_fill = MINT;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, BACKGROUND);
-    visuals.widgets.active.weak_bg_fill = DEEP_GREEN;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    let line = Stroke::new(1.0, p.border);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.noninteractive.bg_stroke = line;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    visuals.widgets.inactive.bg_fill = p.surface;
+    visuals.widgets.inactive.weak_bg_fill = p.surface;
+    visuals.widgets.inactive.bg_stroke = line;
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, p.text);
+    visuals.widgets.hovered.weak_bg_fill = p.surface_raised;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.5, p.accent_foreground);
+    visuals.widgets.active.weak_bg_fill = p.accent;
+    visuals.widgets.active.bg_fill = p.accent;
     visuals
 }
 
@@ -172,13 +214,48 @@ fn light_visuals() -> egui::Visuals {
 mod tests {
     use super::*;
 
+    /// Reads `#RRGGBB` for `key` out of the brand pack's `colors.json`.
+    fn color_in_pack(key: &str) -> Color32 {
+        let json = include_str!("../../../assets/brand/colors.json");
+        let after_key = json
+            .split(&format!("\"{key}\""))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{key} is not in colors.json"));
+        let hex = after_key
+            .split('"')
+            .nth(1) // the opening quote of the value is the first quote after the key
+            .unwrap_or_else(|| panic!("{key} has no value"))
+            .trim_start_matches('#');
+        // `split('"')` on `: "#071A2B", ...` gives ["...: ", "#071A2B", ...], so nth(1) is the value.
+        rgb(u32::from_str_radix(hex, 16).expect("a hex color"))
+    }
+
+    #[test]
+    fn the_colors_in_the_code_match_the_brand_pack() {
+        assert_eq!(DARK.background, color_in_pack("background"));
+        assert_eq!(DARK.surface, color_in_pack("surface"));
+        assert_eq!(DARK.text_muted, color_in_pack("softGray"));
+        assert_eq!(DARK.accent, color_in_pack("primaryGreen"));
+        assert_eq!(DARK.link, color_in_pack("mint"));
+        assert_eq!(DARK.info, color_in_pack("accentTeal"));
+        // The light theme uses the darker green for buttons and text.
+        assert_eq!(LIGHT.accent, color_in_pack("deepGreen"));
+        assert_eq!(LIGHT.text, color_in_pack("background"));
+    }
+
     #[test]
     fn the_window_icon_is_a_square_256_picture() {
         let icon = window_icon().expect("the icon should decode");
         assert_eq!((icon.width, icon.height), (256, 256));
         assert_eq!(icon.rgba.len(), 256 * 256 * 4);
         // It is not blank: some pixels are visible.
-        assert!(icon.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(
+            icon.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0)
+        );
     }
 
     #[test]

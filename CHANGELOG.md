@@ -10,6 +10,18 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Portable data folder.** BitDinghy keeps its files in a `data` folder next to the program, so you
+  can copy the whole folder to a USB stick. If that folder can't be written to, it uses your user
+  settings folder instead. `BitDinghy.exe` and `dinghy.exe` share it.
+- **Remembered settings.** The download folder is remembered between runs, from the window
+  (**Settings**) or the command line (`dinghy settings`, `dinghy settings set download-dir <folder>`).
+  The settings file is versioned, saved safely, and never destroyed: a damaged file is kept aside,
+  and a file from a newer BitDinghy is left untouched. `dinghy get --dir` still overrides the folder
+  for one run.
+- The DHT (the shared phone book of peers) now keeps its saved contacts inside the data folder.
+- **Brand look.** The window uses the BitDinghy logo, colors and icon, in a dark and a light theme
+  that follow your Windows setting. `BitDinghy.exe` and `dinghy.exe` have the brand icon and a
+  Details tab with the product name, description and version.
 - **Download from a magnet link**, in both the window and the command line
   (`dinghy get "<link>"`). Shows progress, speed, time left and how many people you are connected
   to. An interrupted download carries on where it stopped when you run it again.
@@ -27,6 +39,10 @@ format is called out here.
   vulnerability check of all dependencies.
 - Dual license: MIT OR Apache-2.0.
 
+### Fixed
+- Closing the window no longer crashes the program (it panicked while shutting down).
+
 ### Known limits
-- No pause/resume buttons, no saved download list, no `.torrent` files, no settings yet.
+- A new download folder is used from the next start, not immediately.
+- No pause/resume buttons, no saved download list, no `.torrent` files yet, and only one setting.
 - The torrent engine does not support encrypted connections yet.

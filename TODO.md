@@ -4,10 +4,28 @@ Things noticed along the way. They are written here instead of being built early
 project is built **one feature at a time**.
 
 ## Owner checks still open
-- M1: check the downloaded Arch ISO against the SHA256 on archlinux.org (see `docs/TESTING.md`).
-  Not done yet as of the M1 merge.
-- M1: try the window (`cargo run --bin BitDinghy`) and the Windows Firewall prompt. Not reported
-  yet.
+- M2: run the checks in `docs/TESTING.md` (section M2), including the window.
+- Decide whether `assets/source/` (two PNGs, about 2.7 MB) stays in git history. It was committed by
+  VS Code (`69b0d89`); removing it is easiest before the branch is first pushed.
+- Rename the project folder to `E:\BitDinghy` (needs VS Code closed on it).
+- Done: the M1 download was checked against the published SHA256 and matched (2026-10-09).
+
+## Noticed while building M2
+- Changing the download folder only applies on the next start. Applying it live fits M3, when the
+  engine and the saved list get reworked.
+- No folder-picker button yet: the folder is typed. A native dialog (`rfd`) is the way, but its
+  Linux back end needs GTK or a portal, so decide with the Linux port.
+- The Inter font from the brand sheet: no font file in the pack, so egui's built-in font is used.
+- Linux AppImage: the program sits inside a read-only image, so the portable data folder must be
+  placed next to the `.AppImage` file itself (use the `APPIMAGE` environment variable), not next to
+  the program inside it.
+- The icon and Details tab are added by `build.rs`; if the Windows resource compiler is missing it
+  only warns. The release workflow should fail instead, and check the Details tab exists.
+- `toml_parser` 1.1.5 and `toml_datetime` 1.1.2 were published a day before they were added, and the
+  `toml` crate we chose requires them. Re-check them with `cargo deny` and a fresh look at the
+  advisories after a couple of weeks.
+- Brand pack extras not used yet: `web/` (favicons, OG image, manifest) and `themes/*.css` are for
+  the website milestone.
 
 ## Planned later (from the original brief)
 - "Check for updates" button that looks at the website.
@@ -68,7 +86,7 @@ project is built **one feature at a time**.
 - Generate the third-party license notices file with `cargo-about` before the first release.
 - Privacy check before the first release: confirm with a network monitor that BitDinghy only
   talks to peers, trackers, the DHT and the router.
-- Optional: rename the local folder `E:\Ferry` to `BitDinghy`. The dev drive is a FAT32 USB stick;
+- Optional: rename the local folder `E:\BitDinghy` to `BitDinghy`. The dev drive is a FAT32 USB stick;
   builds already go to `C:\cargo-target`.
 
 ## Website and release milestone

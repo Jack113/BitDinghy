@@ -3,6 +3,93 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M2: portable data folder, remembered settings, and the branded window
+
+Everything here is **safe to try**: it uses no internet (except the optional last step) and only
+changes BitDinghy's own settings. Run the commands in the project folder (`E:\BitDinghy`) in the
+VS Code terminal. A development build keeps its files in `C:\cargo-target\debug\data`, because
+that is where the programs are built.
+
+First build once: `cargo build --workspace`.
+
+### A. The command line
+
+1. **See where things are.**
+   ```
+   cargo run --bin dinghy -- settings
+   ```
+   You should see `Data folder: C:\cargo-target\debug\data (next to the program, so it travels with
+   it)`, the settings file path, and `download-dir: ... (standard folder)`.
+
+2. **Change the download folder.**
+   ```
+   cargo run --bin dinghy -- settings set download-dir C:\BitDinghy-test2
+   ```
+   It says `Saved.` and creates the folder. Open `C:\cargo-target\debug\data\settings.toml` in a
+   text editor: it is a short readable file with `version = 1` and `download_dir = ...`.
+
+3. **Check it is remembered.** Run step 1 again (a brand-new run of the program). It now shows your
+   folder, without `(standard folder)`.
+
+4. **Go back to the standard folder.**
+   ```
+   cargo run --bin dinghy -- settings set download-dir default
+   ```
+
+5. **A folder that can't work is refused.**
+   ```
+   cargo run --bin dinghy -- settings set download-dir C:\Windows\notepad.exe
+   ```
+   It says `...that is a file, not a folder` and changes nothing.
+
+6. **A damaged file is never thrown away.** Open `settings.toml`, replace everything with the text
+   `this is [broken`, save, and run step 1. You should see a `Note:` saying BitDinghy couldn't read
+   your settings. Look in the data folder: your damaged file was **kept** as
+   `settings.toml.broken-<number>`, and the program carried on with standard settings.
+
+7. **A file from a newer BitDinghy is protected.** Put `version = 99` in `settings.toml` and run
+   step 1: a note says the settings were saved by a newer BitDinghy. Then try step 2: it **refuses**
+   to save, and the file is untouched. (Delete `settings.toml` afterwards.)
+
+8. **It really is portable.** Copy `dinghy.exe` and the `data` folder from
+   `C:\cargo-target\debug` to a new folder (for example `C:\Temp\copy`), then run
+   `C:\Temp\copy\dinghy.exe settings`. The data folder shown is the one next to *that* copy, with the
+   settings you had. Copying the folder to a USB stick works the same way.
+
+9. **`get` uses the remembered folder.** Set a folder (step 2), then start a download from
+   `docs\TESTING.md`'s M1 section and press Ctrl+C after a few seconds. The first line says
+   `Saving to <your folder>`. (`--dir` still overrides it for one run.)
+
+### B. The window
+
+```
+cargo run --bin BitDinghy
+```
+
+1. **The brand look.** Deep navy background, the BitDinghy logo at the top with the version beside
+   it, and the sailboat icon in the title bar and on the taskbar.
+2. **Light and dark.** Change Windows' own mode (*Settings > Personalization > Colors > Choose your
+   mode*). The window follows: navy with white lettering and a lime-green progress bar in dark mode;
+   a pale background, navy lettering and a darker green in light mode. The logo switches too.
+3. **Settings.** Click **Settings**. It shows where BitDinghy keeps its files. Type a folder and
+   press **Save**: a message says it was saved and will be used from the next start. Close the
+   window, open it again: the new folder shows next to "Saving to:". **Use the standard folder**
+   puts it back. Typing a path that can't work (for example a file) shows a red message.
+4. **Closing.** Close the window with the X: it closes at once and quietly. (Earlier versions
+   crashed on close; that is fixed and now has a test.)
+5. **The program's icon in Explorer.** Open `C:\cargo-target\debug`: `BitDinghy.exe` and
+   `dinghy.exe` have the sailboat icon. Right-click `BitDinghy.exe` > Properties > **Details**: the
+   product name is BitDinghy, the version is 0.0.1, and there is a description.
+6. **Optional: the colors with real downloads** (uses data). Paste the magnet link from the M1
+   section below, watch the teal "Looking for people..." message, the lime-green progress bar and
+   the green "Finished" line, and close the window after a few seconds.
+
+### Already tested automatically
+`cargo test --workspace` runs 93 tests. For this feature they include: the fallback to the user
+profile when the folder next to the program can't be written; a version-1 settings file that must
+load forever; damaged and newer files being left alone; the remembered folder surviving a restart
+in a separate program run; and the window shutting down without crashing.
+
 ## M1: download from a magnet link
 
 ### What you need
@@ -21,7 +108,7 @@ below are official, openly licensed Linux downloads.
   4 GB. By default files go to `Downloads\BitDinghy`.
 
 ### 1. The command line
-Run this in the `E:\Ferry` folder (in the VS Code terminal):
+Run this in the `E:\BitDinghy` folder (in the VS Code terminal):
 ```
 cargo run --bin dinghy -- get "<the magnet link in quotes>" --dir C:\BitDinghy-test
 ```

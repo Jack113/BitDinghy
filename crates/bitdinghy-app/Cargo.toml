@@ -22,3 +22,6 @@ png.workspace = true
 
 [build-dependencies]
 winresource.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

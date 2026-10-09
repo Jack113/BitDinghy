@@ -16,6 +16,20 @@ Go, and why BitDinghy uses it. New rows are added as new ideas appear in the cod
 | **`#[derive(...)]` and attributes** | Like C# attributes, but many generate real code at compile time. | `clap` builds the command-line parser from a struct. |
 | **Immediate-mode UI** | Not retained widgets. The screen is described from scratch every frame. | How egui works: see `ui()` in `crates/bitdinghy-app/src/main.rs`. |
 
+## Seen in M2 (settings and the brand look)
+
+| Where | Idea | In your languages |
+|---|---|---|
+| `settings.rs` `#[derive(Serialize, Deserialize)]` | **serde**: turn a struct into a file and back | Like `System.Text.Json` / Jackson / Go's `encoding/json` struct tags, but generated at compile time. `#[serde(default)]` means "a missing field takes its default", which is what lets old files load. |
+| `settings.rs` `save` | **Atomic write** (temp file + rename) | Same idea as writing to a temp file then `File.Move(..., overwrite)`: readers see the old file or the new one, never half of each. |
+| `settings.rs` `Loaded { settings, problem }` | **Returning a value AND a warning** instead of throwing | Errors you can recover from are ordinary data here, not exceptions. |
+| `settings.rs` `MIGRATIONS` | **A list of function pointers** (`&[fn(&mut Table)]`) | Like a `List<Action<Table>>` of upgrade steps run in order. |
+| `data_dir.rs` `choose(portable, user_profile)` | **Pass the inputs in, so tests can try every case** | A pure function of its arguments is easy to test without touching the real machine. |
+| `profile.rs` | **Never-failing constructors**: `Profile::load()` returns a usable value even after errors | Failure is turned into a notice for the user, not a crash. |
+| `bitdinghy-app/build.rs` | **Build scripts**: Rust code that runs at compile time | Like an MSBuild task or a Go `go generate` step; here it embeds the icon into the `.exe`. |
+| `brand.rs` `include_bytes!` | **Compiling a file into the program** | Like an embedded resource in .NET: no loose files to ship. |
+| `main.rs` `shut_down` | **A runtime-context bug** | `tokio::time::timeout(..)` must be created *inside* the runtime. It's like touching a UI control from the wrong thread: it compiles, then fails when run. |
+
 ## Seen in M1 (downloading)
 
 | Where | Idea | In your languages |

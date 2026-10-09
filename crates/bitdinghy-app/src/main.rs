@@ -14,8 +14,26 @@ use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, wai
 use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, Profile};
 use eframe::egui;
 
-const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(224, 92, 92);
-const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(214, 170, 60);
+/// The brand's error color for the current theme (light or dark), so it stays readable on both
+/// backgrounds.
+fn error_color(ui: &egui::Ui) -> egui::Color32 {
+    brand::palette(ui.ctx().theme()).danger
+}
+
+/// The brand's warning color for the current theme.
+fn warning_color(ui: &egui::Ui) -> egui::Color32 {
+    brand::palette(ui.ctx().theme()).warning
+}
+
+/// Green: something finished successfully.
+fn success_color(ui: &egui::Ui) -> egui::Color32 {
+    brand::palette(ui.ctx().theme()).success
+}
+
+/// Teal: something is in progress.
+fn info_color(ui: &egui::Ui) -> egui::Color32 {
+    brand::palette(ui.ctx().theme()).info
+}
 
 /// How tall the logo is drawn at the top of the window, in points.
 const LOGO_HEIGHT: f32 = 48.0;
@@ -148,7 +166,7 @@ impl BitDinghyApp {
                     }
                     None => {
                         ui.colored_label(
-                            ERROR_COLOR,
+                            error_color(ui),
                             "There is nowhere to keep BitDinghy's files, so settings can't be \
                              remembered.",
                         );
@@ -164,7 +182,7 @@ impl BitDinghyApp {
                 ui.small("A new download folder is used the next time you start BitDinghy.");
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
-                        ERROR_COLOR
+                        error_color(ui)
                     } else {
                         ui.visuals().text_color()
                     };
@@ -181,7 +199,7 @@ impl eframe::App for BitDinghyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw_header(ui);
         for notice in self.profile.notices() {
-            ui.colored_label(WARNING_COLOR, notice);
+            ui.colored_label(warning_color(ui), notice);
         }
         self.draw_settings(ui);
         ui.separator();
@@ -191,7 +209,7 @@ impl eframe::App for BitDinghyApp {
             Ok(engine) => engine.clone(),
             Err(message) => {
                 ui.add_space(8.0);
-                ui.colored_label(ERROR_COLOR, message);
+                ui.colored_label(error_color(ui), message);
                 return;
             }
         };
@@ -216,7 +234,7 @@ impl eframe::App for BitDinghyApp {
             }
         });
         if let Some(problem) = &self.link_problem {
-            ui.colored_label(ERROR_COLOR, problem);
+            ui.colored_label(error_color(ui), problem);
         }
 
         ui.add_space(4.0);
@@ -239,12 +257,21 @@ impl eframe::App for BitDinghyApp {
     /// Called when the window closes: stop sharing and close connections tidily.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Ok(engine) = &self.engine {
-            let _ = self.runtime.block_on(tokio::time::timeout(
-                Duration::from_secs(3),
-                engine.shutdown(),
-            ));
+            shut_down(&self.runtime, engine);
         }
     }
+}
+
+/// Stops the engine and waits up to three seconds for it.
+///
+/// The timeout has to be created INSIDE the `async` block. Written as
+/// `block_on(tokio::time::timeout(..))`, the timeout is built before `block_on` has entered the
+/// runtime, and tokio panics with "there is no reactor running". That crashed the window every time
+/// it was closed (found by starting the real program and closing it).
+fn shut_down(runtime: &tokio::runtime::Runtime, engine: &Engine) {
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(Duration::from_secs(3), engine.shutdown()).await;
+    });
 }
 
 /// Draws one download: its name, then a progress bar and numbers (or a message).
@@ -255,18 +282,21 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
         DownloadStatus::GettingInfo => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(waiting_text(download.waiting_for.unwrap_or_default()));
+                ui.colored_label(
+                    info_color(ui),
+                    waiting_text(download.waiting_for.unwrap_or_default()),
+                );
             });
         }
         DownloadStatus::Checking => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Checking files already on disk...");
+                ui.colored_label(info_color(ui), "Checking files already on disk...");
             });
         }
         DownloadStatus::Failed => {
             let message = download.error.as_deref().unwrap_or("The download failed.");
-            ui.colored_label(ERROR_COLOR, message);
+            ui.colored_label(error_color(ui), message);
         }
         DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Finished => {
             let done = fraction(download.progress_bytes, download.total_bytes);
@@ -275,7 +305,7 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
                 let bar_width = (ui.available_width() - 64.0).max(80.0);
                 ui.add(
                     egui::ProgressBar::new(done)
-                        .fill(brand::progress_fill(ui.ctx().theme()))
+                        .fill(brand::palette(ui.ctx().theme()).accent)
                         .desired_width(bar_width),
                 );
                 ui.label(format!("{:.1}%", done * 100.0));
@@ -286,10 +316,13 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
-                ui.label(format!(
-                    "Finished: {} saved in {folder}",
-                    format_bytes(download.total_bytes)
-                ));
+                ui.colored_label(
+                    success_color(ui),
+                    format!(
+                        "Finished: {} saved in {folder}",
+                        format_bytes(download.total_bytes)
+                    ),
+                );
                 ui.label(format!(
                     "Sharing back to {} people ({} uploaded so far). Closing BitDinghy stops sharing.",
                     download.peers_connected,
@@ -327,4 +360,27 @@ fn main() -> eframe::Result {
         options,
         Box::new(|creation_context| Ok(Box::new(BitDinghyApp::new(creation_context)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This test reproduces the real situation: the window calls `shut_down` from its ordinary
+    /// thread, outside any async code. It used to panic.
+    #[test]
+    fn closing_the_window_shuts_the_engine_down_without_crashing() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let mut config = dinghy_core::EngineConfig::new(work.path().join("downloads"));
+        config.use_dht = false;
+        config.accept_incoming = false;
+        config.local_discovery = false;
+        let engine = runtime.block_on(Engine::start(config)).unwrap();
+
+        shut_down(&runtime, &engine);
+    }
 }

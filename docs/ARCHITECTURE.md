@@ -86,6 +86,27 @@ anything is written to disk:
 While it runs, `Engine::snapshot()` gives a plain picture of every download (progress, smoothed
 speed, time left, people connected) that the window and the command line both draw from.
 
+## Where BitDinghy keeps its files (M2)
+
+```
+ BitDinghy.exe   dinghy.exe        data\                      <- next to the programs
+        \          /                 settings.toml  (versioned, readable)
+         Profile::load()  ------->   dht.json       (the DHT's saved contacts)
+   (finds the data folder,           (later: the download list and history)
+    loads the settings)
+```
+
+- **`data_dir.rs`** decides the folder: the `data` folder next to the programs if it can be
+  written to (proved by creating and deleting a small file), otherwise the user's own settings
+  folder. `BITDINGHY_DATA_DIR` overrides both.
+- **`settings.rs`** reads and writes `settings.toml` and carries the "never lose your data" rules:
+  - the file records the settings-format **version**, and old versions are upgraded step by step;
+  - a file that can't be understood is **kept aside** (`settings.toml.broken-<time>`), never deleted;
+  - a file from a **newer** BitDinghy is never overwritten;
+  - saving writes a temporary file and swaps it in, so a crash can't leave half a file.
+- **`profile.rs`** is the one call both programs make at start-up. It never fails: if something is
+  wrong, BitDinghy carries on with standard settings and shows a notice.
+
 ## Where each piece appears
 
 | Milestone | What lands |

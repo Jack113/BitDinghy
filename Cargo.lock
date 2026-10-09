@@ -387,6 +387,7 @@ dependencies = [
  "dinghy-core",
  "eframe",
  "png",
+ "tempfile",
  "tokio",
  "winresource",
 ]
