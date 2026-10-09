@@ -1,0 +1,65 @@
+# Automatic checks that run on GitHub for every push and pull request.
+# Goal: the same checks pass on Windows AND Linux from day one, so the Linux port stays easy.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: these jobs only need to read the code.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the older, now pointless, run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # NOTE: never set RUSTFLAGS here. It would silently replace the settings in .cargo/config.toml.
+
+jobs:
+  checks:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Third-party actions are pinned to an exact commit, so a hijacked tag can't change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux packages needed to build the window
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libgl1-mesa-dev
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+  # Checks every dependency's license against deny.toml and looks for known vulnerabilities.
+  licenses-and-advisories:
+    name: Licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
