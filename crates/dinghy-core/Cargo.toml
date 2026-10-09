@@ -11,3 +11,13 @@ publish.workspace = true
 
 [dependencies]
 librqbit.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `storage_examples` gives librqbit's in-memory storage. Tests use it to run a pretend "seeder"
+# that serves a hostile torrent without ever writing a file. Tests only: not in the shipped app.
+librqbit = { workspace = true, features = ["storage_examples"] }

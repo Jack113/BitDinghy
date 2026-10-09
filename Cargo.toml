@@ -31,6 +31,15 @@ dinghy-core = { path = "crates/dinghy-core" }
 librqbit = { version = "=9.0.1", default-features = false, features = ["rust-tls"] }
 
 clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+# Our own tokio use (librqbit already brings tokio in; we just ask for the parts we call directly).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+# Parses magnet links (we validate them ourselves, see dinghy-core/src/magnet.rs).
+url = "2"
+# Finds the user's normal Downloads folder.
+directories = "6"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+tempfile = "3"
 
 # The window toolkit. `glow` = OpenGL drawing (smaller and quicker to start than wgpu).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }

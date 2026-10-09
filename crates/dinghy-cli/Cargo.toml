@@ -17,3 +17,10 @@ path = "src/main.rs"
 [dependencies]
 dinghy-core.workspace = true
 clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Used only by the tests, to run a pretend "seeder" on this computer.
+librqbit.workspace = true

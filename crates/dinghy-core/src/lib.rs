@@ -7,6 +7,17 @@
 //! This crate is also the ONLY place allowed to talk to the BitTorrent engine (`librqbit`).
 //! If we ever need to upgrade or swap that engine, only this crate changes.
 
+use std::path::PathBuf;
+
+pub mod display;
+pub mod engine;
+pub mod error;
+pub mod magnet;
+pub mod safety;
+
+pub use engine::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
+pub use error::{Error, Result};
+
 /// The program's display name.
 pub const APP_NAME: &str = "BitDinghy";
 
@@ -19,12 +30,12 @@ pub fn about() -> String {
     format!("{APP_NAME} {VERSION}")
 }
 
-/// Name of the BitTorrent engine type we wrap.
-///
-/// Skeleton-only: it proves the engine compiles and links on every platform we build on.
-/// `std::any::type_name` just prints the type's full path, so it needs no engine setup.
-pub fn engine_type() -> &'static str {
-    std::any::type_name::<librqbit::Session>()
+/// Where downloads go unless the user picks another folder: a `BitDinghy` folder inside the
+/// user's normal Downloads folder.
+pub fn default_download_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(|p| p.join(APP_NAME)))
+        .unwrap_or_else(|| PathBuf::from(APP_NAME))
 }
 
 #[cfg(test)]
@@ -39,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_is_librqbit() {
-        assert!(engine_type().contains("librqbit"));
+    fn default_download_folder_is_named_after_the_app() {
+        assert!(default_download_dir().ends_with(APP_NAME));
     }
 }
