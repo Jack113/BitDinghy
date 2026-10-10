@@ -50,9 +50,10 @@ Crate names are the Cargo packages in `crates/`:
   engine publishes a snapshot (list, progress, speeds) that the front-end draws. This is the same
   for both front-ends, which is also what lets a future download type plug into the same slot.
 - **One engine at a time.** The window owns the engine. The command line talks to it over a
-  channel that is not a network port, so other computers and web pages cannot reach it. With the
-  window closed, `dinghy list` reads the saved list and `dinghy get <link>` downloads in the
-  terminal. Letting the window attach to a command-line engine is on the TODO list.
+  channel that is not a network port, so other computers and web pages cannot reach it (M4, see
+  below). With the window closed, `dinghy list` reads the saved list and `dinghy get <link>`
+  downloads in the terminal. Letting the window attach to a command-line engine is on the TODO
+  list.
 - **Everything saved is ours, and versioned.** Settings go in a readable TOML file. The download
   list, queue order and history go in one SQLite database with a version number. We also keep what
   is needed to re-add each torrent, so upgrading librqbit can never lose the list.
@@ -184,6 +185,39 @@ On Windows a file can stay "in use" for a moment after the engine lets go of it,
 tries again for up to two seconds. The engine is told to forget the torrent first, so it closes
 its files. A removal that happens while the download is still starting is caught when the start
 finishes, and the torrent is taken straight back out.
+
+## The channel between the command line and the window (M4, `remote.rs`)
+
+```
+ dinghy list / get ...                         BitDinghy (window, owns the engine)
+        |                                                 |
+        |  1. is a window listening on this data          |  listens on a channel named
+        |     folder's channel?                           |  after its data folder
+        |---- one JSON line: {"version":1,"command":..} ->|
+        |<--- one JSON line: the answer ------------------|  same engine calls as its buttons
+        |
+        +-- nobody listening: work alone, as before (own engine, or the saved list)
+```
+
+- **Only this computer can use it.** On Windows the channel is a *named pipe* (a named local
+  message channel) created with "reject remote clients", so connections over the network are
+  refused by Windows itself. Windows' standard protection for a new pipe lets only this user (plus
+  the system and administrators) send to it; other users can at most open it to read, and the
+  window never speaks first. On Linux it is a socket file in the data folder that only its owner
+  may open. It is never a network port or a local web server, so web pages can't reach it.
+- **One channel per data folder.** The pipe's name is made from the data folder's path and the
+  user's name, so a second portable copy of BitDinghy has its own channel. The window opens the
+  channel as its "first instance": if anything already uses that name, it says so instead of
+  sharing it.
+- **Plain, versioned messages.** Each request and answer is one line of JSON. Every request says
+  which message version it speaks; a different version gets a plain answer ("use the dinghy.exe
+  next to BitDinghy.exe"), never a guess. Nonsense gets "didn't understand", and the conversation
+  goes on. A message over 4 MB ends the conversation.
+- **No new way around the rules.** A request runs exactly the engine call the window's own
+  buttons run (`add_magnet`, `snapshot`...), with all the same checks.
+- With the window open, `dinghy get` hands the link to the window and follows its progress; Ctrl+C
+  only stops following. `--dir` is refused (the window decides the folder), and `--no-dht` /
+  `--no-listen` don't apply.
 
 ## Where each piece appears
 

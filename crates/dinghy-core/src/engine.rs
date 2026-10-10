@@ -25,6 +25,7 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::magnet;
@@ -33,7 +34,7 @@ use crate::safety::{self, Platform};
 use crate::saved_list::{SavedDownload, SavedList};
 
 /// Identifies one download for as long as the program runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DownloadId(pub u64);
 
 /// How the engine should start. `EngineConfig::new` gives the normal everyday settings.
@@ -73,7 +74,7 @@ impl EngineConfig {
 }
 
 /// Where a download is in its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadStatus {
     /// Still asking other people for the torrent's file list (a magnet link starts like this).
     GettingInfo,
@@ -87,7 +88,7 @@ pub enum DownloadStatus {
 }
 
 /// A picture of one download at one moment. The window and the command line redraw from these.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DownloadSnapshot {
     pub id: DownloadId,
     /// The torrent's fingerprint (40 lowercase hex characters).

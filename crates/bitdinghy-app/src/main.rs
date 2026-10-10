@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
-use dinghy_core::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, Profile};
+use dinghy_core::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, Profile, remote};
 use eframe::egui;
 
 /// The brand's error color for the current theme (light or dark), so it stays readable on both
@@ -64,6 +64,8 @@ struct BitDinghyApp {
     control_message: Option<(String, bool)>,
     /// The download whose "Remove?" question is showing, if any.
     confirming_remove: Option<DownloadId>,
+    /// Why the command line can't talk to this window, if it can't.
+    channel_problem: Option<String>,
 }
 
 impl BitDinghyApp {
@@ -80,6 +82,18 @@ impl BitDinghyApp {
             .block_on(Engine::start(profile.engine_config()))
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        // Let `dinghy` (the command line) talk to this window while it is open. The channel only
+        // works on this computer (see `remote.rs` in dinghy-core).
+        let channel_problem = match (&engine, profile.data_dir()) {
+            (Ok(engine), Some(data_dir)) => {
+                let _inside_runtime = runtime.enter();
+                let address = remote::Address::for_data_dir(data_dir.path());
+                remote::start_server(engine.clone(), &address)
+                    .err()
+                    .map(|error| error.to_string())
+            }
+            _ => None,
+        };
         let folder_text = profile
             .settings()
             .download_dir_or_default()
@@ -96,6 +110,7 @@ impl BitDinghyApp {
             settings_message: None,
             control_message: None,
             confirming_remove: None,
+            channel_problem,
         }
     }
 
@@ -262,6 +277,9 @@ impl eframe::App for BitDinghyApp {
         // Problems with the saved download list, for example.
         for notice in engine.notices() {
             ui.colored_label(warning_color(ui), notice);
+        }
+        if let Some(problem) = &self.channel_problem {
+            ui.colored_label(warning_color(ui), problem);
         }
 
         // Redraw a couple of times a second so progress keeps moving.

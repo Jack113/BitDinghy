@@ -16,6 +16,7 @@ pub mod error;
 pub mod magnet;
 pub mod owned_files;
 pub mod profile;
+pub mod remote;
 pub mod safety;
 pub mod saved_list;
 pub mod settings;

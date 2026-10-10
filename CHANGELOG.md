@@ -10,6 +10,11 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **The command line works while the window is open.** `dinghy list` shows the window's live list
+  (with each download's state right now), and `dinghy get <link>` hands the link to the window and
+  follows its progress in the terminal (Ctrl+C only stops following). They talk over a local
+  channel that only this computer can use: a named pipe that refuses network connections, never a
+  network port. With the window closed, `dinghy` works on its own as before.
 - **Downloads are remembered.** Every download goes into a saved list (`downloads.db` in the data
   folder) as soon as it is added. When the window opens again, everything in the list comes back
   and carries on where it stopped, in the folder it was started in. The list is versioned, a

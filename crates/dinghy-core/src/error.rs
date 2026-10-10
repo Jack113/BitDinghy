@@ -54,6 +54,10 @@ pub enum Error {
     #[error("{0}")]
     Control(String),
 
+    /// The command line couldn't talk to the open window. The message says why.
+    #[error("{0}")]
+    Remote(String),
+
     /// A new download would have overwritten a file that BitDinghy didn't download.
     #[error(
         "BitDinghy didn't start this download because a file with the same name is already in \

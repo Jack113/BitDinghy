@@ -3,6 +3,33 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M4: the command line talks to the open window
+
+While the window is open it owns the only engine, so `dinghy` now passes requests to it over a
+local channel that only this computer can use. With the window closed, `dinghy` works on its own
+as before. The programs are in `C:\cargo-target\debug\` (build first with
+`cargo build --workspace`).
+
+### Step 1: `dinghy list` and `dinghy get` with the window open
+
+1. **The live list.** Open the window. In a terminal run `dinghy.exe list`. It says "BitDinghy's
+   window is open and has no downloads" (or, if the window has downloads, it lists them numbered
+   with their state right now: "looking for people sharing it", "12.3% of 1.5 GiB, 8.0 MiB/s, 3m
+   left", "paused at 40.0%", "finished, sharing").
+2. **Hand a link to the window.** Run `dinghy.exe get "<the Arch magnet link>"`. It says "BitDinghy's
+   window is open, so the download was added there", and the download **appears in the window at
+   once**. The terminal follows it with the usual progress line.
+3. **Ctrl+C only stops following.** Press Ctrl+C. It says "Stopped following. The download carries
+   on in BitDinghy's window." The window keeps downloading. Run `dinghy.exe list`: it shows the
+   live percentage. Pause the download in the window to save data.
+4. **`--dir` is refused while the window is open.** `dinghy.exe get "<link>" --dir C:\Somewhere`
+   says to leave out `--dir` or close the window, and nothing is added.
+5. **The window closing is explained.** Resume Arch in the window, run `dinghy.exe get "<the Arch
+   magnet link>"` again (it follows the same download), then close the window. The terminal says
+   the window was closed and the download carries on the next time it opens.
+6. **With the window closed, `dinghy` works alone as before.** `dinghy.exe list` shows the saved
+   list again (`[active]`, `[paused]`...).
+
 ## M3: the saved list, pause, resume and remove (built in three steps)
 
 ### The window, everything in M3, step by step
@@ -49,7 +76,7 @@ people sharing this torrent..." to take anywhere from a few seconds to a minute 
 
 **4. Pause before the file list arrives** (no download data used)
 1. Paste this link, which nobody shares, and press Download:
-   `magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Nobody%20Has%20It`
+   `magnet:?xt=urn:btih:8bb9ffd92dc9584ae9923bf5422c285a8e31cdcc&dn=Nobody%20Has%20It`
    It says "Looking for people sharing this torrent..." and keeps looking.
 2. Press **Pause**. It shows a 0% bar and "Paused. BitDinghy will look for its file list when you
    resume it."

@@ -15,6 +15,17 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Noticed while building M4
+- Another user on the same PC could create a pipe with BitDinghy's channel name before the window
+  opens. The window then says its channel is in use (it never shares it), but `dinghy` would talk
+  to the impostor, which could see the links sent and answer falsely. Checking that the pipe
+  belongs to the same user (`GetNamedPipeServerProcessId` + the process's user) closes it.
+  Low risk on a one-person PC; do it before the first release.
+- Linux: a socket file's path is limited to about 108 bytes. A deeply nested portable data folder
+  could exceed it; fall back to a short path under `$XDG_RUNTIME_DIR` with the Linux port.
+- `dinghy get` while a `dinghy get` runs in another terminal is still refused ("already
+  running"); only the window answers requests. Fine for now.
+
 ## Noticed while building M3
 - After "Remove, keep the files", adding the same torrent again is refused, because its files are
   no longer BitDinghy's (the "never take over a file" rule). A choice like "Use the files already

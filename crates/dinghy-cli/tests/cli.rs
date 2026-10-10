@@ -602,3 +602,117 @@ fn yes_on_its_own_is_refused() {
         text(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// M4: the command line talks to the open window.
+// ---------------------------------------------------------------------------------------------
+
+/// A pretend window inside the test: an engine that holds the saved list in `data` (like the real
+/// window) and listens on the channel the real `dinghy` will look for.
+async fn open_window(data: &Path, downloads: &Path) -> Arc<dinghy_core::Engine> {
+    let data_dir = dinghy_core::DataDir::custom(data.to_path_buf()).unwrap();
+    let mut config = dinghy_core::EngineConfig::new(downloads);
+    config.use_dht = false;
+    config.accept_incoming = false;
+    config.local_discovery = false;
+    config.saved_list_file = Some(data_dir.file("downloads.db"));
+    let engine = Arc::new(dinghy_core::Engine::start(config).await.unwrap());
+    let address = dinghy_core::remote::Address::for_data_dir(data_dir.path());
+    dinghy_core::remote::start_server(engine.clone(), &address).unwrap();
+    engine
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn with_the_window_open_get_hands_the_link_over_and_list_shows_it_live() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("window-downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+    let window = open_window(&data, &downloads).await;
+
+    // `list` asks the window, which has nothing yet.
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.arg("list");
+            c
+        })
+        .await,
+    );
+    assert!(
+        stdout.contains("window is open and has no downloads"),
+        "{stdout}"
+    );
+
+    // `get` hands the link to the window and follows it to the end.
+    let stdout = assert_success(&run_blocking(get_from(&data, &seeder)).await);
+    assert!(stdout.contains("download was added there"), "{stdout}");
+    assert!(
+        stdout.contains("--no-dht and --no-listen don't apply"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Done: sample"), "{stdout}");
+    // The WINDOW did the downloading, into its own folder.
+    assert_downloaded(&seeder, &downloads);
+    assert_eq!(window.snapshot().len(), 1);
+
+    // `list` now shows the window's live state.
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.arg("list");
+            c
+        })
+        .await,
+    );
+    assert!(
+        stdout.contains("1 download in BitDinghy's open window"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("1. sample  [finished, sharing"), "{stdout}");
+
+    window.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn with_the_window_open_get_refuses_a_different_folder() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let window = open_window(&data, &work.path().join("window-downloads")).await;
+    let elsewhere = work.path().join("elsewhere");
+
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.args([
+            "get",
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "--dir",
+        ])
+        .arg(&elsewhere);
+        c
+    })
+    .await;
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("Leave out --dir"), "{stderr}");
+    assert!(!elsewhere.exists());
+    assert!(window.snapshot().is_empty(), "nothing was added");
+    window.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_bad_link_is_refused_before_the_window_is_even_asked() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let window = open_window(&data, &work.path().join("window-downloads")).await;
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.args(["get", "hello"]);
+        c
+    })
+    .await;
+    assert!(!output.status.success());
+    assert!(text(&output.stderr).contains("isn't a magnet link"));
+    assert!(window.snapshot().is_empty());
+    window.shutdown().await;
+}

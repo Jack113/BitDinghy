@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::{
     DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, magnet,
-    owned_files,
+    owned_files, remote,
 };
 
 /// BitDinghy on the command line.
@@ -112,7 +112,7 @@ struct GetArgs {
 async fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
-        Some(Command::List) => list(),
+        Some(Command::List) => list().await,
         Some(Command::Pause(which)) => set_paused(which.number, true),
         Some(Command::Resume(which)) => set_paused(which.number, false),
         Some(Command::Remove(args)) => remove(args),
@@ -187,10 +187,15 @@ fn settings(args: SettingsArgs) -> ExitCode {
     }
 }
 
-/// `dinghy list`: the saved download list, numbered.
-fn list() -> ExitCode {
+/// `dinghy list`: the open window's list, live; or with the window closed, the saved list.
+async fn list() -> ExitCode {
     let profile = Profile::load();
     print_notices(&profile);
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => return list_from_window(&mut window).await,
+        Ok(None) => {}
+    }
     let Some(path) = profile.saved_list_path() else {
         println!("BitDinghy has no data folder right now, so it doesn't remember any downloads.");
         return ExitCode::SUCCESS;
@@ -416,9 +421,16 @@ async fn get(args: GetArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Remembered settings first; `--dir` overrides the folder for this run only.
     let profile = Profile::load();
     print_notices(&profile);
+    // The window is open? Then it owns the engine: hand the link over and follow it from here.
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(window)) => return get_through_window(window, args).await,
+        Ok(None) => {}
+    }
+
+    // Remembered settings first; `--dir` overrides the folder for this run only.
     let mut config = profile.engine_config();
     if let Some(dir) = &args.dir {
         config.download_dir = dir.clone();
@@ -468,24 +480,8 @@ async fn get(args: GetArgs) -> ExitCode {
                 let Some(snapshot) = engine.snapshot().into_iter().find(|s| s.id == id) else {
                     continue;
                 };
-                printer.show(&snapshot);
-                match snapshot.status {
-                    DownloadStatus::Finished => {
-                        printer.finish();
-                        println!(
-                            "Done: {} ({}) is in {}",
-                            snapshot.name,
-                            format_bytes(snapshot.total_bytes),
-                            snapshot.save_folder.as_deref().unwrap_or(&folder).display()
-                        );
-                        break ExitCode::SUCCESS;
-                    }
-                    DownloadStatus::Failed => {
-                        printer.finish();
-                        eprintln!("{}", snapshot.error.unwrap_or_else(|| "The download failed.".into()));
-                        break ExitCode::FAILURE;
-                    }
-                    _ => {}
+                if let Some(code) = show_progress(&mut printer, &snapshot, &folder) {
+                    break code;
                 }
             }
             _ = &mut ctrl_c => {
@@ -498,6 +494,185 @@ async fn get(args: GetArgs) -> ExitCode {
 
     engine.shutdown().await;
     exit
+}
+
+/// Draws one progress update. When the download has finished or failed, says so and returns the
+/// exit code to stop with.
+fn show_progress(
+    printer: &mut ProgressPrinter,
+    snapshot: &DownloadSnapshot,
+    folder: &Path,
+) -> Option<ExitCode> {
+    printer.show(snapshot);
+    match snapshot.status {
+        DownloadStatus::Finished => {
+            printer.finish();
+            println!(
+                "Done: {} ({}) is in {}",
+                snapshot.name,
+                format_bytes(snapshot.total_bytes),
+                snapshot.save_folder.as_deref().unwrap_or(folder).display()
+            );
+            Some(ExitCode::SUCCESS)
+        }
+        DownloadStatus::Failed => {
+            printer.finish();
+            eprintln!(
+                "{}",
+                snapshot.error.as_deref().unwrap_or("The download failed.")
+            );
+            Some(ExitCode::FAILURE)
+        }
+        _ => None,
+    }
+}
+
+/// Connects to the open window, if there is one. `Ok(None)`: no window is open (or there is no
+/// data folder), so the command line works on its own. A real problem has already been explained
+/// when `Err` comes back.
+async fn window_client(profile: &Profile) -> Result<Option<remote::Client>, ExitCode> {
+    let Some(data_dir) = profile.data_dir() else {
+        return Ok(None);
+    };
+    remote::Client::connect(&remote::Address::for_data_dir(data_dir.path()))
+        .await
+        .map_err(|error| {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        })
+}
+
+/// `dinghy get` while the window is open: the link is handed to the window, and this terminal
+/// follows its progress. Ctrl+C only stops following; the window carries on.
+async fn get_through_window(mut window: remote::Client, args: GetArgs) -> ExitCode {
+    if args.dir.is_some() {
+        eprintln!(
+            "BitDinghy's window is open, so the download goes into the window's download folder. \
+             Leave out --dir, or close the window first."
+        );
+        return ExitCode::FAILURE;
+    }
+    if args.no_dht || args.no_listen {
+        println!(
+            "Note: --no-dht and --no-listen don't apply; the open window uses its own settings."
+        );
+    }
+    let (info_hash, folder) = match window
+        .ask(remote::Command::Add {
+            link: args.link,
+            peers: args.peers,
+        })
+        .await
+    {
+        Ok(remote::Reply::Added { info_hash, folder }) => (info_hash, folder),
+        Ok(_) => {
+            eprintln!("BitDinghy's window gave an unexpected answer.");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("BitDinghy's window is open, so the download was added there.");
+    println!("Saving to {}", folder.display());
+
+    let mut printer = ProgressPrinter::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let downloads = match window.ask(remote::Command::List).await {
+                    Ok(remote::Reply::Downloads { downloads, .. }) => downloads,
+                    Ok(_) => continue,
+                    Err(_) => {
+                        printer.finish();
+                        eprintln!(
+                            "BitDinghy's window was closed. The download carries on the next time \
+                             it opens."
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let Some(snapshot) = downloads.iter().find(|d| d.info_hash == info_hash) else {
+                    printer.finish();
+                    println!("The download was removed in the window.");
+                    return ExitCode::SUCCESS;
+                };
+                if let Some(code) = show_progress(&mut printer, snapshot, &folder) {
+                    return code;
+                }
+            }
+            _ = &mut ctrl_c => {
+                printer.finish();
+                println!("Stopped following. The download carries on in BitDinghy's window.");
+                return ExitCode::from(130);
+            }
+        }
+    }
+}
+
+/// `dinghy list` while the window is open: the window's own list, live.
+async fn list_from_window(window: &mut remote::Client) -> ExitCode {
+    let downloads = match window.ask(remote::Command::List).await {
+        Ok(remote::Reply::Downloads { downloads, .. }) => downloads,
+        Ok(_) => {
+            eprintln!("BitDinghy's window gave an unexpected answer.");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if downloads.is_empty() {
+        println!("BitDinghy's window is open and has no downloads.");
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "{} download{} in BitDinghy's open window:",
+        downloads.len(),
+        if downloads.len() == 1 { "" } else { "s" }
+    );
+    for (index, download) in downloads.iter().enumerate() {
+        println!(
+            "{:>3}. {}  [{}]",
+            index + 1,
+            shorten(&download.name, 60),
+            live_state(download)
+        );
+        if let Some(folder) = &download.save_folder {
+            println!("     {}", folder.display());
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// A download's state, as the open window sees it right now.
+fn live_state(download: &DownloadSnapshot) -> String {
+    let percent = fraction(download.progress_bytes, download.total_bytes) * 100.0;
+    match download.status {
+        DownloadStatus::GettingInfo => "looking for people sharing it".to_string(),
+        DownloadStatus::Checking => "checking files already on disk".to_string(),
+        DownloadStatus::Downloading => format!(
+            "{percent:.1}% of {}, {}, {} left",
+            format_bytes(download.total_bytes),
+            format_speed(download.download_bytes_per_second),
+            format_eta(download.eta)
+        ),
+        DownloadStatus::Paused if download.total_bytes == 0 => "paused".to_string(),
+        DownloadStatus::Paused => format!("paused at {percent:.1}%"),
+        DownloadStatus::Finished => format!(
+            "finished, sharing ({} uploaded)",
+            format_bytes(download.uploaded_bytes)
+        ),
+        DownloadStatus::Failed => format!(
+            "failed: {}",
+            download.error.as_deref().unwrap_or("unknown problem")
+        ),
+    }
 }
 
 /// Shortens a long name so a progress line fits on one terminal line. Plain "..." is used
