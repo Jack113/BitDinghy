@@ -3,6 +3,77 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M5: .torrent files and links
+
+Tests are done one at a time: do the test, compare with "You should see", then go to the next.
+
+### Step 1: .torrent files from your PC
+
+**Step 0: get ready**
+1. Close the BitDinghy window and stop any `dinghy` (Ctrl+C).
+2. In the repo folder: `cargo build --workspace`.
+3. Open a terminal in `C:\cargo-target\debug` (`cd C:\cargo-target\debug`). `BitDinghy.exe` is
+   the window; `dinghy.exe` is the command line and needs a command (`.\dinghy.exe list`).
+4. Get the official Arch `.torrent` file: open
+   <https://archlinux.org/releng/releases/2026.10.01/torrent/> in your browser. It saves
+   `archlinux-2026.10.01-x86_64.iso.torrent` (88 KB) in your `Downloads` folder (NOT in
+   `Downloads\BitDinghy`).
+5. Make sure there is no Arch `.iso` in `Downloads\BitDinghy` (move or delete it; otherwise test 1
+   is refused, by design).
+
+**Test 1: the "Open .torrent file..." button**
+- Do: open the window (`.\BitDinghy.exe`). Next to **Download** there is a new button,
+  **Open .torrent file...**, and under the link box "You can also drag .torrent files onto this
+  window." Press the button. Windows' own file dialog opens, showing only `.torrent` files. Choose
+  the Arch `.torrent` in `Downloads` and press Open.
+- You should see: the Arch download appears at once, with its full name, then "Checking files..."
+  or a progress bar (no "Looking for people..." wait for the file list, because the file already
+  holds it). Press **Pause** to save data.
+
+**Test 2: the same torrent twice is one download**
+- Do: press **Open .torrent file...** again and choose the same file.
+- You should see: still one Arch row, no duplicate, no error.
+
+**Test 3: drag and drop**
+- Do: remove Arch (**Remove**, then **Delete the files too**). Drag the `.torrent` file from
+  Explorer onto the window and hold it there for a moment, then let go.
+- You should see: while you hold it over the window, a teal line "Drop the .torrent files here to
+  add them."; after letting go, Arch appears. Pause it.
+
+**Test 4: pasting a path**
+- Do: remove Arch again (Delete the files too). In Explorer, Shift+right-click the `.torrent`,
+  choose **Copy as path**, paste it into the link box (with its quotation marks), press
+  **Download**.
+- You should see: Arch appears. Pause it.
+
+**Test 5: a file that isn't a torrent**
+- Do: in `Downloads`, create a text file and rename it `notes.torrent` (accept Windows' warning
+  about the extension). Open it with the button.
+- You should see: a red line "...notes.torrent isn't a valid .torrent file." and nothing added.
+
+**Test 6: `dinghy get` with a .torrent file (window closed)**
+- Do: close the window. Run
+  `.\dinghy.exe get "C:\Users\<you>\Downloads\archlinux-2026.10.01-x86_64.iso.torrent"`.
+- You should see: "Saving to ...", then progress straight away (the file list is in the file), as
+  it carries on the paused Arch download. Press Ctrl+C after a few seconds.
+
+**Test 7: `dinghy get` with a .torrent file while the window is open**
+- Do: open the window. In the terminal, go to your Downloads folder (`cd ~\Downloads`) and run
+  `C:\cargo-target\debug\dinghy.exe get archlinux-2026.10.01-x86_64.iso.torrent` (just the file
+  name).
+- You should see: "BitDinghy's window is open, so the download was added there", and the window
+  shows Arch carrying on. The window found the file even though only its name was typed. Press
+  Ctrl+C, then Pause in the window.
+
+**Test 8: web links aren't fetched yet**
+- Do: paste `https://archlinux.org/releng/releases/2026.10.01/torrent/` into the link box and press
+  Download.
+- You should see: a red line "BitDinghy can't fetch .torrent files from the web yet..." (step 2
+  adds this).
+
+**Tidy up:** remove Arch (Delete the files too), and delete `notes.torrent`. Keep the Arch
+`.torrent` for step 2.
+
 ## M4: the command line talks to the open window
 
 While the window is open it owns the only engine, so `dinghy` now passes requests to it over a

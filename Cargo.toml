@@ -58,6 +58,9 @@ winresource = "0.1"
 
 # The window toolkit. `glow` = OpenGL drawing (smaller and quicker to start than wgpu).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# The "Open .torrent file..." dialog: Windows' own file dialog (on Linux, the desktop portal, so no
+# GTK is needed). No default features: only the parts we use.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]
 # Slower to compile, smaller and faster to run. Size/speed tuning is revisited at the first release.

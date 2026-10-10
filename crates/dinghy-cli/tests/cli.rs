@@ -210,6 +210,8 @@ struct Seeder {
     magnet: String,
     /// The torrent's name (also its folder's name).
     name: &'static str,
+    /// The `.torrent` file it shares.
+    torrent: Vec<u8>,
     files: Vec<(&'static str, Vec<u8>)>,
 }
 
@@ -272,6 +274,7 @@ async fn start_seeder(work: &Path, name: &'static str) -> Seeder {
         address: session.listen_addr().unwrap(),
         magnet: format!("magnet:?xt=urn:btih:{}", created.info_hash().as_string()),
         name,
+        torrent: created.as_bytes().unwrap().to_vec(),
         files,
         _session: session,
     }
@@ -802,4 +805,80 @@ async fn with_the_window_open_remove_delete_files_asks_first_and_deletes_only_it
     assert_eq!(std::fs::read(&neighbour).unwrap(), b"mine");
     assert!(window.snapshot().is_empty());
     window.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// M5: .torrent files.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn get_downloads_a_torrent_file() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+    let torrent_file = work.path().join("sample.torrent");
+    std::fs::write(&torrent_file, &seeder.torrent).unwrap();
+
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.arg("get")
+            .arg(&torrent_file)
+            .args(["--no-dht", "--no-listen", "--peer"])
+            .arg(seeder.address.to_string())
+            .arg("--dir")
+            .arg(&downloads);
+        c
+    })
+    .await;
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("Done: sample"), "{stdout}");
+    assert_downloaded(&seeder, &downloads);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn get_hands_a_torrent_file_to_the_window_even_with_a_relative_path() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("window-downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+    let here = work.path().join("where-the-terminal-is");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::write(here.join("sample.torrent"), &seeder.torrent).unwrap();
+    let window = open_window(&data, &downloads).await;
+
+    // "sample.torrent" means a file in the TERMINAL's folder, not the window's.
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.current_dir(&here)
+            .args(["get", "sample.torrent", "--peer"])
+            .arg(seeder.address.to_string());
+        c
+    })
+    .await;
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("download was added there"), "{stdout}");
+    assert!(stdout.contains("Done: sample"), "{stdout}");
+    assert_downloaded(&seeder, &downloads);
+    window.shutdown().await;
+}
+
+#[test]
+fn a_bad_torrent_file_is_refused_at_once() {
+    let data = tempfile::tempdir().unwrap();
+    let not_a_torrent = data.path().join("notes.torrent");
+    std::fs::write(&not_a_torrent, b"just some text").unwrap();
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.arg("get").arg(&not_a_torrent);
+        c
+    });
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("isn't a valid .torrent file"), "{stderr}");
+
+    let output = dinghy_output(data.path(), &["get", "missing.torrent"]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("There is no file"), "{stderr}");
 }

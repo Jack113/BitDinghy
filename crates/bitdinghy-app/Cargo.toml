@@ -19,6 +19,7 @@ dinghy-core.workspace = true
 eframe.workspace = true
 tokio.workspace = true
 png.workspace = true
+rfd.workspace = true
 
 [build-dependencies]
 winresource.workspace = true

@@ -15,6 +15,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidMagnet(String),
 
+    /// A `.torrent` file couldn't be used. The message says why.
+    #[error("{0}")]
+    InvalidTorrent(String),
+
     /// A file name inside the torrent could be used to write outside the download folder.
     #[error(
         "BitDinghy refused this torrent because it contains a file name that isn't safe to save: {0}"

@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 
 const MAX_LINK_BYTES: usize = 16 * 1024;
 const MAX_QUERY_PAIRS: usize = 200;
-const MAX_TRACKERS: usize = 20;
+pub(crate) const MAX_TRACKERS: usize = 20;
 const MAX_TRACKER_BYTES: usize = 512;
 const MAX_NAME_CHARS: usize = 120;
 
@@ -75,7 +75,7 @@ pub fn clean_display_name(name: &str) -> Option<String> {
 /// This is a first line of defence, not a complete one: it looks at how the tracker is WRITTEN. A
 /// normal-looking host name that an attacker has pointed at a local address would still get
 /// through, and closing that needs control over the engine's own connections (see `TODO.md`).
-fn clean_tracker(value: &str) -> Option<String> {
+pub(crate) fn clean_tracker(value: &str) -> Option<String> {
     if value.len() > MAX_TRACKER_BYTES {
         return None;
     }
@@ -204,21 +204,27 @@ pub fn parse(input: &str) -> Result<ParsedMagnet> {
         .and_then(|magnet| magnet.as_id20())
         .ok_or_else(bad_hash)?;
     let info_hash = id20.as_string();
-
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    query.append_pair("xt", &format!("urn:btih:{info_hash}"));
-    if let Some(name) = &display_name {
-        query.append_pair("dn", name);
-    }
-    for tracker in &trackers {
-        query.append_pair("tr", tracker);
-    }
-
+    let clean_link = build_link(&info_hash, display_name.as_deref(), &trackers);
     Ok(ParsedMagnet {
         info_hash,
         display_name,
-        clean_link: format!("magnet:?{}", query.finish()),
+        clean_link,
     })
+}
+
+/// Builds a minimal magnet link from parts that have ALREADY been checked: a 40-character
+/// fingerprint, a cleaned name and cleaned trackers. (`.torrent` files use this too, so every
+/// download in the saved list has a clean link to fall back on.)
+pub(crate) fn build_link(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("xt", &format!("urn:btih:{info_hash}"));
+    if let Some(name) = name {
+        query.append_pair("dn", name);
+    }
+    for tracker in trackers {
+        query.append_pair("tr", tracker);
+    }
+    format!("magnet:?{}", query.finish())
 }
 
 #[cfg(test)]

@@ -10,6 +10,11 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **.torrent files.** Open them with the window's new **Open .torrent file...** button (Windows'
+  own file dialog), drag them onto the window, paste their path into the link box, or give them to
+  `dinghy get`. Every `.torrent` is rebuilt from checked parts only (its file list, plus trackers
+  that pass the same filter as magnet links), so trackers pointing at your own PC or home network
+  are dropped, and the extra fields in the file are left out.
 - **The command line works while the window is open.** `dinghy list` shows the window's live list
   (with each download's state right now), and `dinghy get <link>` hands the link to the window and
   follows its progress in the terminal (Ctrl+C only stops following). They talk over a local

@@ -227,6 +227,23 @@ finishes, and the torrent is taken straight back out.
   (that is `dinghy get` in another terminal), changes are refused with "busy in another terminal";
   otherwise `dinghy` changes the saved list itself.
 
+## .torrent files (M5, `torrent_file.rs` and `input.rs`)
+
+- **`input.rs`** decides what was typed, pasted or dropped: a magnet link (`magnet:`), a web link
+  (`http(s)://`), or else a `.torrent` file path (Windows' "Copy as path" quotation marks are
+  ignored). `Engine::add` takes any of them; `dinghy get`, the link box, the file dialog,
+  drag & drop and the window's channel all go through it.
+- **`torrent_file.rs`** treats a `.torrent` like a magnet link: untrusted, so it is never given to
+  the engine as it is. It is read (at most 16 MB), checked as a valid file list, and **rebuilt**
+  from the info part (byte for byte, so the fingerprint stays the same) plus the trackers that
+  pass `magnet.rs`'s filter (ordinary internet addresses only). Everything else in the file
+  (comments, web-seed addresses, the original trackers) is left out. The rebuilt file is checked
+  again and must have the same fingerprint. A clean magnet link is built too, for the saved list.
+- From there it is a normal download: the same safety guard, the same "never overwrite" rule, and
+  it is remembered with its rebuilt file list.
+- `dinghy get` turns a file path into a full path before handing it to the window, because the
+  window runs in another folder.
+
 ## Where each piece appears
 
 | Milestone | What lands |

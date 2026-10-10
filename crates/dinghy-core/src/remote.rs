@@ -48,8 +48,8 @@ pub struct Request {
 pub enum Command {
     /// Every download, as the window shows it right now.
     List,
-    /// Add a magnet link, exactly as if it was pasted into the window. `peers` are extra
-    /// addresses to try (`dinghy get --peer`).
+    /// Add a magnet link or a `.torrent` file (by its full path on this computer), exactly as if
+    /// it was pasted into the window. `peers` are extra addresses to try (`dinghy get --peer`).
     Add {
         link: String,
         peers: Vec<SocketAddr>,
@@ -274,7 +274,7 @@ async fn answer_or_problem(
             download_dir: engine.download_dir().to_path_buf(),
         },
         Command::Add { link, peers } => {
-            let id = engine.add_magnet(&link, peers).map_err(said)?;
+            let id = engine.add(&link, peers).map_err(said)?;
             Reply::Added {
                 info_hash: engine
                     .snapshot()

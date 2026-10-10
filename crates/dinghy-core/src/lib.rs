@@ -13,6 +13,7 @@ pub mod data_dir;
 pub mod display;
 pub mod engine;
 pub mod error;
+pub mod input;
 pub mod magnet;
 pub mod owned_files;
 pub mod profile;
@@ -20,6 +21,7 @@ pub mod remote;
 pub mod safety;
 pub mod saved_list;
 pub mod settings;
+pub mod torrent_file;
 
 pub use data_dir::{DataDir, DataKind};
 pub use engine::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};

@@ -114,14 +114,30 @@ impl BitDinghyApp {
         }
     }
 
+    /// Adds what is in the link box: a magnet link or the path of a `.torrent` file.
     fn submit_link(&mut self, engine: &Engine) {
-        match engine.add_magnet(&self.link, Vec::new()) {
+        match engine.add(&self.link, Vec::new()) {
             Ok(_) => {
                 self.link.clear();
                 self.link_problem = None;
             }
             Err(error) => self.link_problem = Some(error.to_string()),
         }
+    }
+
+    /// Adds `.torrent` files (chosen in the file dialog, or dropped on the window). Problems are
+    /// collected and shown under the link box.
+    fn add_files(&mut self, engine: &Engine, paths: &[std::path::PathBuf]) {
+        let problems: Vec<String> = paths
+            .iter()
+            .filter_map(|path| {
+                engine
+                    .add(&path.display().to_string(), Vec::new())
+                    .err()
+                    .map(|error| error.to_string())
+            })
+            .collect();
+        self.link_problem = (!problems.is_empty()).then(|| problems.join("\n"));
     }
 
     /// Remembers the folder typed in the settings (or the standard folder when `use_standard`).
@@ -289,10 +305,10 @@ impl eframe::App for BitDinghyApp {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            let box_width = (ui.available_width() - 100.0).max(120.0);
+            let box_width = (ui.available_width() - 250.0).max(120.0);
             let link_box = ui.add(
                 egui::TextEdit::singleline(&mut self.link)
-                    .hint_text("Paste a magnet link here")
+                    .hint_text("Paste a magnet link or the path of a .torrent file")
                     .desired_width(box_width),
             );
             let enter_pressed =
@@ -300,9 +316,38 @@ impl eframe::App for BitDinghyApp {
             if ui.button("Download").clicked() || enter_pressed {
                 self.submit_link(&engine);
             }
+            if ui.button("Open .torrent file...").clicked() {
+                // Windows' own file dialog. The window waits while it is open.
+                let chosen = rfd::FileDialog::new()
+                    .set_title("Open .torrent files")
+                    .add_filter(".torrent files", &["torrent"])
+                    .pick_files()
+                    .unwrap_or_default();
+                self.add_files(&engine, &chosen);
+            }
         });
+        ui.small("You can also drag .torrent files onto this window.");
         if let Some(problem) = &self.link_problem {
             ui.colored_label(error_color(ui), problem);
+        }
+
+        // Files dragged over the window: say what dropping them does; add them when dropped.
+        let (hovering, dropped) = ui.ctx().input(|input| {
+            (
+                !input.raw.hovered_files.is_empty(),
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .map(|file| file.path().to_path_buf())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        if hovering {
+            ui.colored_label(info_color(ui), "Drop the .torrent files here to add them.");
+        }
+        if !dropped.is_empty() {
+            self.add_files(&engine, &dropped);
         }
 
         ui.add_space(4.0);

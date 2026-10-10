@@ -28,10 +28,12 @@ use librqbit::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::input::{self, Input};
 use crate::magnet;
 use crate::owned_files::{self, Deleted};
 use crate::safety::{self, Platform};
 use crate::saved_list::{SavedDownload, SavedList};
+use crate::torrent_file::{self, CheckedTorrent};
 
 /// Identifies one download for as long as the program runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -139,6 +141,8 @@ struct Entry {
     wants_pause: AtomicBool,
     /// Extra addresses to try directly (`dinghy get --peer`), kept for trying again.
     peers: Vec<SocketAddr>,
+    /// The checked `.torrent` it was added from, if it was (kept for trying again).
+    known_torrent: Option<Vec<u8>>,
     /// Set when the person removes it, so a start that is still on its way doesn't go ahead.
     removed: AtomicBool,
     /// Its checked file list (a `.torrent` file) and the folder its files are in, once known.
@@ -147,6 +151,17 @@ struct Entry {
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
+}
+
+/// What a new download starts with (see the fields of [`Entry`]).
+struct NewEntry {
+    info_hash: String,
+    label: String,
+    download_dir: PathBuf,
+    magnet: String,
+    paused: bool,
+    peers: Vec<SocketAddr>,
+    known_torrent: Option<Vec<u8>>,
 }
 
 /// Where a download's file list comes from.
@@ -380,58 +395,113 @@ impl Engine {
     /// it carries on in the folder it was started in, from the file list saved last time.
     pub fn add_magnet(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
         let parsed = magnet::parse(input)?;
+        self.add_new(
+            &parsed.info_hash,
+            parsed.display_name.as_deref(),
+            &parsed.clean_link,
+            Source::Magnet(parsed.clean_link.clone()),
+            extra_peers,
+        )
+    }
 
-        let mut entries = lock(&self.entries);
-        if let Some(existing) = entries.iter().find(|e| e.info_hash == parsed.info_hash) {
-            return Ok(existing.id); // Pasting the same link twice just shows the same download.
+    /// Adds whatever the person typed, pasted or dropped: a magnet link or a `.torrent` file
+    /// (see `input.rs`). A `.torrent` file is read and rebuilt from checked parts first
+    /// (`torrent_file.rs`), so a bad file fails here, at once.
+    pub fn add(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
+        match input::classify(input)? {
+            Input::Magnet(parsed) => self.add_new(
+                &parsed.info_hash,
+                parsed.display_name.as_deref(),
+                &parsed.clean_link,
+                Source::Magnet(parsed.clean_link.clone()),
+                extra_peers,
+            ),
+            Input::TorrentFile(path) => self.add_torrent(torrent_file::read(&path)?, extra_peers),
+            Input::WebLink(_) => Err(Error::InvalidTorrent(
+                "BitDinghy can't fetch .torrent files from the web yet. Download the .torrent \
+                 file, then open it."
+                    .to_string(),
+            )),
         }
+    }
 
-        let remembered = self
-            .shared
-            .with_list(|list| list.get(&parsed.info_hash))
-            .flatten();
+    /// Adds a `.torrent` file that has already been checked and rebuilt (`torrent_file.rs`).
+    pub fn add_torrent(
+        &self,
+        torrent: CheckedTorrent,
+        extra_peers: Vec<SocketAddr>,
+    ) -> Result<DownloadId> {
+        self.add_new(
+            &torrent.info_hash,
+            torrent.display_name.as_deref(),
+            &torrent.magnet,
+            Source::Torrent {
+                bytes: torrent.bytes,
+                folder: None,
+            },
+            extra_peers,
+        )
+    }
+
+    /// The shared part of adding: the same torrent twice is one download; one that is already in
+    /// the saved list carries on in its own folder from its saved file list; anything else is
+    /// remembered and started from `first_source`.
+    fn add_new(
+        &self,
+        info_hash: &str,
+        name: Option<&str>,
+        clean_link: &str,
+        first_source: Source,
+        extra_peers: Vec<SocketAddr>,
+    ) -> Result<DownloadId> {
+        let mut entries = lock(&self.entries);
+        if let Some(existing) = entries.iter().find(|e| e.info_hash == info_hash) {
+            return Ok(existing.id); // Adding the same torrent twice just shows the same download.
+        }
+        // Kept so that "Try again" can start from this file list without asking anyone for it.
+        let known_torrent = match &first_source {
+            Source::Torrent { bytes, .. } => Some(bytes.clone()),
+            Source::Magnet(_) => None,
+        };
+
+        let remembered = self.shared.with_list(|list| list.get(info_hash)).flatten();
         let (label, download_dir, source) = match remembered {
             Some(saved) => {
                 // Asking for a download again means "carry on", even if it was paused.
                 if saved.paused {
                     self.shared
-                        .with_list(|list| list.set_paused(&parsed.info_hash, false));
+                        .with_list(|list| list.set_paused(info_hash, false));
                 }
                 let name = saved.name.clone();
                 let download_dir = saved.download_dir.clone();
-                let source = Source::saved(saved)
-                    .unwrap_or_else(|| Source::Magnet(parsed.clean_link.clone()));
+                let source = Source::saved(saved).unwrap_or(first_source);
                 (name, download_dir, source)
             }
             None => {
-                let label = parsed
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| format!("Torrent {}", &parsed.info_hash[..8]));
+                let label = name
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Torrent {}", &info_hash[..8]));
                 self.shared.with_list(|list| {
                     list.add(&SavedDownload::new(
-                        &parsed.info_hash,
+                        info_hash,
                         &label,
-                        &parsed.clean_link,
+                        clean_link,
                         &self.download_dir,
                     ))
                 });
-                (
-                    label,
-                    self.download_dir.clone(),
-                    Source::Magnet(parsed.clean_link.clone()),
-                )
+                (label, self.download_dir.clone(), first_source)
             }
         };
 
-        let entry = self.new_entry(
-            &parsed.info_hash,
+        let entry = self.new_entry(NewEntry {
+            info_hash: info_hash.to_string(),
             label,
             download_dir,
-            parsed.clean_link,
-            false,
-            extra_peers,
-        );
+            magnet: clean_link.to_string(),
+            paused: false,
+            peers: extra_peers,
+            known_torrent,
+        });
         let id = entry.id;
         entries.push(entry.clone());
         drop(entries);
@@ -474,7 +544,15 @@ impl Engine {
                     continue;
                 }
             };
-            let entry = self.new_entry(&info_hash, name, download_dir, magnet, paused, Vec::new());
+            let entry = self.new_entry(NewEntry {
+                info_hash,
+                label: name,
+                download_dir,
+                magnet,
+                paused,
+                peers: Vec::new(),
+                known_torrent: None,
+            });
             lock(&self.entries).push(entry.clone());
             match source {
                 // Paused, and its file list was never fetched: contact nobody until resumed.
@@ -486,23 +564,16 @@ impl Engine {
         }
     }
 
-    fn new_entry(
-        &self,
-        info_hash: &str,
-        label: String,
-        download_dir: PathBuf,
-        magnet: String,
-        paused: bool,
-        peers: Vec<SocketAddr>,
-    ) -> Arc<Entry> {
+    fn new_entry(&self, start: NewEntry) -> Arc<Entry> {
         Arc::new(Entry {
             id: DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed)),
-            info_hash: info_hash.to_string(),
-            label,
-            download_dir,
-            magnet,
-            wants_pause: AtomicBool::new(paused),
-            peers,
+            info_hash: start.info_hash,
+            label: start.label,
+            download_dir: start.download_dir,
+            magnet: start.magnet,
+            wants_pause: AtomicBool::new(start.paused),
+            peers: start.peers,
+            known_torrent: start.known_torrent,
             removed: AtomicBool::new(false),
             files: Mutex::new(None),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
@@ -695,7 +766,13 @@ impl Engine {
                     .with_list(|list| list.get(&entry.info_hash))
                     .flatten()
                     .and_then(Source::saved)
-                    .unwrap_or_else(|| Source::Magnet(entry.magnet.clone()));
+                    .unwrap_or_else(|| match &entry.known_torrent {
+                        Some(bytes) => Source::Torrent {
+                            bytes: bytes.clone(),
+                            folder: None,
+                        },
+                        None => Source::Magnet(entry.magnet.clone()),
+                    });
                 self.spawn_start(entry, source);
             }
         }

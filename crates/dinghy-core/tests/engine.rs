@@ -40,6 +40,8 @@ struct Seeder {
     _session: Arc<Session>,
     address: SocketAddr,
     info_hash: String,
+    /// The `.torrent` file the seeder shares.
+    torrent: Vec<u8>,
 }
 
 impl Seeder {
@@ -103,6 +105,7 @@ async fn real_seeder(scratch: &Path, source_dir: &Path) -> Seeder {
     Seeder {
         address: session.listen_addr().expect("seeder is listening"),
         info_hash: created.info_hash().as_string(),
+        torrent: created.as_bytes().unwrap().to_vec(),
         _session: session,
     }
 }
@@ -125,7 +128,7 @@ async fn memory_seeder(scratch: &Path, bytes: Vec<u8>) -> Seeder {
     let session = start_session(scratch, true).await;
     let handle = session
         .add_torrent(
-            AddTorrent::from_bytes(bytes),
+            AddTorrent::from_bytes(bytes.clone()),
             Some(AddTorrentOptions {
                 overwrite: true,
                 ..Default::default()
@@ -143,6 +146,7 @@ async fn memory_seeder(scratch: &Path, bytes: Vec<u8>) -> Seeder {
     Seeder {
         address: session.listen_addr().expect("seeder is listening"),
         info_hash: handle.info_hash().as_string(),
+        torrent: bytes,
         _session: session,
     }
 }
@@ -983,4 +987,144 @@ async fn a_saved_folder_with_the_wrong_shape_is_refused() {
         "nothing written above the folder"
     );
     second_run.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// .torrent files (M5).
+// ---------------------------------------------------------------------------------------------
+
+/// The same torrent as `bytes`, with these trackers added around its file list.
+fn with_trackers(bytes: &[u8], trackers: &[&str]) -> Vec<u8> {
+    let parsed = librqbit::torrent_from_bytes(bytes).unwrap();
+    let text = |value: &str| format!("{}:{value}", value.len());
+    let mut out = format!(
+        "d{}{}{}l",
+        text("announce"),
+        text(trackers[0]),
+        text("announce-list")
+    );
+    for tracker in trackers {
+        out += &format!("l{}e", text(tracker));
+    }
+    out += &format!("e{}", text("info"));
+    let mut out = out.into_bytes();
+    out.extend_from_slice(parsed.info.raw_bytes.0);
+    out.push(b'e');
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_torrent_file_downloads_and_its_local_trackers_are_dropped() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    // A tracker on the home network: it must never be contacted, and never be remembered.
+    let torrent_file = work.path().join("testdata.torrent");
+    std::fs::write(
+        &torrent_file,
+        with_trackers(&seeder.torrent, &["http://192.168.1.10:6969/announce"]),
+    )
+    .unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    engine
+        .add(&torrent_file.display().to_string(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!(done.info_hash, seeder.info_hash);
+    let folder = done.save_folder.unwrap();
+    for (name, bytes) in &files {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes, "{name}");
+    }
+
+    // What was remembered is the rebuilt file: same torrent, no home-network tracker.
+    let saved = dinghy_core::SavedList::read(&list).unwrap();
+    let remembered = saved[0].torrent.as_deref().unwrap();
+    let parsed = librqbit::torrent_from_bytes(remembered).unwrap();
+    assert_eq!(parsed.info_hash.as_string(), seeder.info_hash);
+    assert_eq!(parsed.iter_announce().count(), 0);
+    assert!(!saved[0].magnet.contains("192.168"));
+    engine.shutdown().await;
+    drop(engine);
+
+    // And it comes back after a restart, like any other download.
+    let restarted = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_for_status(
+        &restarted,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_torrent_file_and_its_magnet_link_are_one_download() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let torrent_file = work.path().join("testdata.torrent");
+    std::fs::write(&torrent_file, &seeder.torrent).unwrap();
+    let engine = offline_engine(&work.path().join("downloads")).await;
+    let first = engine
+        .add(&torrent_file.display().to_string(), vec![seeder.address])
+        .unwrap();
+    let second = engine.add(&seeder.magnet(), vec![seeder.address]).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(engine.snapshot().len(), 1);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hostile_torrent_file_is_refused_and_nothing_is_written() {
+    let work = tempfile::tempdir().unwrap();
+    let torrent_file = work.path().join("evil.torrent");
+    // A file name that is impossible to save safely on any system (a control character).
+    std::fs::write(
+        &torrent_file,
+        // (In this format `l` ... `e` is a list: the path list, the file's dictionary and the
+        // list of files each need their own closing `e`.)
+        "d4:infod5:filesld6:lengthi5e4:pathl8:bad\u{7}nameeee4:name4:evil12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee",
+    )
+    .unwrap();
+    let download_dir = work.path().join("downloads");
+    let engine = offline_engine(&download_dir).await;
+    engine
+        .add(&torrent_file.display().to_string(), vec![])
+        .unwrap();
+    let refused = wait_for_status(
+        &engine,
+        &[DownloadStatus::Failed, DownloadStatus::Downloading],
+    )
+    .await;
+    assert_eq!(refused.status, DownloadStatus::Failed);
+    let message = refused.error.unwrap();
+    assert!(message.contains("isn't safe to save"), "{message}");
+    assert!(entries_in(&download_dir).is_empty());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_torrent_file_is_refused_at_once() {
+    let work = tempfile::tempdir().unwrap();
+    let engine = offline_engine(&work.path().join("downloads")).await;
+    let not_a_torrent = work.path().join("notes.torrent");
+    std::fs::write(&not_a_torrent, b"just some text").unwrap();
+    let error = engine
+        .add(&not_a_torrent.display().to_string(), vec![])
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("isn't a valid .torrent file"),
+        "{error}"
+    );
+    let error = engine
+        .add(
+            &work.path().join("missing.torrent").display().to_string(),
+            vec![],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("There is no file"), "{error}");
+    assert!(engine.snapshot().is_empty());
+    engine.shutdown().await;
 }

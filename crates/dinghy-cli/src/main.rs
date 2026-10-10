@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
+use dinghy_core::input::{self, Input};
 use dinghy_core::{
-    DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, magnet,
-    owned_files, remote,
+    DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, owned_files,
+    remote, torrent_file,
 };
 
 /// BitDinghy on the command line.
@@ -24,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Download a magnet link, showing progress, and stop when it is finished
+    /// Download a magnet link or a .torrent file, showing progress, and stop when it is finished
     Get(GetArgs),
     /// Show the saved download list (it works while the window is open, too)
     List,
@@ -84,7 +85,7 @@ enum SettingKey {
 
 #[derive(Args)]
 struct GetArgs {
-    /// The magnet link. Put it in quotes, because it contains & characters
+    /// A magnet link (in quotes, because it contains & characters) or a .torrent file
     link: String,
 
     /// Folder to save into, just this once [default: your remembered download folder]
@@ -511,7 +512,7 @@ fn saved_state(download: &SavedDownload) -> &'static str {
 }
 
 /// `dinghy get`: download one magnet link in this terminal.
-async fn get(args: GetArgs) -> ExitCode {
+async fn get(mut args: GetArgs) -> ExitCode {
     if args.verbose {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "warn,librqbit=info,dinghy_core=debug".into());
@@ -521,10 +522,24 @@ async fn get(args: GetArgs) -> ExitCode {
             .init();
     }
 
-    // Check the link BEFORE starting anything, so a typo fails instantly and quietly.
-    if let Err(error) = magnet::parse(&args.link) {
-        eprintln!("{error}");
-        return ExitCode::FAILURE;
+    // Check what was given BEFORE starting anything, so a typo or a bad file fails instantly
+    // and quietly. A .torrent file is read and checked now too.
+    let input = match input::classify(&args.link) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Input::TorrentFile(path) = &input {
+        if let Err(error) = torrent_file::read(path) {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+        // The window (or the engine) may run in another folder: give it the full path.
+        if let Ok(full) = std::path::absolute(path) {
+            args.link = full.display().to_string();
+        }
     }
 
     let profile = Profile::load();
@@ -556,7 +571,7 @@ async fn get(args: GetArgs) -> ExitCode {
         eprintln!("Note: {notice}");
     }
 
-    let id = match engine.add_magnet(&args.link, args.peers) {
+    let id = match engine.add(&args.link, args.peers) {
         Ok(id) => id,
         Err(error) => {
             eprintln!("{error}");
