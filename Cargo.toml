@@ -42,6 +42,9 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "io-util"] }
 # The messages on that channel, one JSON line each (already in the build through librqbit).
 serde_json = "1"
+# Fetching web links to .torrent files (M5). Already in the build through librqbit, with the same
+# pure-Rust TLS; we fetch ourselves so we can cap the size, the time and the redirects.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Parses magnet links (we validate them ourselves, see dinghy-core/src/magnet.rs).
 url = "2"
 # Finds the user's normal Downloads folder.

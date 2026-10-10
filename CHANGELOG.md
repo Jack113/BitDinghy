@@ -15,6 +15,12 @@ format is called out here.
   `dinghy get`. Every `.torrent` is rebuilt from checked parts only (its file list, plus trackers
   that pass the same filter as magnet links), so trackers pointing at your own PC or home network
   are dropped, and the extra fields in the file are left out.
+- **Web links to .torrent files**, in the window's link box and with `dinghy get`. BitDinghy
+  fetches them itself, carefully: secure `https://` links only (plain `http://` only if you allow
+  it in Settings or with `dinghy settings set allow-http-links on`), never addresses on your own
+  PC or home network (also after a redirect), at most 5 redirects, 30 seconds and 16 MB. The
+  window fetches in the background, so it never freezes.
+- New setting `allow-http-links` (off unless turned on). Older settings files load unchanged.
 - **The command line works while the window is open.** `dinghy list` shows the window's live list
   (with each download's state right now), and `dinghy get <link>` hands the link to the window and
   follows its progress in the terminal (Ctrl+C only stops following). They talk over a local

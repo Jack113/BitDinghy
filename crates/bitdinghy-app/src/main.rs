@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
+use dinghy_core::input::{self, Input};
 use dinghy_core::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, Profile, remote};
 use eframe::egui;
 
@@ -66,6 +67,15 @@ struct BitDinghyApp {
     confirming_remove: Option<DownloadId>,
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
+    /// A web link being fetched in the background, if any.
+    fetching: Option<Fetching>,
+}
+
+/// A web link to a `.torrent` file being fetched in the background, so the window never freezes.
+struct Fetching {
+    /// The web site's name, for the "Fetching..." line.
+    host: String,
+    task: tokio::task::JoinHandle<dinghy_core::Result<DownloadId>>,
 }
 
 impl BitDinghyApp {
@@ -111,17 +121,54 @@ impl BitDinghyApp {
             control_message: None,
             confirming_remove: None,
             channel_problem,
+            fetching: None,
         }
     }
 
     /// Adds what is in the link box: a magnet link or the path of a `.torrent` file.
-    fn submit_link(&mut self, engine: &Engine) {
+    /// Adds what is in the link box: a magnet link, the path of a `.torrent` file, or a web link
+    /// to one. A web link is fetched in the background (see [`Fetching`]).
+    fn submit_link(&mut self, engine: &Arc<Engine>) {
+        if let Ok(Input::WebLink(link)) = input::classify(&self.link) {
+            let host = url_host(&link);
+            let engine = engine.clone();
+            let task = self
+                .runtime
+                .spawn(async move { engine.add_any(&link, Vec::new()).await });
+            self.fetching = Some(Fetching { host, task });
+            self.link_problem = None;
+            return;
+        }
         match engine.add(&self.link, Vec::new()) {
             Ok(_) => {
                 self.link.clear();
                 self.link_problem = None;
             }
             Err(error) => self.link_problem = Some(error.to_string()),
+        }
+    }
+
+    /// When a background fetch has finished: clear the box, or show what went wrong.
+    fn collect_fetch(&mut self) {
+        if !self
+            .fetching
+            .as_ref()
+            .is_some_and(|fetching| fetching.task.is_finished())
+        {
+            return;
+        }
+        let Some(finished) = self.fetching.take() else {
+            return;
+        };
+        match self.runtime.block_on(finished.task) {
+            Ok(Ok(_)) => {
+                self.link.clear();
+                self.link_problem = None;
+            }
+            Ok(Err(error)) => self.link_problem = Some(error.to_string()),
+            Err(_) => {
+                self.link_problem = Some("Fetching the .torrent file stopped unexpectedly.".into())
+            }
         }
     }
 
@@ -228,6 +275,7 @@ impl BitDinghyApp {
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
         let mut save = false;
         let mut use_standard = false;
+        let mut change_http = None;
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
             .default_open(self.engine.is_err())
@@ -256,6 +304,17 @@ impl BitDinghyApp {
                     use_standard |= ui.button("Use the standard folder").clicked();
                 });
                 ui.small("A new download folder is used the next time you start BitDinghy.");
+                let mut allow_http = self.profile.settings().allow_http_links;
+                if ui
+                    .checkbox(
+                        &mut allow_http,
+                        "Also open plain http:// links to .torrent files (less safe: they can be \
+                         changed on the way). Secure https:// links always work.",
+                    )
+                    .changed()
+                {
+                    change_http = Some(allow_http);
+                }
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
                         error_color(ui)
@@ -267,6 +326,22 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some(allow) = change_http {
+            self.settings_message = Some(match self.profile.set_allow_http_links(allow) {
+                Ok(()) => {
+                    if let Ok(engine) = &self.engine {
+                        engine.set_allow_http_links(allow);
+                    }
+                    let now = if allow {
+                        "Plain http:// links are opened too, from now on."
+                    } else {
+                        "Only secure https:// links are opened, from now on."
+                    };
+                    (now.to_string(), false)
+                }
+                Err(error) => (error.to_string(), true),
+            });
         }
     }
 }
@@ -308,7 +383,7 @@ impl eframe::App for BitDinghyApp {
             let box_width = (ui.available_width() - 250.0).max(120.0);
             let link_box = ui.add(
                 egui::TextEdit::singleline(&mut self.link)
-                    .hint_text("Paste a magnet link or the path of a .torrent file")
+                    .hint_text("Paste a magnet link, a .torrent file's path, or a web link to one")
                     .desired_width(box_width),
             );
             let enter_pressed =
@@ -327,6 +402,16 @@ impl eframe::App for BitDinghyApp {
             }
         });
         ui.small("You can also drag .torrent files onto this window.");
+        self.collect_fetch();
+        if let Some(fetching) = &self.fetching {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.colored_label(
+                    info_color(ui),
+                    format!("Fetching the .torrent file from {}...", fetching.host),
+                );
+            });
+        }
         if let Some(problem) = &self.link_problem {
             ui.colored_label(error_color(ui), problem);
         }
@@ -399,6 +484,15 @@ fn shut_down(runtime: &tokio::runtime::Runtime, engine: &Engine) {
     runtime.block_on(async {
         let _ = tokio::time::timeout(Duration::from_secs(3), engine.shutdown()).await;
     });
+}
+
+/// The web site's name in a link, for messages ("archlinux.org").
+fn url_host(link: &str) -> String {
+    link.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .unwrap_or(link)
+        .to_string()
 }
 
 /// A button the person pressed on one download.
@@ -706,5 +800,19 @@ mod tests {
         let engine = runtime.block_on(Engine::start(config)).unwrap();
 
         shut_down(&runtime, &engine);
+    }
+}
+
+#[cfg(test)]
+mod web_link_tests {
+    use super::*;
+
+    #[test]
+    fn the_fetching_line_names_the_web_site() {
+        assert_eq!(
+            url_host("https://archlinux.org/releng/releases/2026.10.01/torrent/"),
+            "archlinux.org"
+        );
+        assert_eq!(url_host("https://example.org:8443?x=1"), "example.org:8443");
     }
 }

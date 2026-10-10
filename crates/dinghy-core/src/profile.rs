@@ -81,6 +81,7 @@ impl Profile {
             .as_ref()
             .map(|data_dir| data_dir.file(DHT_STATE_FILE));
         config.saved_list_file = self.saved_list_path();
+        config.allow_http_links = self.settings.allow_http_links;
         config
     }
 
@@ -94,6 +95,20 @@ impl Profile {
     /// Remembers a new download folder (or goes back to the standard one with `None`). The folder
     /// is checked first, and the change is only kept if it was saved.
     pub fn set_download_dir(&mut self, requested: Option<&Path>) -> Result<()> {
+        let download_dir = match requested {
+            Some(path) => Some(validate_download_dir(path)?),
+            None => None,
+        };
+        self.change(|settings| settings.download_dir = download_dir)
+    }
+
+    /// Remembers whether plain `http://` links to `.torrent` files may be opened too.
+    pub fn set_allow_http_links(&mut self, allow: bool) -> Result<()> {
+        self.change(|settings| settings.allow_http_links = allow)
+    }
+
+    /// Changes the settings and saves them; the change is only kept if it was saved.
+    fn change(&mut self, edit: impl FnOnce(&mut Settings)) -> Result<()> {
         let Some(store) = &self.store else {
             return Err(Error::Settings(
                 "BitDinghy has nowhere to keep settings right now, so this can't be remembered."
@@ -101,10 +116,7 @@ impl Profile {
             ));
         };
         let mut updated = self.settings.clone();
-        updated.download_dir = match requested {
-            Some(path) => Some(validate_download_dir(path)?),
-            None => None,
-        };
+        edit(&mut updated);
         store.save(&updated)?;
         self.settings = updated;
         Ok(())
@@ -144,6 +156,17 @@ mod tests {
             Some(chosen.as_path())
         );
         assert_eq!(second_run.engine_config().download_dir, chosen);
+    }
+
+    #[test]
+    fn allowing_http_links_reaches_the_engine_and_survives_a_restart() {
+        let work = tempfile::tempdir().unwrap();
+        let mut first_run = profile_in(work.path());
+        assert!(!first_run.engine_config().allow_http_links);
+        first_run.set_allow_http_links(true).unwrap();
+        let second_run = profile_in(work.path());
+        assert!(second_run.settings().allow_http_links);
+        assert!(second_run.engine_config().allow_http_links);
     }
 
     #[test]

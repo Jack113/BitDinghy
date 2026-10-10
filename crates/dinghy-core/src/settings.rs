@@ -42,6 +42,15 @@ pub struct Settings {
     /// [`crate::default_download_dir`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<PathBuf>,
+    /// Also open plain `http://` links to `.torrent` files (added in M5; off unless turned on).
+    /// Secure `https://` links are always allowed. Plain http can be changed on the way, so a
+    /// different torrent could be swapped in without anyone noticing.
+    #[serde(skip_serializing_if = "is_false")]
+    pub allow_http_links: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for Settings {
@@ -49,6 +58,7 @@ impl Default for Settings {
         Self {
             version: CURRENT_VERSION,
             download_dir: None,
+            allow_http_links: false,
         }
     }
 }
@@ -369,6 +379,23 @@ mod tests {
                 problem: None
             }
         );
+    }
+
+    #[test]
+    fn allowing_http_links_is_remembered_and_off_by_default() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        assert!(!store.load().settings.allow_http_links);
+        let settings = Settings {
+            allow_http_links: true,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        assert!(store.load().settings.allow_http_links);
+        // Off is the standard, so it isn't even written down.
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!text.contains("allow_http_links"), "{text}");
     }
 
     #[test]

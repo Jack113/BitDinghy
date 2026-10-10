@@ -34,6 +34,7 @@ use crate::owned_files::{self, Deleted};
 use crate::safety::{self, Platform};
 use crate::saved_list::{SavedDownload, SavedList};
 use crate::torrent_file::{self, CheckedTorrent};
+use crate::web_link;
 
 /// Identifies one download for as long as the program runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -59,6 +60,8 @@ pub struct EngineConfig {
     /// Bring back every download in the saved list when starting. The window does; `dinghy get`
     /// doesn't, because it only wants the one download it was asked for.
     pub restore_saved: bool,
+    /// Also open plain `http://` links to `.torrent` files (the setting; https always works).
+    pub allow_http_links: bool,
 }
 
 impl EngineConfig {
@@ -71,6 +74,7 @@ impl EngineConfig {
             dht_state_file: None,
             saved_list_file: None,
             restore_saved: true,
+            allow_http_links: false,
         }
     }
 }
@@ -273,6 +277,8 @@ impl Shared {
 /// The download engine. Create one with [`Engine::start`] and keep it for the whole run.
 pub struct Engine {
     shared: Arc<Shared>,
+    /// The "allow plain http links" setting; the window changes it while running.
+    allow_http_links: AtomicBool,
     runtime: tokio::runtime::Handle,
     download_dir: PathBuf,
     entries: Mutex<Vec<Arc<Entry>>>,
@@ -342,6 +348,7 @@ impl Engine {
             .map_err(|e| Error::EngineStart(format!("{e:#}")))?;
 
         let engine = Engine {
+            allow_http_links: AtomicBool::new(config.allow_http_links),
             shared: Arc::new(Shared {
                 session,
                 session_dir: download_dir.clone(),
@@ -404,9 +411,9 @@ impl Engine {
         )
     }
 
-    /// Adds whatever the person typed, pasted or dropped: a magnet link or a `.torrent` file
-    /// (see `input.rs`). A `.torrent` file is read and rebuilt from checked parts first
-    /// (`torrent_file.rs`), so a bad file fails here, at once.
+    /// Adds a magnet link or a `.torrent` file at once (see `input.rs`). A `.torrent` file is
+    /// read and rebuilt from checked parts first (`torrent_file.rs`), so a bad file fails here.
+    /// Web links need fetching: use [`Engine::add_any`].
     pub fn add(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
         match input::classify(input)? {
             Input::Magnet(parsed) => self.add_new(
@@ -417,12 +424,37 @@ impl Engine {
                 extra_peers,
             ),
             Input::TorrentFile(path) => self.add_torrent(torrent_file::read(&path)?, extra_peers),
-            Input::WebLink(_) => Err(Error::InvalidTorrent(
-                "BitDinghy can't fetch .torrent files from the web yet. Download the .torrent \
-                 file, then open it."
-                    .to_string(),
+            // Fetching takes time, so web links go through `add_any`.
+            Input::WebLink(_) => Err(Error::WebLink(
+                "A web link has to be fetched first (use `add_any`).".to_string(),
             )),
         }
+    }
+
+    /// Adds anything: a magnet link, a `.torrent` file, or a web link to one, which is fetched
+    /// first (carefully, see `web_link.rs`). Fetching can take a few seconds, so this is `async`;
+    /// the window runs it in the background.
+    pub async fn add_any(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
+        match input::classify(input)? {
+            Input::WebLink(link) => self.add_from_web(&link, extra_peers).await,
+            _ => self.add(input, extra_peers),
+        }
+    }
+
+    /// Fetches a web link to a `.torrent` file and adds it. Plain http links only if allowed.
+    pub async fn add_from_web(
+        &self,
+        link: &str,
+        extra_peers: Vec<SocketAddr>,
+    ) -> Result<DownloadId> {
+        let rules = web_link::Rules::new(self.allow_http_links.load(Ordering::SeqCst));
+        let torrent = web_link::fetch(link, rules).await?;
+        self.add_torrent(torrent, extra_peers)
+    }
+
+    /// Changes the "allow plain http links" setting for this run (the window's Settings).
+    pub fn set_allow_http_links(&self, allow: bool) {
+        self.allow_http_links.store(allow, Ordering::SeqCst);
     }
 
     /// Adds a `.torrent` file that has already been checked and rebuilt (`torrent_file.rs`).

@@ -22,6 +22,7 @@ pub mod safety;
 pub mod saved_list;
 pub mod settings;
 pub mod torrent_file;
+pub mod web_link;
 
 pub use data_dir::{DataDir, DataKind};
 pub use engine::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};

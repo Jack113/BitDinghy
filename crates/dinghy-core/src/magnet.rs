@@ -83,15 +83,21 @@ pub(crate) fn clean_tracker(value: &str) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https" | "udp") {
         return None;
     }
-    let keep = match url.host()? {
+    is_internet_host(&url.host()?).then(|| url.to_string())
+}
+
+/// Whether an address, as WRITTEN, is an ordinary internet one: not this computer, not the local
+/// network, not an obviously local name such as `localhost` or `printer.local`. (Web links to
+/// `.torrent` files use the same rule; see `web_link.rs`.)
+pub(crate) fn is_internet_host(host: &Host<&str>) -> bool {
+    match host {
         Host::Domain(domain) => {
             let domain = domain.to_ascii_lowercase();
             !(domain == "localhost" || domain.ends_with(".localhost") || domain.ends_with(".local"))
         }
-        Host::Ipv4(ip) => is_public(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => is_public(IpAddr::V6(ip)),
-    };
-    keep.then(|| url.to_string())
+        Host::Ipv4(ip) => is_public(IpAddr::V4(*ip)),
+        Host::Ipv6(ip) => is_public(IpAddr::V6(*ip)),
+    }
 }
 
 fn is_public(ip: IpAddr) -> bool {

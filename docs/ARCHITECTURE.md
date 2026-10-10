@@ -243,6 +243,14 @@ finishes, and the torrent is taken straight back out.
   it is remembered with its rebuilt file list.
 - `dinghy get` turns a file path into a full path before handing it to the window, because the
   window runs in another folder.
+- **Web links (`web_link.rs`).** librqbit could fetch them itself, but with no limits at all, so
+  BitDinghy fetches them (with `reqwest`, already in the build): https only unless the
+  `allow_http_links` setting is on; the address, and every address a redirect leads to, must be
+  an ordinary internet one (the same rule as the tracker filter, `magnet::is_internet_host`); at
+  most 5 redirects, 30 seconds and 16 MB. The result goes through `torrent_file::check` like any
+  `.torrent`. `Engine::add_any` handles all three kinds of input; it is `async` because fetching
+  takes time, and the window runs it in the background with a "Fetching..." line. With the window
+  open, `dinghy get <link>` lets the window fetch, with the window's own setting.
 
 ## Where each piece appears
 

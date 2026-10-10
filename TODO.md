@@ -15,6 +15,15 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Noticed while building M5
+- Web links to `.torrent` files check addresses as WRITTEN (like trackers): a public-looking name
+  that resolves to a home-network address would still be fetched. Closing it needs a custom DNS
+  resolver in `reqwest` that refuses private addresses (`reqwest::dns::Resolve`). Do it with the
+  tracker gap.
+- `dinghy settings set allow-http-links` while the window is open only reaches the window at its
+  next start (the window's own Settings checkbox applies at once). The channel could pass it on.
+- Opening `.torrent` files / magnet links from Explorer or a browser is M16 (default app).
+
 ## Noticed while building M4
 - Another user on the same PC could create a pipe with BitDinghy's channel name before the window
   opens. The window then says its channel is in use (it never shares it), but `dinghy` would talk

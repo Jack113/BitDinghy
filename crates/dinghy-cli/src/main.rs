@@ -12,7 +12,7 @@ use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, wai
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
     DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, owned_files,
-    remote, torrent_file,
+    remote, torrent_file, web_link,
 };
 
 /// BitDinghy on the command line.
@@ -25,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Download a magnet link or a .torrent file, showing progress, and stop when it is finished
+    /// Download a magnet link, a .torrent file or a web link to one, showing progress, until done
     Get(GetArgs),
     /// Show the saved download list (it works while the window is open, too)
     List,
@@ -81,11 +81,14 @@ enum SettingsAction {
 enum SettingKey {
     /// The folder downloads are saved in
     DownloadDir,
+    /// Also open plain http:// links to .torrent files: "on" or "off" (https always works)
+    AllowHttpLinks,
 }
 
 #[derive(Args)]
 struct GetArgs {
-    /// A magnet link (in quotes, because it contains & characters) or a .torrent file
+    /// A magnet link (in quotes, because it contains & characters), a .torrent file, or an
+    /// https:// link to a .torrent file
     link: String,
 
     /// Folder to save into, just this once [default: your remembered download folder]
@@ -157,6 +160,23 @@ fn show_settings(profile: &Profile) {
             "  (standard folder)"
         }
     );
+    println!(
+        "allow-http-links:  {}",
+        if profile.settings().allow_http_links {
+            "on  (plain http:// links to .torrent files are opened too)"
+        } else {
+            "off  (only secure https:// links)"
+        }
+    );
+}
+
+/// "on"/"off" (and the usual other ways of saying yes or no).
+fn on_or_off(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "yes" | "true" | "1" => Some(true),
+        "off" | "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// `dinghy settings` and `dinghy settings set <key> <value>`.
@@ -174,6 +194,13 @@ fn settings(args: SettingsArgs) -> ExitCode {
             profile.set_download_dir(None)
         }
         SettingKey::DownloadDir => profile.set_download_dir(Some(Path::new(&value))),
+        SettingKey::AllowHttpLinks => match on_or_off(&value) {
+            Some(allow) => profile.set_allow_http_links(allow),
+            None => {
+                eprintln!("allow-http-links is \"on\" or \"off\".");
+                return ExitCode::FAILURE;
+            }
+        },
     };
     match result {
         Ok(()) => {
@@ -545,10 +572,24 @@ async fn get(mut args: GetArgs) -> ExitCode {
     let profile = Profile::load();
     print_notices(&profile);
     // The window is open? Then it owns the engine: hand the link over and follow it from here.
+    // (A web link is then fetched by the window, with the window's own http setting.)
     match window_client(&profile).await {
         Err(code) => return code,
         Ok(Some(window)) => return get_through_window(window, args).await,
         Ok(None) => {}
+    }
+    if let Input::WebLink(link) = &input {
+        let rules = web_link::Rules::new(profile.settings().allow_http_links);
+        match web_link::check_link(link, rules) {
+            Ok(url) => println!(
+                "Fetching the .torrent file from {}...",
+                url.host_str().unwrap_or_default()
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     // Remembered settings first; `--dir` overrides the folder for this run only.
@@ -571,7 +612,7 @@ async fn get(mut args: GetArgs) -> ExitCode {
         eprintln!("Note: {notice}");
     }
 
-    let id = match engine.add(&args.link, args.peers) {
+    let id = match engine.add_any(&args.link, args.peers).await {
         Ok(id) => id,
         Err(error) => {
             eprintln!("{error}");

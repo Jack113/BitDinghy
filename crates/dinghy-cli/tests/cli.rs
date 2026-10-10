@@ -882,3 +882,50 @@ fn a_bad_torrent_file_is_refused_at_once() {
     let stderr = text(&output.stderr);
     assert!(stderr.contains("There is no file"), "{stderr}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// M5 step 2: web links to .torrent files, and the http setting. (No network: every case here is
+// refused before anything is fetched.)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn plain_http_links_need_the_setting() {
+    let data = tempfile::tempdir().unwrap();
+    let output = dinghy_output(data.path(), &["get", "http://example.org/ubuntu.torrent"]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("https"), "{stderr}");
+    assert!(stderr.contains("Settings"), "{stderr}");
+
+    let stdout = assert_success(&dinghy_output(data.path(), &["settings"]));
+    assert!(stdout.contains("allow-http-links:  off"), "{stdout}");
+    let stdout = assert_success(&dinghy_output(
+        data.path(),
+        &["settings", "set", "allow-http-links", "on"],
+    ));
+    assert!(stdout.contains("allow-http-links:  on"), "{stdout}");
+
+    // Allowed now, but this one points at the local network, which is never fetched.
+    let output = dinghy_output(data.path(), &["get", "http://192.168.1.1/x.torrent"]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("local network"), "{stderr}");
+
+    let output = dinghy_output(
+        data.path(),
+        &["settings", "set", "allow-http-links", "maybe"],
+    );
+    assert!(!output.status.success());
+    assert!(text(&output.stderr).contains("\"on\" or \"off\""));
+}
+
+#[test]
+fn links_to_this_computer_are_refused() {
+    let data = tempfile::tempdir().unwrap();
+    for link in ["https://localhost/x.torrent", "https://10.0.0.2/x.torrent"] {
+        let output = dinghy_output(data.path(), &["get", link]);
+        assert!(!output.status.success(), "{link}");
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains("local network"), "{link}: {stderr}");
+    }
+}

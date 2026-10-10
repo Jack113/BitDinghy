@@ -65,14 +65,63 @@ Tests are done one at a time: do the test, compare with "You should see", then g
   shows Arch carrying on. The window found the file even though only its name was typed. Press
   Ctrl+C, then Pause in the window.
 
-**Test 8: web links aren't fetched yet**
-- Do: paste `https://archlinux.org/releng/releases/2026.10.01/torrent/` into the link box and press
-  Download.
-- You should see: a red line "BitDinghy can't fetch .torrent files from the web yet..." (step 2
-  adds this).
+**Tidy up:** remove Arch (Delete the files too), and delete `notes.torrent`.
 
-**Tidy up:** remove Arch (Delete the files too), and delete `notes.torrent`. Keep the Arch
-`.torrent` for step 2.
+### Step 2: web links to .torrent files
+
+**Step 0: get ready** as in step 1 (build, terminal in `C:\cargo-target\debug`, no Arch `.iso` in
+`Downloads\BitDinghy`, the window closed). The link used here is the official Arch one:
+`https://archlinux.org/releng/releases/2026.10.01/torrent/` (fetching it uses about 90 KB).
+
+**Test 1: paste a web link in the window**
+- Do: open the window, paste the Arch link into the link box, press **Download**.
+- You should see: for a moment a spinner and "Fetching the .torrent file from archlinux.org...",
+  then the Arch download appears (no "Looking for people" wait for the file list). The link box is
+  empty again. Press **Pause** to save data.
+
+**Test 2: plain http links are refused by default**
+- Do: remove Arch (Delete the files too). Paste the same link but starting with `http://` instead
+  of `https://`, press Download.
+- You should see: a red line "BitDinghy only opens secure (https://) links to .torrent files,
+  because a plain http:// link can be changed on the way. You can allow plain http links in
+  Settings." Nothing is added.
+
+**Test 3: the setting**
+- Do: open **Settings**. Tick "Also open plain http:// links to .torrent files...".
+- You should see: "Plain http:// links are opened too, from now on." Press Download again with the
+  `http://` link: now it is fetched (archlinux.org sends BitDinghy on to its https address, which
+  is fine) and Arch appears. Pause it. Untick the box: "Only secure https:// links are opened,
+  from now on."
+
+**Test 4: links to your own PC or home network are refused**
+- Do: paste `https://192.168.1.1/x.torrent` and press Download.
+- You should see: "BitDinghy doesn't open links to this computer or the local network
+  (192.168.1.1)." Nothing is contacted.
+
+**Test 5: a link that isn't a .torrent**
+- Do: paste `https://archlinux.org/download/` (the download PAGE, not the torrent) and press
+  Download.
+- You should see: after a moment, "That link didn't lead to a .torrent file (archlinux.org sent
+  something else)."
+
+**Test 6: `dinghy get` with a web link (window closed)**
+- Do: remove Arch in the window (Delete the files too), close the window, run
+  `.\dinghy.exe get "https://archlinux.org/releng/releases/2026.10.01/torrent/"`.
+- You should see: "Fetching the .torrent file from archlinux.org...", "Saving to ...", then
+  progress. Press Ctrl+C after a few seconds.
+
+**Test 7: `dinghy get` with a web link while the window is open**
+- Do: open the window and run the same command.
+- You should see: "BitDinghy's window is open, so the download was added there", and the terminal
+  follows it. Press Ctrl+C, then Pause in the window.
+
+**Test 8: the setting from the command line**
+- Do: close the window. Run `.\dinghy.exe settings`.
+- You should see: a line `allow-http-links:  off  (only secure https:// links)`. Then
+  `.\dinghy.exe settings set allow-http-links on` shows it `on`, and
+  `.\dinghy.exe settings set allow-http-links off` puts it back.
+
+**Tidy up:** remove Arch (Delete the files too).
 
 ## M4: the command line talks to the open window
 

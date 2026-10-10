@@ -19,6 +19,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidTorrent(String),
 
+    /// A web link to a `.torrent` file couldn't be used or fetched. The message says why.
+    #[error("{0}")]
+    WebLink(String),
+
     /// A file name inside the torrent could be used to write outside the download folder.
     #[error(
         "BitDinghy refused this torrent because it contains a file name that isn't safe to save: {0}"
