@@ -21,6 +21,8 @@ format is called out here.
   PC or home network (also after a redirect), at most 5 redirects, 30 seconds and 16 MB. The
   window fetches in the background, so it never freezes.
 - New setting `allow-http-links` (off unless turned on). Older settings files load unchanged.
+- `.torrent` files on network locations (`\server\share\...`) are refused: opening one makes
+  Windows contact that computer. Copy the file to this PC first.
 - **The command line works while the window is open.** `dinghy list` shows the window's live list
   (with each download's state right now), and `dinghy get <link>` hands the link to the window and
   follows its progress in the terminal (Ctrl+C only stops following). They talk over a local

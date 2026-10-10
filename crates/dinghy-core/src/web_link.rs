@@ -105,7 +105,8 @@ async fn fetch_checked(url: Url, rules: Rules) -> Result<CheckedTorrent> {
     let host = url.host_str().unwrap_or_default().to_string();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
+            // `previous()` lists every address so far, the first one included.
+            if attempt.previous().len() > MAX_REDIRECTS {
                 attempt.error("the link sent BitDinghy on too many times")
             } else if let Err(reason) = check_address(attempt.url(), rules) {
                 attempt.error(reason)
@@ -287,20 +288,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_few_redirects_are_followed() {
-        let base = web_server(vec![
-            redirect("{base}/second"),
-            redirect("{base}/third"),
-            ok(TORRENT),
-        ])
-        .await;
+    async fn up_to_five_redirects_are_followed() {
+        let mut answers = vec![redirect("{base}/next"); MAX_REDIRECTS];
+        answers.push(ok(TORRENT));
+        let base = web_server(answers).await;
         let url = Url::parse(&format!("{base}/first")).unwrap();
-        assert!(fetch_checked(url, test_rules(true)).await.is_ok());
+        let result = fetch_checked(url, test_rules(true)).await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
-    async fn too_many_redirects_are_refused() {
-        let base = web_server(vec![redirect("{base}/again"); MAX_REDIRECTS + 2]).await;
+    async fn a_sixth_redirect_is_refused() {
+        // Six redirects, and a .torrent that must never be reached.
+        let mut answers = vec![redirect("{base}/again"); MAX_REDIRECTS + 1];
+        answers.push(ok(TORRENT));
+        let base = web_server(answers).await;
         let url = Url::parse(&format!("{base}/first")).unwrap();
         let error = fetch_checked(url, test_rules(true))
             .await

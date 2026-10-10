@@ -17,7 +17,8 @@ project is built **one feature at a time**.
 
 ## Noticed while building M5
 - Web links to `.torrent` files check addresses as WRITTEN (like trackers): a public-looking name
-  that resolves to a home-network address would still be fetched. Closing it needs a custom DNS
+  that resolves to a home-network address would still be fetched. (The M5 review's other
+  written-address gaps are closed: IPv4-mapped IPv6, `localhost.`, dotless names, 100.64/10.) Closing it needs a custom DNS
   resolver in `reqwest` that refuses private addresses (`reqwest::dns::Resolve`). Do it with the
   tracker gap.
 - `dinghy settings set allow-http-links` while the window is open only reaches the window at its

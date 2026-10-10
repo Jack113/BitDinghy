@@ -130,6 +130,13 @@ impl BitDinghyApp {
     /// to one. A web link is fetched in the background (see [`Fetching`]).
     fn submit_link(&mut self, engine: &Arc<Engine>) {
         if let Ok(Input::WebLink(link)) = input::classify(&self.link) {
+            if self.fetching.is_some() {
+                self.link_problem = Some(
+                    "Wait until the .torrent file being fetched has arrived, then try again."
+                        .to_string(),
+                );
+                return;
+            }
             let host = url_host(&link);
             let engine = engine.clone();
             let task = self

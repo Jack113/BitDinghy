@@ -92,8 +92,11 @@ pub(crate) fn clean_tracker(value: &str) -> Option<String> {
 pub(crate) fn is_internet_host(host: &Host<&str>) -> bool {
     match host {
         Host::Domain(domain) => {
-            let domain = domain.to_ascii_lowercase();
-            !(domain == "localhost" || domain.ends_with(".localhost") || domain.ends_with(".local"))
+            // `localhost.` (with a final dot) is the same name as `localhost`.
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            // A name with no dot at all (`router`, `nas`) can only mean something on the local
+            // network.
+            domain.contains('.') && !(domain.ends_with(".localhost") || domain.ends_with(".local"))
         }
         Host::Ipv4(ip) => is_public(IpAddr::V4(*ip)),
         Host::Ipv6(ip) => is_public(IpAddr::V6(*ip)),
@@ -103,13 +106,21 @@ pub(crate) fn is_internet_host(host: &Host<&str>) -> bool {
 fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
+            // 100.64.0.0/10: addresses shared inside an internet provider's own network (and
+            // used by VPNs such as Tailscale), never public.
+            let shared = ip.octets()[0] == 100 && (ip.octets()[1] & 0b1100_0000) == 64;
             !(ip.is_loopback()
                 || ip.is_private()
                 || ip.is_link_local()
                 || ip.is_unspecified()
                 || ip.is_broadcast()
-                || ip.is_multicast())
+                || ip.is_multicast()
+                || shared)
         }
+        // An IPv4 address written the IPv6 way (`::ffff:192.168.1.1`) is judged as IPv4.
+        IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some() => ip
+            .to_ipv4_mapped()
+            .is_some_and(|v4| is_public(IpAddr::V4(v4))),
         IpAddr::V6(ip) => {
             !(ip.is_loopback()
                 || ip.is_unspecified()
@@ -311,6 +322,11 @@ mod tests {
             "http://printer.local/",
             "ftp://tracker.example.org/",
             "file:///etc/passwd",
+            // Found by the M5 security review:
+            "http://[::ffff:192.168.1.1]/",
+            "http://localhost./announce",
+            "http://router/announce",
+            "http://100.64.1.2/announce",
         ] {
             let link = format!(
                 "magnet:?xt=urn:btih:{HASH}&tr={}",
@@ -318,6 +334,19 @@ mod tests {
             );
             let parsed = parse(&link).unwrap();
             assert!(!parsed.clean_link.contains("tr="), "{tracker} was kept");
+        }
+    }
+
+    #[test]
+    fn ordinary_internet_addresses_are_still_fine() {
+        for tracker in [
+            "http://8.8.8.8/announce",
+            "http://[::ffff:8.8.8.8]/announce",
+            "http://[2001:4860:4860::8888]/announce",
+            "http://100.128.0.1/announce",
+            "udp://tracker.example.org.:1337/announce",
+        ] {
+            assert!(clean_tracker(tracker).is_some(), "{tracker} was dropped");
         }
     }
 

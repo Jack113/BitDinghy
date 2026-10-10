@@ -34,6 +34,15 @@ pub fn classify(text: &str) -> Result<Input> {
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Ok(Input::WebLink(text.to_string()));
     }
+    // A network location (`\\server\share\x.torrent`): even looking at it makes Windows contact that
+    // computer and sign in to it with this person's account. Copy the file to this PC first.
+    if text.starts_with(r"\\") || text.starts_with("//") {
+        return Err(Error::InvalidTorrent(
+            "BitDinghy doesn't open .torrent files from network locations (paths starting with \
+             \\\\). Copy the file to this PC first."
+                .to_string(),
+        ));
+    }
     let path = PathBuf::from(text);
     let named_like_a_torrent = path
         .extension()
@@ -85,6 +94,19 @@ mod tests {
             classify(&odd.display().to_string()).unwrap(),
             Input::TorrentFile(odd)
         );
+    }
+
+    #[test]
+    fn network_locations_are_refused_without_being_touched() {
+        for text in [
+            r"\\203.0.113.5\share\x.torrent",
+            r#""\\nas\downloads\x.torrent""#,
+            r"\\?\UNC\server\share\x.torrent",
+            "//server/share/x.torrent",
+        ] {
+            let error = classify(text).unwrap_err().to_string();
+            assert!(error.contains("network locations"), "{text}: {error}");
+        }
     }
 
     #[test]
