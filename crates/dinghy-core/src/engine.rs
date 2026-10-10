@@ -13,7 +13,11 @@
 //! and again with its file list once that has passed the guard. When the engine starts, it can
 //! bring back everything in the list through the same three steps, so a remembered download is
 //! checked exactly like a new one.
+//!
+//! Every file is downloaded unless the person unticked it (`file_choice.rs`). The choice can change
+//! at any time; it is passed to the engine at step 3, and straight away while a download runs.
 
+use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,6 +32,7 @@ use librqbit::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::file_choice::{self, FileChoice, TorrentFile};
 use crate::input::{self, Input};
 use crate::magnet;
 use crate::owned_files::{self, Deleted};
@@ -120,6 +125,12 @@ pub struct DownloadSnapshot {
     pub save_folder: Option<PathBuf>,
     /// A plain-language problem message when `status` is `Failed`.
     pub error: Option<String>,
+    /// How many files the torrent has, once its file list is known (0 until then).
+    #[serde(default)]
+    pub files_total: usize,
+    /// How many of them are chosen (ticked). The progress counts only these.
+    #[serde(default)]
+    pub files_chosen: usize,
 }
 
 enum EntryState {
@@ -152,6 +163,10 @@ struct Entry {
     /// Its checked file list (a `.torrent` file) and the folder its files are in, once known.
     /// This is what "remove and delete files" uses.
     files: Mutex<Option<(Vec<u8>, PathBuf)>>,
+    /// The same file list, read for choosing files (see `file_choice.rs`), once known.
+    file_list: Mutex<Option<Arc<Vec<TorrentFile>>>>,
+    /// The files the person unticked (the torrent's own indexes). Empty: every file.
+    skipped: Mutex<BTreeSet<usize>>,
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
@@ -166,6 +181,7 @@ struct NewEntry {
     paused: bool,
     peers: Vec<SocketAddr>,
     known_torrent: Option<Vec<u8>>,
+    skipped: BTreeSet<usize>,
 }
 
 /// Where a download's file list comes from.
@@ -497,6 +513,10 @@ impl Engine {
         };
 
         let remembered = self.shared.with_list(|list| list.get(info_hash)).flatten();
+        let skipped = remembered
+            .as_ref()
+            .map(|saved| saved.skipped_files.clone())
+            .unwrap_or_default();
         let (label, download_dir, source) = match remembered {
             Some(saved) => {
                 // Asking for a download again means "carry on", even if it was paused.
@@ -533,6 +553,7 @@ impl Engine {
             paused: false,
             peers: extra_peers,
             known_torrent,
+            skipped,
         });
         let id = entry.id;
         entries.push(entry.clone());
@@ -566,6 +587,7 @@ impl Engine {
                 .unwrap_or_default();
             let (info_hash, name) = (download.info_hash.clone(), download.name.clone());
             let (download_dir, paused) = (download.download_dir.clone(), download.paused);
+            let skipped = download.skipped_files.clone();
             let source = match Source::saved(download) {
                 Some(source) => source,
                 None if !magnet.is_empty() => Source::Magnet(magnet.clone()),
@@ -584,6 +606,7 @@ impl Engine {
                 paused,
                 peers: Vec::new(),
                 known_torrent: None,
+                skipped,
             });
             lock(&self.entries).push(entry.clone());
             match source {
@@ -608,6 +631,8 @@ impl Engine {
             known_torrent: start.known_torrent,
             removed: AtomicBool::new(false),
             files: Mutex::new(None),
+            file_list: Mutex::new(None),
+            skipped: Mutex::new(start.skipped),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
@@ -717,6 +742,84 @@ impl Engine {
         Ok(Some((paths, output_folder)))
     }
 
+    /// A download's files with tick boxes: which are chosen, and how far each has got (while it
+    /// runs). Fails while its file list isn't known yet.
+    pub fn files(&self, id: DownloadId) -> Result<Vec<FileChoice>> {
+        let entry = self.entry(id)?;
+        let files = self.file_list_of(&entry)?.ok_or_else(files_not_known)?;
+        let progress = match &*lock(&entry.state) {
+            EntryState::Active(handle) => Some(handle.stats().file_progress),
+            _ => None,
+        };
+        let skipped = lock(&entry.skipped).clone();
+        Ok(file_choice::choices(&files, &skipped, progress.as_deref()))
+    }
+
+    /// Chooses which files to download, by their numbers in [`Engine::files`] (starting at 1).
+    /// The others are no longer downloaded. Works while the download runs or is paused, and is
+    /// remembered. At least one file must stay chosen.
+    pub async fn choose_files(&self, id: DownloadId, chosen: &BTreeSet<usize>) -> Result<()> {
+        let entry = self.entry(id)?;
+        let files = self.file_list_of(&entry)?.ok_or_else(files_not_known)?;
+        let skipped = file_choice::skipped_for(&files, chosen)?;
+
+        let handle = match &*lock(&entry.state) {
+            EntryState::Active(handle) => Some(handle.clone()),
+            // Between finding its file list and starting, the choice could be missed: say so.
+            EntryState::GettingInfo(_) => return Err(still_starting(&entry.label)),
+            // Not running: the choice is used when it starts.
+            EntryState::Stopped | EntryState::Failed(_) => None,
+        };
+        if let Some(handle) = handle {
+            // The engine can't change the choice while it checks the files already on disk.
+            if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+                return Err(still_starting(&entry.label));
+            }
+            let wanted: HashSet<usize> = files
+                .iter()
+                .map(|file| file.index)
+                .filter(|index| !skipped.contains(index))
+                .collect();
+            self.shared
+                .session
+                .update_only_files(&handle, &wanted)
+                .await
+                .map_err(|e| {
+                    Error::FileChoice(format!(
+                        "Couldn't change the files of \"{}\": {e:#}",
+                        entry.label
+                    ))
+                })?;
+        }
+        self.shared
+            .with_list(|list| list.set_skipped_files(&entry.info_hash, &skipped));
+        *lock(&entry.skipped) = skipped;
+        Ok(())
+    }
+
+    /// A download's file list for choosing files: from the running download, or else from its
+    /// saved file list. `None` while it isn't known yet.
+    fn file_list_of(&self, entry: &Entry) -> Result<Option<Arc<Vec<TorrentFile>>>> {
+        if let Some(files) = lock(&entry.file_list).clone() {
+            return Ok(Some(files));
+        }
+        let torrent = lock(&entry.files)
+            .as_ref()
+            .map(|(torrent, _)| torrent.clone())
+            .or_else(|| {
+                self.shared
+                    .with_list(|list| list.get(&entry.info_hash))
+                    .flatten()
+                    .and_then(|saved| saved.torrent)
+            });
+        let Some(torrent) = torrent else {
+            return Ok(None);
+        };
+        let files = Arc::new(file_choice::files_of_torrent(&torrent)?);
+        *lock(&entry.file_list) = Some(files.clone());
+        Ok(Some(files))
+    }
+
     fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
         lock(&self.entries)
             .iter()
@@ -812,6 +915,20 @@ impl Engine {
     }
 }
 
+fn files_not_known() -> Error {
+    Error::FileChoice(
+        "BitDinghy doesn't know this download's files yet. They can be chosen once it has found \
+         its file list."
+            .to_string(),
+    )
+}
+
+fn still_starting(name: &str) -> Error {
+    Error::FileChoice(format!(
+        "\"{name}\" is still starting (BitDinghy is checking its files). Try again in a moment."
+    ))
+}
+
 /// Steps 1 to 3 from the module notes.
 async fn start_download(
     shared: &Shared,
@@ -872,6 +989,14 @@ async fn start_download(
         owned_files::refuse_existing_files(&paths)?;
     }
     *lock(&entry.files) = Some((listing.torrent_bytes.to_vec(), output_folder.clone()));
+    // The files the person chose (a saved choice is checked against the real list first).
+    let files = file_choice::files_in(&listing.info);
+    let only_files = {
+        let mut skipped = lock(&entry.skipped);
+        *skipped = file_choice::clean_skipped(&files, &skipped);
+        file_choice::only_files(&files, &skipped)
+    };
+    *lock(&entry.file_list) = Some(Arc::new(files));
     if entry.removed.load(Ordering::SeqCst) {
         return Err(Error::Control("removed".to_string()));
     }
@@ -911,6 +1036,7 @@ async fn start_download(
                 output_folder: Some(folder_text),
                 paused: entry.wants_pause.load(Ordering::SeqCst),
                 initial_peers,
+                only_files,
                 ..Default::default()
             }),
         )
@@ -967,6 +1093,17 @@ fn vet_listing(
 }
 
 fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
+    let (files_total, files_chosen) = match &*lock(&entry.file_list) {
+        Some(files) => {
+            let skipped = lock(&entry.skipped);
+            let chosen = files
+                .iter()
+                .filter(|file| !skipped.contains(&file.index))
+                .count();
+            (files.len(), chosen)
+        }
+        None => (0, 0),
+    };
     let mut snapshot = DownloadSnapshot {
         id: entry.id,
         info_hash: entry.info_hash.clone(),
@@ -983,6 +1120,8 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         waiting_for: None,
         save_folder: None,
         error: None,
+        files_total,
+        files_chosen,
     };
 
     let state = lock(&entry.state);

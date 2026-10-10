@@ -5,6 +5,7 @@
 //! * a real download of a small multi-file torrent, checked byte for byte;
 //! * hostile torrents (dangerous file names) that must be refused with NOTHING written to disk.
 
+use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1127,4 +1128,136 @@ async fn a_bad_torrent_file_is_refused_at_once() {
     assert!(error.to_string().contains("There is no file"), "{error}");
     assert!(engine.snapshot().is_empty());
     engine.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Choosing files (M6).
+// ---------------------------------------------------------------------------------------------
+
+/// Three files over ten pieces of 32 KiB. The middle one is big, so leaving it out really means
+/// most of it is never downloaded (the pieces it shares with its neighbours are, in part).
+async fn three_file_torrent(work: &Path) -> (Seeder, Vec<(&'static str, Vec<u8>)>) {
+    let source = work.join("source").join("three");
+    std::fs::create_dir_all(&source).unwrap();
+    let files = vec![
+        ("a.bin", pseudo_random_bytes(60_000, 21)),
+        ("b.bin", pseudo_random_bytes(200_000, 22)),
+        ("c.bin", pseudo_random_bytes(40_000, 23)),
+    ];
+    for (name, bytes) in &files {
+        std::fs::write(source.join(name), bytes).unwrap();
+    }
+    let seeder = real_seeder(&work.join("seeder-scratch"), &source).await;
+    (seeder, files)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = three_file_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    // Paused straight away, so the choice is made before anything is downloaded.
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    let id = first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    first_run.pause(id).await.unwrap();
+    let paused = wait_until(&first_run, "paused with its file list", really_paused).await;
+    assert_eq!((paused.files_total, paused.files_chosen), (3, 3));
+    let shown = first_run.files(id).unwrap();
+    let names: Vec<_> = shown.iter().map(|f| f.path.display().to_string()).collect();
+    assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
+    assert!(shown.iter().all(|f| f.chosen));
+
+    // Refused: nothing chosen, and a number that isn't in the list.
+    let none = first_run.choose_files(id, &BTreeSet::new()).await;
+    assert!(none.unwrap_err().to_string().contains("at least one file"));
+    let wrong = first_run.choose_files(id, &BTreeSet::from([1, 4])).await;
+    assert!(wrong.unwrap_err().to_string().contains("no file number 4"));
+
+    // Files 1 and 3 only.
+    first_run
+        .choose_files(id, &BTreeSet::from([1, 3]))
+        .await
+        .unwrap();
+    assert_eq!(
+        dinghy_core::SavedList::read(&list).unwrap()[0].skipped_files,
+        BTreeSet::from([1]),
+        "the torrent's own index of b.bin is remembered"
+    );
+    first_run.resume(id).await.unwrap();
+    let done = wait_for_status(
+        &first_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!((done.files_total, done.files_chosen), (3, 2));
+    assert!(
+        done.total_bytes < 300_000,
+        "only the chosen files' pieces count: {}",
+        done.total_bytes
+    );
+    let folder = done.save_folder.unwrap();
+    assert_eq!(std::fs::read(folder.join("a.bin")).unwrap(), files[0].1);
+    assert_eq!(std::fs::read(folder.join("c.bin")).unwrap(), files[2].1);
+    assert_ne!(
+        std::fs::read(folder.join("b.bin")).unwrap_or_default(),
+        files[1].1,
+        "b.bin was not downloaded"
+    );
+    let shown = first_run.files(id).unwrap();
+    assert_eq!(shown[0].done_bytes, Some(60_000));
+    assert!(!shown[1].chosen);
+    assert_eq!(shown[2].done_bytes, Some(40_000));
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // After a restart the choice is still there, and the download is still finished.
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    assert_eq!((back.files_total, back.files_chosen), (3, 2));
+    second_run.shutdown().await;
+    drop(second_run);
+
+    // Like `dinghy get` run again (it knows where the seeder is): it carries on with the saved
+    // choice. Ticking b.bin again while it runs downloads that too, straight away.
+    let third_run = remembering_engine(&download_dir, &list, false).await;
+    let id = third_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let again = wait_for_status(
+        &third_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!((again.files_total, again.files_chosen), (3, 2));
+    third_run
+        .choose_files(id, &BTreeSet::from([1, 2, 3]))
+        .await
+        .unwrap();
+    let all = wait_until(&third_run, "every file downloaded", |s| {
+        s.status == DownloadStatus::Finished && s.files_chosen == 3 && s.total_bytes == 300_000
+    })
+    .await;
+    for (name, bytes) in &files {
+        assert_eq!(
+            &std::fs::read(all.save_folder.as_ref().unwrap().join(name)).unwrap(),
+            bytes,
+            "{name}"
+        );
+    }
+    assert!(
+        dinghy_core::SavedList::read(&list).unwrap()[0]
+            .skipped_files
+            .is_empty()
+    );
+    third_run.shutdown().await;
 }

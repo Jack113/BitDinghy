@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
-    DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, owned_files,
-    remote, torrent_file, web_link,
+    DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, SavedDownload, SavedList,
+    file_choice, owned_files, remote, torrent_file, web_link,
 };
 
 /// BitDinghy on the command line.
@@ -35,6 +35,8 @@ enum Command {
     Resume(NumberArg),
     /// Remove a download from the saved list (its files stay, unless you add --delete-files)
     Remove(RemoveArgs),
+    /// Show a download's files, or choose which of them to download (--pick)
+    Files(FilesArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -57,6 +59,16 @@ struct RemoveArgs {
     /// Don't ask before deleting files (for scripts)
     #[arg(long, requires = "delete_files")]
     yes: bool,
+}
+
+#[derive(Args)]
+struct FilesArgs {
+    /// The download's number, as shown by `dinghy list`
+    number: usize,
+
+    /// Download only these files: their numbers and ranges, such as 1,3-5 (or "all")
+    #[arg(long, value_name = "FILES")]
+    pick: Option<String>,
 }
 
 #[derive(Args)]
@@ -120,6 +132,7 @@ async fn main() -> ExitCode {
         Some(Command::Pause(which)) => set_paused(which.number, true).await,
         Some(Command::Resume(which)) => set_paused(which.number, false).await,
         Some(Command::Remove(args)) => remove(args).await,
+        Some(Command::Files(args)) => files(args).await,
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -489,6 +502,190 @@ fn report_removed(
         }
         ExitCode::FAILURE
     }
+}
+
+/// `dinghy files <n> [--pick 1,3-5]`: shows a download's files, or chooses which to download.
+/// Through the open window, or with the window closed, in the saved list.
+async fn files(args: FilesArgs) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => return files_in_window(&mut window, &args).await,
+        Ok(None) => {}
+    }
+
+    let Some(pick) = &args.pick else {
+        // Just looking: no lock needed, so this works while `dinghy get` runs elsewhere.
+        let Some(path) = profile.saved_list_path() else {
+            eprintln!(
+                "BitDinghy has no data folder right now, so it doesn't remember any downloads."
+            );
+            return ExitCode::FAILURE;
+        };
+        let saved = match SavedList::read(&path) {
+            Ok(saved) => saved,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(download) = args
+            .number
+            .checked_sub(1)
+            .and_then(|index| saved.get(index))
+        else {
+            eprintln!(
+                "There is no download number {}. `dinghy list` shows the numbers.",
+                args.number
+            );
+            return ExitCode::FAILURE;
+        };
+        return match saved_choices(download) {
+            Ok(choices) => {
+                print_files(args.number, &download.name, &choices);
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        };
+    };
+
+    let (list, download) = match open_for_change(&profile, args.number, "change") {
+        Ok(found) => found,
+        Err(code) => return code,
+    };
+    let chosen = saved_choices(&download).and_then(|choices| {
+        let numbers =
+            file_choice::parse_numbers(pick, choices.len()).map_err(|error| error.to_string())?;
+        let torrent = download.torrent.as_deref().unwrap_or_default();
+        let files = file_choice::files_of_torrent(torrent).map_err(|error| error.to_string())?;
+        let skipped =
+            file_choice::skipped_for(&files, &numbers).map_err(|error| error.to_string())?;
+        list.set_skipped_files(&download.info_hash, &skipped)
+            .map_err(|error| error.to_string())?;
+        Ok(file_choice::choices(&files, &skipped, None))
+    });
+    match chosen {
+        Ok(choices) => {
+            report_chosen(&download.name, &choices);
+            println!("It is used the next time BitDinghy runs this download.");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A saved download's files with tick boxes (how far each got isn't known without the engine).
+fn saved_choices(download: &SavedDownload) -> Result<Vec<FileChoice>, String> {
+    let Some(torrent) = &download.torrent else {
+        return Err(format!(
+            "BitDinghy doesn't know the files of \"{}\" yet: it is still looking for its file \
+             list.",
+            download.name
+        ));
+    };
+    let files = file_choice::files_of_torrent(torrent).map_err(|error| error.to_string())?;
+    let skipped = file_choice::clean_skipped(&files, &download.skipped_files);
+    Ok(file_choice::choices(&files, &skipped, None))
+}
+
+/// `dinghy files` through the open window. A change names the download by its fingerprint, so a
+/// list that changed in the meantime can never change a different download.
+async fn files_in_window(window: &mut remote::Client, args: &FilesArgs) -> ExitCode {
+    let (info_hash, name, choices) = match window
+        .ask(remote::Command::Files {
+            target: remote::Target::Number(args.number),
+        })
+        .await
+    {
+        Ok(remote::Reply::FileList {
+            info_hash,
+            name,
+            files,
+        }) => (info_hash, name, files),
+        other => return explain_unexpected(other),
+    };
+    let Some(pick) = &args.pick else {
+        print_files(args.number, &name, &choices);
+        return ExitCode::SUCCESS;
+    };
+    let chosen = match file_choice::parse_numbers(pick, choices.len()) {
+        Ok(chosen) => chosen,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match window
+        .ask(remote::Command::ChooseFiles {
+            target: remote::Target::InfoHash(info_hash),
+            chosen: chosen.clone(),
+        })
+        .await
+    {
+        Ok(remote::Reply::Changed { name }) => {
+            let choices: Vec<FileChoice> = choices
+                .into_iter()
+                .map(|choice| FileChoice {
+                    chosen: chosen.contains(&choice.number),
+                    ..choice
+                })
+                .collect();
+            report_chosen(&name, &choices);
+            println!("BitDinghy's open window uses it straight away.");
+            ExitCode::SUCCESS
+        }
+        other => explain_unexpected(other),
+    }
+}
+
+/// Prints a download's files with tick boxes, and how to change them.
+fn print_files(number: usize, name: &str, choices: &[FileChoice]) {
+    let chosen: Vec<&FileChoice> = choices.iter().filter(|choice| choice.chosen).collect();
+    println!(
+        "{name}: {} of {} file{} chosen ({}):",
+        chosen.len(),
+        choices.len(),
+        if choices.len() == 1 { "" } else { "s" },
+        format_bytes(chosen.iter().map(|choice| choice.size).sum())
+    );
+    for choice in choices {
+        println!("  {}", file_line(choice));
+    }
+    println!("Choose with: dinghy files {number} --pick 1,3-5   (numbers and ranges, or \"all\")");
+}
+
+/// One file: `[x]  3. folder/file.iso  1.5 GiB  42%`.
+fn file_line(choice: &FileChoice) -> String {
+    let tick = if choice.chosen { "[x]" } else { "[ ]" };
+    let mut line = format!(
+        "{tick} {:>3}. {}  {}",
+        choice.number,
+        choice.path.display(),
+        format_bytes(choice.size)
+    );
+    if let Some(done) = choice.done_bytes {
+        line.push_str(&format!("  {:.0}%", fraction(done, choice.size) * 100.0));
+    }
+    line
+}
+
+/// What `dinghy files --pick` says afterwards.
+fn report_chosen(name: &str, choices: &[FileChoice]) {
+    let chosen: Vec<&FileChoice> = choices.iter().filter(|choice| choice.chosen).collect();
+    println!(
+        "{name}: now downloading {} of {} file{} ({}).",
+        chosen.len(),
+        choices.len(),
+        if choices.len() == 1 { "" } else { "s" },
+        format_bytes(chosen.iter().map(|choice| choice.size).sum())
+    );
 }
 
 /// A problem reported by the window (or an answer that doesn't fit the question).
@@ -936,6 +1133,8 @@ mod tests {
             waiting_for: Some(Duration::from_secs(7)),
             save_folder: None,
             error: None,
+            files_total: 3,
+            files_chosen: 3,
         }
     }
 
@@ -971,6 +1170,40 @@ mod tests {
         assert_eq!(saved_state(&saved), "active");
         saved.paused = true;
         assert_eq!(saved_state(&saved), "paused");
+    }
+
+    #[test]
+    fn a_file_line_shows_its_tick_number_size_and_progress() {
+        let mut choice = FileChoice {
+            number: 3,
+            path: PathBuf::from("folder").join("file.iso"),
+            size: 2048,
+            done_bytes: Some(512),
+            chosen: true,
+        };
+        let line = file_line(&choice);
+        assert!(line.starts_with("[x]   3. "), "{line}");
+        assert!(line.contains("file.iso  2.0 KiB  25%"), "{line}");
+        choice.chosen = false;
+        choice.done_bytes = None;
+        let line = file_line(&choice);
+        assert!(line.starts_with("[ ]"), "{line}");
+        assert!(line.ends_with("2.0 KiB"), "{line}");
+    }
+
+    #[test]
+    fn a_download_still_looking_for_its_file_list_has_no_files_to_show() {
+        let saved = SavedDownload::new(
+            "c9e15763f722f23e98a29decdfae341b98d53056",
+            "Ubuntu",
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            Path::new("downloads"),
+        );
+        let message = saved_choices(&saved).unwrap_err();
+        assert!(
+            message.contains("still looking for its file list"),
+            "{message}"
+        );
     }
 
     #[test]

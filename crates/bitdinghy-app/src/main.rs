@@ -6,13 +6,16 @@
 
 mod brand;
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
-use dinghy_core::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, Profile, remote};
+use dinghy_core::{
+    DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, remote,
+};
 use eframe::egui;
 
 /// The brand's error color for the current theme (light or dark), so it stays readable on both
@@ -71,6 +74,8 @@ struct BitDinghyApp {
     control_message: Option<(String, bool)>,
     /// The download whose "Remove?" question is showing, if any.
     confirming_remove: Option<DownloadId>,
+    /// The downloads whose file list (with tick boxes) is open.
+    showing_files: HashSet<DownloadId>,
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
@@ -126,6 +131,7 @@ impl BitDinghyApp {
             settings_message: None,
             control_message: None,
             confirming_remove: None,
+            showing_files: HashSet::new(),
             channel_problem,
             fetching: None,
         }
@@ -245,8 +251,19 @@ impl BitDinghyApp {
                 self.confirming_remove = None;
                 Ok(None)
             }
+            Control::ToggleFiles(id) => {
+                if !self.showing_files.remove(&id) {
+                    self.showing_files.insert(id);
+                }
+                Ok(None)
+            }
+            Control::ChooseFiles { id, chosen } => self
+                .runtime
+                .block_on(engine.choose_files(id, &chosen))
+                .map(|()| None),
             Control::Remove { id, delete_files } => {
                 self.confirming_remove = None;
+                self.showing_files.remove(&id);
                 let name = name_of(id);
                 let folder = engine
                     .download_dir_of(id)
@@ -469,7 +486,11 @@ impl eframe::App for BitDinghyApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for download in &downloads {
                 let confirming = self.confirming_remove == Some(download.id);
-                clicked = draw_download(ui, download, confirming).or(clicked);
+                let files = self
+                    .showing_files
+                    .contains(&download.id)
+                    .then(|| engine.files(download.id).map_err(|error| error.to_string()));
+                clicked = draw_download(ui, download, confirming, files).or(clicked.take());
                 ui.separator();
             }
         });
@@ -509,10 +530,17 @@ fn url_host(link: &str) -> String {
 }
 
 /// A button the person pressed on one download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Control {
     Pause(DownloadId),
     Resume(DownloadId),
+    /// "Files" was pressed: show or hide its file list.
+    ToggleFiles(DownloadId),
+    /// A tick box was changed: download only these files (their numbers).
+    ChooseFiles {
+        id: DownloadId,
+        chosen: BTreeSet<usize>,
+    },
     /// "Remove" was pressed: show the question.
     AskRemove(DownloadId),
     CancelRemove,
@@ -571,12 +599,115 @@ fn paused_text(download: &DownloadSnapshot) -> String {
     }
 }
 
+/// The "Files" button's label: says when only some files are chosen.
+fn files_button_text(download: &DownloadSnapshot, showing: bool) -> String {
+    if showing {
+        "Hide files".to_string()
+    } else if download.files_chosen < download.files_total {
+        format!(
+            "Files ({} of {})",
+            download.files_chosen, download.files_total
+        )
+    } else {
+        "Files".to_string()
+    }
+}
+
+/// The files the person has ticked after clicking the tick box of file `clicked`.
+fn chosen_after_click(files: &[FileChoice], clicked: usize) -> BTreeSet<usize> {
+    files
+        .iter()
+        .filter(|file| file.chosen != (file.number == clicked))
+        .map(|file| file.number)
+        .collect()
+}
+
+/// A download's files with tick boxes. Changing a tick applies at once. The last ticked file
+/// can't be unticked: to stop the whole download, pause or remove it.
+fn draw_files(ui: &mut egui::Ui, id: DownloadId, files: &[FileChoice]) -> Option<Control> {
+    let mut clicked = None;
+    ui.group(|ui| {
+        let chosen_count = files.iter().filter(|file| file.chosen).count();
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{} of {} files chosen. Unticked files are not downloaded.",
+                chosen_count,
+                files.len()
+            ));
+            if chosen_count < files.len() && ui.button("Choose all").clicked() {
+                clicked = Some(Control::ChooseFiles {
+                    id,
+                    chosen: files.iter().map(|file| file.number).collect(),
+                });
+            }
+        });
+        let row_height = ui.spacing().interact_size.y;
+        // Only the rows on screen are drawn, so a torrent with thousands of files stays quick.
+        egui::ScrollArea::vertical()
+            .id_salt(("files", id.0))
+            .max_height(row_height * 10.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, row_height, files.len(), |ui, rows| {
+                for file in &files[rows] {
+                    ui.horizontal(|ui| {
+                        let mut ticked = file.chosen;
+                        let only_one_left = file.chosen && chosen_count == 1;
+                        let tick = ui
+                            .add_enabled(
+                                !only_one_left,
+                                egui::Checkbox::new(&mut ticked, file.path.display().to_string()),
+                            )
+                            .on_disabled_hover_text(
+                                "At least one file stays chosen. To stop the whole download, \
+                                 pause or remove it.",
+                            );
+                        if tick.changed() {
+                            clicked = Some(Control::ChooseFiles {
+                                id,
+                                chosen: chosen_after_click(files, file.number),
+                            });
+                        }
+                        ui.weak(file_details(file));
+                    });
+                }
+            });
+    });
+    clicked
+}
+
+/// A file's size, and how far it got when known: "1.5 GiB, 42%".
+fn file_details(file: &FileChoice) -> String {
+    match file.done_bytes {
+        Some(done) => format!(
+            "{}, {:.0}%",
+            format_bytes(file.size),
+            fraction(done, file.size) * 100.0
+        ),
+        None => format_bytes(file.size),
+    }
+}
+
+/// The line under a finished download: what was saved, and where.
+fn finished_text(download: &DownloadSnapshot, folder: &str) -> String {
+    let size = format_bytes(download.total_bytes);
+    if download.files_chosen < download.files_total {
+        format!(
+            "Finished: {} of {} files ({size}) saved in {folder}",
+            download.files_chosen, download.files_total
+        )
+    } else {
+        format!("Finished: {size} saved in {folder}")
+    }
+}
+
 /// Draws one download: its name and buttons, then a progress bar and numbers (or a message).
-/// `confirming` shows the "Remove?" question under it. Returns the button press, if any.
+/// `confirming` shows the "Remove?" question under it; `files` is its file list when that is
+/// open. Returns the button press, if any.
 fn draw_download(
     ui: &mut egui::Ui,
     download: &DownloadSnapshot,
     confirming: bool,
+    files: Option<Result<Vec<FileChoice>, String>>,
 ) -> Option<Control> {
     let mut clicked = None;
     ui.horizontal(|ui| {
@@ -596,6 +727,14 @@ fn draw_download(
             let (label, control) = control_for(download);
             if ui.button(label).clicked() {
                 clicked = Some(control);
+            }
+            // Only a torrent with several files has anything to choose.
+            if download.files_total > 1
+                && ui
+                    .button(files_button_text(download, files.is_some()))
+                    .clicked()
+            {
+                clicked = Some(Control::ToggleFiles(download.id));
             }
         });
     });
@@ -627,6 +766,14 @@ fn draw_download(
                 }
             });
         });
+    }
+
+    match &files {
+        Some(Ok(files)) => clicked = draw_files(ui, download.id, files).or(clicked),
+        Some(Err(problem)) => {
+            ui.colored_label(error_color(ui), problem);
+        }
+        None => {}
     }
 
     match download.status {
@@ -669,13 +816,7 @@ fn draw_download(
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
-                ui.colored_label(
-                    success_color(ui),
-                    format!(
-                        "Finished: {} saved in {folder}",
-                        format_bytes(download.total_bytes)
-                    ),
-                );
+                ui.colored_label(success_color(ui), finished_text(download, &folder));
                 ui.label(format!(
                     "Sharing back to {} people ({} uploaded so far). Closing BitDinghy stops sharing.",
                     download.peers_connected,
@@ -737,7 +878,54 @@ mod tests {
             waiting_for: None,
             save_folder: None,
             error: None,
+            files_total: 0,
+            files_chosen: 0,
         }
+    }
+
+    fn file(number: usize, chosen: bool) -> FileChoice {
+        FileChoice {
+            number,
+            path: format!("file{number}.bin").into(),
+            size: 1000,
+            done_bytes: None,
+            chosen,
+        }
+    }
+
+    #[test]
+    fn clicking_a_tick_box_flips_only_that_file() {
+        let files = [file(1, true), file(2, false), file(3, true)];
+        assert_eq!(chosen_after_click(&files, 2), BTreeSet::from([1, 2, 3]));
+        assert_eq!(chosen_after_click(&files, 1), BTreeSet::from([3]));
+    }
+
+    #[test]
+    fn the_files_button_says_when_only_some_are_chosen() {
+        let mut download = snapshot(DownloadStatus::Downloading, 0, 0);
+        download.files_total = 5;
+        download.files_chosen = 5;
+        assert_eq!(files_button_text(&download, false), "Files");
+        download.files_chosen = 2;
+        assert_eq!(files_button_text(&download, false), "Files (2 of 5)");
+        assert_eq!(files_button_text(&download, true), "Hide files");
+    }
+
+    #[test]
+    fn a_finished_download_says_how_many_files_were_chosen() {
+        let mut download = snapshot(DownloadStatus::Finished, 2048, 2048);
+        download.files_total = 3;
+        download.files_chosen = 3;
+        assert_eq!(
+            finished_text(&download, r"C:\D"),
+            r"Finished: 2.0 KiB saved in C:\D"
+        );
+        download.files_chosen = 1;
+        assert!(
+            finished_text(&download, r"C:\D").contains("Finished: 1 of 3 files (2.0 KiB)"),
+            "{}",
+            finished_text(&download, r"C:\D")
+        );
     }
 
     #[test]

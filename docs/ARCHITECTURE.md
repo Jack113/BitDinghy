@@ -193,7 +193,7 @@ finishes, and the torrent is taken straight back out.
         |                                                 |
         |  1. is a window listening on this data          |  listens on a channel named
         |     folder's channel?                           |  after its data folder
-        |---- one JSON line: {"version":1,"command":..} ->|
+        |---- one JSON line: {"version":2,"command":..} ->|
         |<--- one JSON line: the answer ------------------|  same engine calls as its buttons
         |
         +-- nobody listening: work alone, as before (own engine, or the saved list)
@@ -252,6 +252,31 @@ finishes, and the torrent is taken straight back out.
   takes time, and the window runs it in the background with a "Fetching..." line. With the window
   open, `dinghy get <link>` lets the window fetch, with the window's own setting.
 
+## Choosing files (M6, `file_choice.rs`)
+
+- Every download starts with **all its files chosen**. The window's **Files** button (shown when a
+  torrent has more than one file) opens a list with tick boxes; `dinghy files <n>` prints the same
+  list and `dinghy files <n> --pick 1,3-5` (or `all`) changes it. A change applies straight away
+  while a download runs or is paused, and is remembered. At least one file stays chosen; to stop
+  everything, pause or remove the download.
+- **Numbers for people, indexes for the engine.** A torrent's file list can hold "padding"
+  entries that are never written to disk. People see only real files, numbered 1, 2, 3... The
+  saved list stores the torrent's own index of each **unticked** file (`skipped_files`, for
+  example `"1,3"`; empty means everything, which is also what an older list means). A saved
+  choice is checked against the real file list before use: indexes that aren't real files are
+  dropped, and "everything unticked" becomes "nothing unticked".
+- The engine gets the choice at step 3 (`only_files`), and through `update_only_files` while a
+  download runs. The progress, the total and "finished" then count only the chosen files.
+  Choosing is refused for a moment while a download is starting or checking its files (the engine
+  can't change it then), with a plain "try again in a moment".
+- **What librqbit leaves on disk for unticked files.** It creates every file of a torrent, ticked
+  or not. An unticked file is normally left empty, but where a piece crosses from a ticked file
+  into an unticked one, that part of the unticked file is written too. On Windows (NTFS) librqbit
+  marks the files "sparse", so the unused rest takes no real disk space, though Explorer shows the
+  full size. M6 step 2 deals with these leftovers.
+- The saved list is now **version 2** (one new column, added by an upgrade step); the channel's
+  messages are **version 2** (`Files`, `ChooseFiles`, and file counts in each download).
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -259,5 +284,7 @@ finishes, and the torrent is taken straight back out.
 | M1 | Engine wrapper and the path guard |
 | M3 | Database and the saved download list |
 | M4 | The channel between the window and the command line |
+| M5 | .torrent files and web links to them |
+| M6 | Choosing files |
 | M8-M10 | Queue and limits |
 | M14 | History and charts |

@@ -16,6 +16,7 @@
 //! automatically when the program ends, even after a crash. A second BitDinghy that tries gets
 //! [`Error::AlreadyRunning`]. Just reading the list ([`SavedList::read`]) needs no lock.
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,12 +24,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 
 use crate::error::{Error, Result};
+use crate::file_choice;
 
 /// The file's name inside the data folder.
 pub const FILE_NAME: &str = "downloads.db";
 
 /// The list format this version of BitDinghy writes.
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 /// Marks the file as BitDinghy's (the letters "BDdy"), so another program's SQLite file is never
 /// mistaken for our list.
@@ -49,14 +51,27 @@ CREATE TABLE downloads (
 );";
 
 /// One step that upgrades the list from version N to N+1. `MIGRATIONS[0]` upgrades v1 to v2, and
-/// so on. There are none yet because v1 is the first version. When the layout changes, add a step
-/// here and a test with a saved example of the old list (like `tests/fixtures/downloads-v1.sql`).
+/// so on. When the layout changes, add a step here, and a saved example of the newest list to
+/// `tests/fixtures/` (like `downloads-v1.sql` and `downloads-v2.sql`) with a test that loads it.
+/// **Never change a step that has shipped**: lists out there have already been upgraded by it.
 type Migration = fn(&rusqlite::Transaction) -> rusqlite::Result<()>;
-const MIGRATIONS: &[Migration] = &[];
+const MIGRATIONS: &[Migration] = &[v1_to_v2];
+
+/// Version 2 (M6, choosing files): remembers the files the person unticked, as the torrent's file
+/// indexes ("2,5"). Empty means every file, which is what every download from version 1 wants.
+fn v1_to_v2(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    transaction
+        .execute_batch("ALTER TABLE downloads ADD COLUMN skipped_files TEXT NOT NULL DEFAULT ''")
+}
 
 /// The columns, in the order [`row_to_download`] reads them.
-const COLUMNS: &str =
-    "info_hash, name, magnet, torrent, download_dir, output_folder, paused, added_at";
+const COLUMNS: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
+                       added_at, skipped_files";
+
+/// The same columns for a version 1 list (read without upgrading it, by `dinghy list`): every
+/// file was wanted then.
+const COLUMNS_V1: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
+                          added_at, '' AS skipped_files";
 
 /// One remembered download.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +93,9 @@ pub struct SavedDownload {
     pub paused: bool,
     /// When it was added, in seconds since 1970.
     pub added_at: u64,
+    /// The files the person unticked, as the torrent's own file indexes (see `file_choice.rs`).
+    /// Empty means every file.
+    pub skipped_files: BTreeSet<usize>,
 }
 
 impl SavedDownload {
@@ -92,6 +110,7 @@ impl SavedDownload {
             output_folder: None,
             paused: false,
             added_at: now_seconds(),
+            skipped_files: BTreeSet::new(),
         }
     }
 }
@@ -250,27 +269,21 @@ impl SavedList {
         let _ = connection.busy_timeout(Duration::from_secs(5));
 
         match check_identity(&connection) {
-            Ok(Some(version)) if version == CURRENT_VERSION => {}
-            Ok(Some(version)) if version > CURRENT_VERSION => {
-                return Err(Error::SavedList(
-                    Problem::NewerVersion { found: version }.message(),
-                ));
+            Ok(Some(found)) if found > CURRENT_VERSION => {
+                Err(Error::SavedList(Problem::NewerVersion { found }.message()))
             }
-            Ok(Some(_older)) => {
-                return Err(problem(
-                    "it was saved by an older BitDinghy; open BitDinghy once to update it"
-                        .to_string(),
-                ));
+            // An older list is read as it is (reading never upgrades it; the next BitDinghy that
+            // opens it for changes does).
+            Ok(Some(version)) => {
+                let columns = if version == 1 { COLUMNS_V1 } else { COLUMNS };
+                rows_with(&connection, columns).map_err(|e| problem(e.to_string()))
             }
-            Ok(None) => return Ok(Vec::new()), // An empty file: nothing saved yet.
+            Ok(None) => Ok(Vec::new()), // An empty file: nothing saved yet.
             Err(Failure::Newer(found)) => {
-                return Err(Error::SavedList(Problem::NewerVersion { found }.message()));
+                Err(Error::SavedList(Problem::NewerVersion { found }.message()))
             }
-            Err(Failure::Damaged(reason) | Failure::CantOpen(reason)) => {
-                return Err(problem(reason));
-            }
+            Err(Failure::Damaged(reason) | Failure::CantOpen(reason)) => Err(problem(reason)),
         }
-        all_rows(&connection).map_err(|e| problem(e.to_string()))
     }
 
     /// Where the list is kept.
@@ -316,7 +329,7 @@ impl SavedList {
             .execute(
                 &format!(
                     "INSERT OR IGNORE INTO downloads ({COLUMNS}) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
                 ),
                 params![
                     download.info_hash,
@@ -331,6 +344,7 @@ impl SavedList {
                         .transpose()?,
                     download.paused,
                     i64::try_from(download.added_at).unwrap_or(i64::MAX),
+                    file_choice::skipped_to_text(&download.skipped_files),
                 ],
             )
             .map_err(|e| self.error("save", e))?;
@@ -368,6 +382,21 @@ impl SavedList {
             .execute(
                 "UPDATE downloads SET paused = ?2 WHERE info_hash = ?1",
                 params![info_hash, paused],
+            )
+            .map_err(|e| self.error("save", e))?;
+        Ok(changed == 1)
+    }
+
+    /// Remembers which files the person unticked (empty: every file is wanted). Returns whether
+    /// it was in the list.
+    pub fn set_skipped_files(&self, info_hash: &str, skipped: &BTreeSet<usize>) -> Result<bool> {
+        let Some(connection) = &self.connection else {
+            return Ok(false);
+        };
+        let changed = connection
+            .execute(
+                "UPDATE downloads SET skipped_files = ?2 WHERE info_hash = ?1",
+                params![info_hash, file_choice::skipped_to_text(skipped)],
             )
             .map_err(|e| self.error("save", e))?;
         Ok(changed == 1)
@@ -527,8 +556,13 @@ fn set_aside(path: &Path) -> Option<PathBuf> {
 }
 
 fn all_rows(connection: &Connection) -> rusqlite::Result<Vec<SavedDownload>> {
+    rows_with(connection, COLUMNS)
+}
+
+/// Every row, oldest first, read through `columns` (which must match [`row_to_download`]).
+fn rows_with(connection: &Connection, columns: &str) -> rusqlite::Result<Vec<SavedDownload>> {
     let mut statement = connection.prepare(&format!(
-        "SELECT {COLUMNS} FROM downloads ORDER BY added_at, rowid"
+        "SELECT {columns} FROM downloads ORDER BY added_at, rowid"
     ))?;
     let rows = statement.query_map([], row_to_download)?;
     rows.collect()
@@ -544,6 +578,7 @@ fn row_to_download(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedDownload> {
         output_folder: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
         paused: row.get(6)?,
         added_at: u64::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
+        skipped_files: file_choice::skipped_from_text(&row.get::<_, String>(8)?),
     })
 }
 
@@ -809,28 +844,134 @@ mod tests {
             ))
         );
         assert!(saved[1].paused);
+        // Version 1 had no choice of files: every file is wanted.
+        assert!(
+            saved
+                .iter()
+                .all(|download| download.skipped_files.is_empty())
+        );
+        drop(opened);
+        let version: u32 = Connection::open(&path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION, "opening it upgraded it");
+    }
+
+    #[test]
+    fn a_version_1_list_can_be_read_without_upgrading_it() {
+        // `dinghy list` after installing a newer BitDinghy, before the window has opened.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v1.sql"))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let saved = SavedList::read(&path).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].name, "testdata");
+        assert!(saved[1].skipped_files.is_empty());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "reading changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_version_2_fixture_still_loads() {
+        // This fixture was written with list version 2 and must load in EVERY later version.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v2.sql"))
+            .unwrap();
+        assert_eq!(SavedList::read(&path).unwrap().len(), 2);
+
+        let opened = open(&path);
+        assert!(opened.problem.is_none(), "{:?}", opened.problem);
+        let saved = opened.list.all().unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].name, "Some Linux");
+        assert_eq!(saved[0].torrent, None);
+        assert!(saved[0].skipped_files.is_empty());
+        assert!(!saved[0].paused);
+        assert_eq!(saved[0].added_at, 1_791_700_000);
+
+        assert_eq!(saved[1].info_hash, OTHER_HASH);
+        assert_eq!(
+            saved[1].torrent.as_deref(),
+            Some(&b"d4:infod4:name8:testdataee"[..])
+        );
+        assert_eq!(
+            saved[1].output_folder,
+            Some(PathBuf::from(
+                r"C:\Users\Someone\Downloads\BitDinghy\testdata"
+            ))
+        );
+        assert!(saved[1].paused);
+        assert_eq!(saved[1].skipped_files, BTreeSet::from([1, 3]));
+    }
+
+    #[test]
+    fn the_unticked_files_are_remembered_after_a_restart() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        {
+            let list = open(&path).list;
+            list.add(&sample(HASH)).unwrap();
+            assert!(
+                list.set_skipped_files(HASH, &BTreeSet::from([0, 4]))
+                    .unwrap()
+            );
+            assert!(
+                !list
+                    .set_skipped_files(OTHER_HASH, &BTreeSet::from([1]))
+                    .unwrap(),
+                "not in the list"
+            );
+        }
+        let list = open(&path).list;
+        assert_eq!(
+            list.get(HASH).unwrap().unwrap().skipped_files,
+            BTreeSet::from([0, 4])
+        );
+        assert_eq!(
+            SavedList::read(&path).unwrap()[0].skipped_files,
+            BTreeSet::from([0, 4])
+        );
+        list.set_skipped_files(HASH, &BTreeSet::new()).unwrap();
+        assert!(list.get(HASH).unwrap().unwrap().skipped_files.is_empty());
     }
 
     #[test]
     fn upgrades_run_in_order_and_are_remembered() {
-        // A pretend version 2 that adds a column, to prove the upgrade machinery works before a
-        // real upgrade ever needs it.
+        // A pretend version 3 that adds a column, to prove the upgrade machinery keeps working
+        // for the next real upgrade.
         fn add_rating(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
             transaction.execute_batch("ALTER TABLE downloads ADD COLUMN rating INTEGER")
         }
         let work = tempfile::tempdir().unwrap();
         let path = work.path().join(FILE_NAME);
-        open(&path).list.add(&sample(HASH)).unwrap();
-
-        let upgraded = SavedList::open_with(&path, &[add_rating]).unwrap();
-        assert!(upgraded.problem.is_none());
-        assert_eq!(upgraded.list.all().unwrap().len(), 1);
-        drop(upgraded);
-        let version: u32 = Connection::open(&path)
+        Connection::open(&path)
             .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v1.sql"))
+            .unwrap();
+
+        let upgraded = SavedList::open_with(&path, &[v1_to_v2, add_rating]).unwrap();
+        assert!(upgraded.problem.is_none());
+        assert_eq!(upgraded.list.all().unwrap().len(), 2);
+        drop(upgraded);
+        let connection = Connection::open(&path).unwrap();
+        let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3, "both steps ran, from version 1");
+        connection
+            .prepare("SELECT skipped_files, rating FROM downloads")
+            .expect("both new columns exist");
     }
 
     #[test]

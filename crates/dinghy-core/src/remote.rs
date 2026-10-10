@@ -17,6 +17,7 @@
 //! Everything a request asks for goes through the same engine calls as the window's own buttons,
 //! with the same checks, so the channel adds no new way around them.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,9 +29,11 @@ use tokio::io::{
 
 use crate::engine::{DownloadSnapshot, Engine};
 use crate::error::{Error, Result};
+use crate::file_choice::FileChoice;
 
 /// The version of the messages below. Change it whenever a message changes shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version 2 (M6): choosing files (`Files`, `ChooseFiles`), and file counts in each download.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The longest message accepted, in bytes. A list of hundreds of downloads fits easily.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -69,6 +72,15 @@ pub enum Command {
         target: Target,
         delete_files: bool,
     },
+    /// A download's files, with which are chosen.
+    Files {
+        target: Target,
+    },
+    /// Download only these files (their numbers from `Files`, starting at 1).
+    ChooseFiles {
+        target: Target,
+        chosen: BTreeSet<usize>,
+    },
 }
 
 /// Which download a request is about.
@@ -93,7 +105,7 @@ pub enum Reply {
     },
     /// The link was added (or was already there). `folder` is the download folder it belongs to.
     Added { info_hash: String, folder: PathBuf },
-    /// Paused or resumed.
+    /// Paused, resumed, or its files chosen.
     Changed { name: String },
     /// The files that would be deleted (they exist right now).
     Files {
@@ -108,6 +120,12 @@ pub enum Reply {
         folder: PathBuf,
         deleted: usize,
         problems: Vec<String>,
+    },
+    /// A download's files, with which are chosen.
+    FileList {
+        info_hash: String,
+        name: String,
+        files: Vec<FileChoice>,
     },
     /// The request didn't work; the message is for the person.
     Problem { message: String },
@@ -329,6 +347,24 @@ async fn answer_or_problem(
                 folder,
                 deleted: deleted.files,
                 problems: deleted.problems,
+            }
+        }
+        Command::Files { target } => {
+            let download = find(engine, &target)?;
+            Reply::FileList {
+                files: engine.files(download.id).map_err(said)?,
+                info_hash: download.info_hash,
+                name: download.name,
+            }
+        }
+        Command::ChooseFiles { target, chosen } => {
+            let download = find(engine, &target)?;
+            engine
+                .choose_files(download.id, &chosen)
+                .await
+                .map_err(said)?;
+            Reply::Changed {
+                name: download.name,
             }
         }
     })
@@ -669,6 +705,13 @@ mod tests {
             request(Command::FilesToDelete {
                 target: Target::Number(1),
             }),
+            request(Command::Files {
+                target: Target::Number(1),
+            }),
+            request(Command::ChooseFiles {
+                target: Target::Number(1),
+                chosen: BTreeSet::from([1]),
+            }),
             request(Command::Remove {
                 target: Target::InfoHash(hash.to_string()),
                 delete_files: true,
@@ -711,16 +754,23 @@ mod tests {
                 paths: vec![]
             }
         );
+        // ...and no files to show or choose yet.
+        for answer in &answers[4..6] {
+            assert!(
+                matches!(answer, Reply::Problem { message } if message.contains("doesn't know this download's files yet")),
+                "{answer:?}"
+            );
+        }
         assert!(
-            matches!(&answers[4], Reply::Removed { name, deleted: 0, .. } if name == "Example"),
+            matches!(&answers[6], Reply::Removed { name, deleted: 0, .. } if name == "Example"),
             "{:?}",
-            answers[4]
+            answers[6]
         );
         // Removed by fingerprint once; a second time there is nothing left to remove.
         assert!(
-            matches!(&answers[5], Reply::Problem { message } if message.contains("isn't in BitDinghy's window")),
+            matches!(&answers[7], Reply::Problem { message } if message.contains("isn't in BitDinghy's window")),
             "{:?}",
-            answers[5]
+            answers[7]
         );
         assert!(engine.snapshot().is_empty());
         engine.shutdown().await;

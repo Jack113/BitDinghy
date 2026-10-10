@@ -10,6 +10,15 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Choose which files to download.** A torrent with several files gets a **Files** button in the
+  window: a list with tick boxes, each file's size and how far it got. Untick the files you don't
+  want, at any time, while the download runs or is paused. On the command line,
+  `dinghy files <n>` shows the list and `dinghy files <n> --pick 1,3-5` (or `all`) chooses. The
+  choice is remembered. At least one file stays chosen (to stop everything, pause or remove it).
+- The saved download list moves to **version 2** (it remembers unticked files). Older lists are
+  upgraded the first time BitDinghy opens them; `dinghy list` can still read an older list without
+  changing it. The messages between `dinghy` and the window are version 2 too, so use the
+  `dinghy.exe` that came with your `BitDinghy.exe`.
 - **.torrent files.** Open them with the window's new **Open .torrent file...** button (Windows'
   own file dialog), drag them onto the window, paste their path into the link box, or give them to
   `dinghy get`. Every `.torrent` is rebuilt from checked parts only (its file list, plus trackers

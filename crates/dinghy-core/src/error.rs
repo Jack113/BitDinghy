@@ -62,6 +62,10 @@ pub enum Error {
     #[error("{0}")]
     Control(String),
 
+    /// A choice of files couldn't be used. The message says why.
+    #[error("{0}")]
+    FileChoice(String),
+
     /// The command line couldn't talk to the open window. The message says why.
     #[error("{0}")]
     Remote(String),
