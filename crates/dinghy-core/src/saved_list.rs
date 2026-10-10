@@ -359,6 +359,20 @@ impl SavedList {
         Ok(())
     }
 
+    /// Remembers whether a download is paused. Returns whether it was in the list.
+    pub fn set_paused(&self, info_hash: &str, paused: bool) -> Result<bool> {
+        let Some(connection) = &self.connection else {
+            return Ok(false);
+        };
+        let changed = connection
+            .execute(
+                "UPDATE downloads SET paused = ?2 WHERE info_hash = ?1",
+                params![info_hash, paused],
+            )
+            .map_err(|e| self.error("save", e))?;
+        Ok(changed == 1)
+    }
+
     /// Forgets a download. Returns whether it was in the list. (Its files are not touched here.)
     pub fn remove(&self, info_hash: &str) -> Result<bool> {
         let Some(connection) = &self.connection else {
@@ -617,6 +631,25 @@ mod tests {
         again.name = "something else".to_string();
         assert!(!list.add(&again).unwrap());
         assert_eq!(list.all().unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn pausing_is_remembered_after_a_restart() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        {
+            let list = open(&path).list;
+            list.add(&sample(HASH)).unwrap();
+            assert!(list.set_paused(HASH, true).unwrap());
+            assert!(
+                !list.set_paused(OTHER_HASH, true).unwrap(),
+                "not in the list"
+            );
+        }
+        let list = open(&path).list;
+        assert!(list.get(HASH).unwrap().unwrap().paused);
+        list.set_paused(HASH, false).unwrap();
+        assert!(!list.get(HASH).unwrap().unwrap().paused);
     }
 
     #[test]

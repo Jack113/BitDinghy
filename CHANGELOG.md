@@ -20,7 +20,11 @@ format is called out here.
 - **Only one BitDinghy at a time.** A second window, or `dinghy get` while the window is open, is
   refused with a plain message, so two engines can never write into the same files.
 - `dinghy get` on a link that is already in the list carries on in its own folder, using the file
-  list saved last time.
+  list saved last time (and resumes it if it was paused).
+- **Pause and resume**, in the window (a button on each download) and with `dinghy pause <n>` and
+  `dinghy resume <n>` (numbers from `dinghy list`; while the window is closed). A paused download
+  stays paused after a restart; one paused before its file list arrived contacts nobody until it
+  is resumed. On a download that failed, the button says **Try again**.
 - **Portable data folder.** BitDinghy keeps its files in a `data` folder next to the program, so you
   can copy the whole folder to a USB stick. If that folder can't be written to, it uses your user
   settings folder instead. `BitDinghy.exe` and `dinghy.exe` share it.

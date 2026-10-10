@@ -142,6 +142,19 @@ speed, time left, people connected) that the window and the command line both dr
   was given: if that link is already in the list, it carries on in its own folder from the saved
   file list.
 
+### Pause and resume
+
+- Each download carries a **"wants to be paused" wish**, saved in the list. The engine acts on it
+  whenever it can: right away if the torrent is running, or the moment it starts (a torrent whose
+  file list was still on its way starts paused). Because the wish is stored first and the torrent
+  is checked second, a pause pressed at any moment is never lost.
+- A download paused before its file list arrived is "stopped": after a restart nothing runs for
+  it and nobody is contacted until it is resumed. A paused download whose file list is known is
+  added paused, so its files are checked and its progress shows, but no one is contacted.
+- **Resume** on a download that failed tries it again from the start, through the safety check.
+- `dinghy pause <n>` / `dinghy resume <n>` change the saved list while BitDinghy isn't running
+  (they need the lock, like an engine). With the window open they are refused until M4.
+
 ## Where each piece appears
 
 | Milestone | What lands |

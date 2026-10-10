@@ -27,8 +27,18 @@ enum Command {
     Get(GetArgs),
     /// Show the saved download list (it works while the window is open, too)
     List,
+    /// Pause a saved download, so it stays paused until you resume it
+    Pause(NumberArg),
+    /// Resume a paused download (it carries on when BitDinghy next runs it)
+    Resume(NumberArg),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
+}
+
+#[derive(Args)]
+struct NumberArg {
+    /// The download's number, as shown by `dinghy list`
+    number: usize,
 }
 
 #[derive(Args)]
@@ -86,6 +96,8 @@ async fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
         Some(Command::List) => list(),
+        Some(Command::Pause(which)) => set_paused(which.number, true),
+        Some(Command::Resume(which)) => set_paused(which.number, false),
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -195,6 +207,70 @@ fn list() -> ExitCode {
         println!("     {}", folder.display());
     }
     println!("Progress shows in the BitDinghy window, or while `dinghy get` runs.");
+    ExitCode::SUCCESS
+}
+
+/// `dinghy pause <n>` and `dinghy resume <n>`: changes the saved list while BitDinghy isn't running.
+fn set_paused(number: usize, paused: bool) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    let Some(path) = profile.saved_list_path() else {
+        eprintln!("BitDinghy has no data folder right now, so there is no saved list to change.");
+        return ExitCode::FAILURE;
+    };
+    let opened = match SavedList::open(&path) {
+        Ok(opened) => opened,
+        Err(dinghy_core::Error::AlreadyRunning) => {
+            eprintln!(
+                "BitDinghy is running (in its window or in another terminal), so {} it there. \
+                 (A later version lets the command line pass this on.)",
+                if paused { "pause" } else { "resume" }
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(problem) = &opened.problem {
+        eprintln!("Note: {}", problem.message());
+    }
+    let saved = match opened.list.all() {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(download) = number.checked_sub(1).and_then(|index| saved.get(index)) else {
+        eprintln!("There is no download number {number}. `dinghy list` shows the numbers.");
+        return ExitCode::FAILURE;
+    };
+
+    if download.paused == paused {
+        println!(
+            "{} is already {}.",
+            download.name,
+            if paused { "paused" } else { "active" }
+        );
+        return ExitCode::SUCCESS;
+    }
+    if let Err(error) = opened.list.set_paused(&download.info_hash, paused) {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    if paused {
+        println!(
+            "Paused: {}. It stays paused, in the window too, until you resume it.",
+            download.name
+        );
+    } else {
+        println!(
+            "Resumed: {}. It carries on the next time BitDinghy opens (or right away with `dinghy get`).",
+            download.name
+        );
+    }
     ExitCode::SUCCESS
 }
 

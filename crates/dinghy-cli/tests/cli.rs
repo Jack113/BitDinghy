@@ -429,3 +429,77 @@ fn a_damaged_saved_list_is_reported_not_guessed() {
         b"not a database"
     );
 }
+
+/// Puts one download in the saved list, the way an earlier run of BitDinghy would have.
+fn save_one_download(data: &Path, name: &str) {
+    let opened = dinghy_core::SavedList::open(&data.join("downloads.db")).unwrap();
+    opened
+        .list
+        .add(&dinghy_core::SavedDownload::new(
+            "c9e15763f722f23e98a29decdfae341b98d53056",
+            name,
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            &data.join("downloads"),
+        ))
+        .unwrap();
+}
+
+fn dinghy_output(data: &Path, args: &[&str]) -> Output {
+    run({
+        let mut c = dinghy(data);
+        c.args(args);
+        c
+    })
+}
+
+#[test]
+fn pause_and_resume_change_the_saved_list() {
+    let data = tempfile::tempdir().unwrap();
+    save_one_download(data.path(), "Example");
+
+    let stdout = assert_success(&dinghy_output(data.path(), &["pause", "1"]));
+    assert!(stdout.contains("Paused: Example"), "{stdout}");
+    let stdout = assert_success(&dinghy_output(data.path(), &["list"]));
+    assert!(stdout.contains("[paused]"), "{stdout}");
+
+    // Pausing twice is fine, and says so.
+    let stdout = assert_success(&dinghy_output(data.path(), &["pause", "1"]));
+    assert!(stdout.contains("already paused"), "{stdout}");
+
+    let stdout = assert_success(&dinghy_output(data.path(), &["resume", "1"]));
+    assert!(stdout.contains("Resumed: Example"), "{stdout}");
+    let stdout = assert_success(&dinghy_output(data.path(), &["list"]));
+    assert!(!stdout.contains("[paused]"), "{stdout}");
+}
+
+#[test]
+fn a_number_that_is_not_in_the_list_is_explained() {
+    let data = tempfile::tempdir().unwrap();
+    save_one_download(data.path(), "Example");
+    for number in ["0", "2"] {
+        let output = dinghy_output(data.path(), &["pause", number]);
+        assert!(!output.status.success());
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains("dinghy list"), "{stderr}");
+    }
+    // Not a number at all: the usage help says what is expected.
+    let output = dinghy_output(data.path(), &["resume", "first"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn pause_is_refused_while_the_window_is_open() {
+    let data = tempfile::tempdir().unwrap();
+    save_one_download(data.path(), "Example");
+    let window = dinghy_core::SavedList::open(&data.path().join("downloads.db")).unwrap();
+
+    let output = dinghy_output(data.path(), &["pause", "1"]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("pause it there"), "{stderr}");
+    drop(window);
+
+    // Nothing changed.
+    let stdout = assert_success(&dinghy_output(data.path(), &["list"]));
+    assert!(!stdout.contains("[paused]"), "{stdout}");
+}

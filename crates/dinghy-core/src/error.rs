@@ -49,6 +49,10 @@ pub enum Error {
     /// The saved download list couldn't be read or changed.
     #[error("{0}")]
     SavedList(String),
+
+    /// Pausing or resuming a download didn't work. The message says why.
+    #[error("{0}")]
+    Control(String),
 }
 
 /// Shorthand used throughout the crate.

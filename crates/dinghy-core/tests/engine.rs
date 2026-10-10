@@ -201,6 +201,33 @@ async fn wait_for_status(engine: &Engine, wanted: &[DownloadStatus]) -> Download
     }
 }
 
+/// Waits until the first download satisfies `wanted`, then returns its snapshot.
+async fn wait_until(
+    engine: &Engine,
+    what: &str,
+    wanted: impl Fn(&DownloadSnapshot) -> bool,
+) -> DownloadSnapshot {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Some(snapshot) = engine.snapshot().into_iter().next()
+            && wanted(&snapshot)
+        {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; last snapshot: {:?}",
+            engine.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Really paused: the torrent has started (its folder is known) and the engine has paused it.
+fn really_paused(snapshot: &DownloadSnapshot) -> bool {
+    snapshot.status == DownloadStatus::Paused && snapshot.save_folder.is_some()
+}
+
 fn entries_in(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
@@ -539,4 +566,151 @@ async fn only_one_engine_can_use_a_saved_list_at_a_time() {
     window.shutdown().await;
     let next = Engine::start(second).await.expect("the list is free again");
     next.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pause and resume (M3 step 2).
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_download_stays_paused_after_a_restart_and_resumes() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    let id = first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.pause(id).await.unwrap();
+    wait_until(&first_run, "paused", really_paused).await;
+    assert!(dinghy_core::SavedList::read(&list).unwrap()[0].paused);
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // After a restart it comes back paused (its files are checked first, then it stays paused).
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_until(&second_run, "paused after restart", really_paused).await;
+    second_run.resume(back.id).await.unwrap();
+    let done = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert!(!dinghy_core::SavedList::read(&list).unwrap()[0].paused);
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_can_be_paused_before_its_file_list_arrives() {
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    // Nobody can be asked for this one (this engine is offline), so its file list never arrives:
+    // the attempt fails at once or keeps waiting. Either way, pausing makes it simply "paused".
+    let link = "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Nobody%20Has%20It";
+
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    let id = engine.add_magnet(link, vec![]).unwrap();
+    engine.pause(id).await.unwrap();
+    assert_eq!(engine.snapshot()[0].status, DownloadStatus::Paused);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        engine.snapshot()[0].status,
+        DownloadStatus::Paused,
+        "a failed attempt must not hide the pause"
+    );
+
+    engine.resume(id).await.unwrap();
+    let after_resume = engine.snapshot()[0].status;
+    assert!(
+        matches!(
+            after_resume,
+            DownloadStatus::GettingInfo | DownloadStatus::Failed
+        ),
+        "{after_resume:?}"
+    );
+    engine.pause(id).await.unwrap();
+    engine.shutdown().await;
+    drop(engine);
+
+    let saved = dinghy_core::SavedList::read(&list).unwrap();
+    assert!(saved[0].paused);
+    // After a restart it is paused straight away, and nobody is contacted for it.
+    let restarted = remembering_engine(&download_dir, &list, true).await;
+    assert_eq!(restarted.snapshot()[0].status, DownloadStatus::Paused);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(restarted.snapshot()[0].status, DownloadStatus::Paused);
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pausing_right_after_adding_starts_the_download_paused() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let engine = offline_engine(&work.path().join("downloads")).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    // The file list is still on its way: the pause must not get lost.
+    engine.pause(id).await.unwrap();
+    wait_until(&engine, "paused", really_paused).await;
+    // And it stays paused.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(engine.snapshot()[0].status, DownloadStatus::Paused);
+    engine.resume(id).await.unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_tries_a_failed_download_again() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = hostile_seeder(&work.path().join("seeder-scratch"), "bad\u{7}name").await;
+    let engine = offline_engine(&work.path().join("downloads")).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&engine, &[DownloadStatus::Failed]).await;
+
+    engine.resume(id).await.unwrap();
+    // It starts again from the beginning...
+    assert!(engine.snapshot()[0].waiting_for.is_some());
+    // ...and the guard refuses it again, as it should.
+    let again = wait_for_status(&engine, &[DownloadStatus::Failed]).await;
+    assert!(again.error.unwrap().contains("isn't safe to save"));
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn asking_for_a_paused_download_again_resumes_it() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    let id = first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.pause(id).await.unwrap();
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Like `dinghy get` with the same link: it means "carry on".
+    let second_run = remembering_engine(&download_dir, &list, false).await;
+    second_run.add_magnet(&seeder.magnet(), vec![]).unwrap();
+    let done = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert!(!dinghy_core::SavedList::read(&list).unwrap()[0].paused);
+    second_run.shutdown().await;
 }

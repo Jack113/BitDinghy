@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
-use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, Profile};
+use dinghy_core::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, Profile};
 use eframe::egui;
 
 /// The brand's error color for the current theme (light or dark), so it stays readable on both
@@ -60,6 +60,8 @@ struct BitDinghyApp {
     folder_text: String,
     /// The result of the last settings change: the message, and whether it is an error.
     settings_message: Option<(String, bool)>,
+    /// A problem with the last Pause/Resume press.
+    control_problem: Option<String>,
 }
 
 impl BitDinghyApp {
@@ -90,6 +92,7 @@ impl BitDinghyApp {
             link_problem: None,
             folder_text,
             settings_message: None,
+            control_problem: None,
         }
     }
 
@@ -245,18 +248,32 @@ impl eframe::App for BitDinghyApp {
         ui.add_space(4.0);
         ui.separator();
 
+        if let Some(problem) = &self.control_problem {
+            ui.colored_label(error_color(ui), problem);
+        }
         let downloads = engine.snapshot();
         if downloads.is_empty() {
             ui.add_space(8.0);
             ui.label("Nothing downloading yet. Paste a magnet link above and press Download.");
             return;
         }
+        let mut clicked = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for download in &downloads {
-                draw_download(ui, download);
+                clicked = draw_download(ui, download).or(clicked);
                 ui.separator();
             }
         });
+        // Act on a button only after drawing, so the list isn't changed halfway through.
+        if let Some(control) = clicked {
+            let result = self.runtime.block_on(async {
+                match control {
+                    Control::Pause(id) => engine.pause(id).await,
+                    Control::Resume(id) => engine.resume(id).await,
+                }
+            });
+            self.control_problem = result.err().map(|error| error.to_string());
+        }
     }
 
     /// Called when the window closes: stop sharing and close connections tidily.
@@ -279,16 +296,55 @@ fn shut_down(runtime: &tokio::runtime::Runtime, engine: &Engine) {
     });
 }
 
-/// Draws one download: its name, then a progress bar and numbers (or a message).
-fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
-    // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes dark navy
-    // (for text on the green button), so the name vanished on the navy background.
-    let name_color = brand::palette(ui.ctx().theme()).text;
-    ui.label(
-        egui::RichText::new(&download.name)
-            .size(15.0)
-            .color(name_color),
-    );
+/// A button the person pressed on one download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Pause(DownloadId),
+    Resume(DownloadId),
+}
+
+/// The button a download shows: Resume when paused, "Try again" when it failed, Pause otherwise.
+fn control_for(download: &DownloadSnapshot) -> (&'static str, Control) {
+    match download.status {
+        DownloadStatus::Paused => ("Resume", Control::Resume(download.id)),
+        DownloadStatus::Failed => ("Try again", Control::Resume(download.id)),
+        _ => ("Pause", Control::Pause(download.id)),
+    }
+}
+
+/// The line under a paused download's progress bar.
+fn paused_text(download: &DownloadSnapshot) -> String {
+    if download.total_bytes == 0 {
+        "Paused. BitDinghy will look for its file list when you resume it.".to_string()
+    } else {
+        format!(
+            "Paused at {} of {}. Nothing is downloaded or shared until you resume it.",
+            format_bytes(download.progress_bytes),
+            format_bytes(download.total_bytes)
+        )
+    }
+}
+
+/// Draws one download: its name and button, then a progress bar and numbers (or a message).
+/// Returns the button press, if there was one.
+fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) -> Option<Control> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes
+        // dark navy (for text on the green button), so the name vanished on the navy background.
+        let name_color = brand::palette(ui.ctx().theme()).text;
+        ui.label(
+            egui::RichText::new(&download.name)
+                .size(15.0)
+                .color(name_color),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (label, control) = control_for(download);
+            if ui.button(label).clicked() {
+                clicked = Some(control);
+            }
+        });
+    });
 
     match download.status {
         DownloadStatus::GettingInfo => {
@@ -322,7 +378,9 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
                 );
                 ui.label(format!("{:.1}%", done * 100.0));
             });
-            if download.status == DownloadStatus::Finished {
+            if download.status == DownloadStatus::Paused {
+                ui.label(paused_text(download));
+            } else if download.status == DownloadStatus::Finished {
                 let folder = download
                     .save_folder
                     .as_ref()
@@ -353,6 +411,7 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
             }
         }
     }
+    clicked
 }
 
 fn main() -> eframe::Result {
@@ -377,6 +436,58 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(status: DownloadStatus, progress: u64, total: u64) -> DownloadSnapshot {
+        DownloadSnapshot {
+            id: DownloadId(7),
+            info_hash: "c9e15763f722f23e98a29decdfae341b98d53056".to_string(),
+            name: "Example".to_string(),
+            status,
+            progress_bytes: progress,
+            total_bytes: total,
+            download_bytes_per_second: 0,
+            upload_bytes_per_second: 0,
+            eta: None,
+            peers_connected: 0,
+            peers_known: 0,
+            uploaded_bytes: 0,
+            waiting_for: None,
+            save_folder: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn each_download_shows_the_button_that_fits_its_state() {
+        let id = DownloadId(7);
+        for status in [
+            DownloadStatus::GettingInfo,
+            DownloadStatus::Checking,
+            DownloadStatus::Downloading,
+            DownloadStatus::Finished,
+        ] {
+            assert_eq!(
+                control_for(&snapshot(status, 0, 0)),
+                ("Pause", Control::Pause(id))
+            );
+        }
+        assert_eq!(
+            control_for(&snapshot(DownloadStatus::Paused, 0, 0)),
+            ("Resume", Control::Resume(id))
+        );
+        assert_eq!(
+            control_for(&snapshot(DownloadStatus::Failed, 0, 0)),
+            ("Try again", Control::Resume(id))
+        );
+    }
+
+    #[test]
+    fn a_paused_download_says_how_far_it_got() {
+        let text = paused_text(&snapshot(DownloadStatus::Paused, 512 * 1024, 2048 * 1024));
+        assert!(text.contains("Paused at 512.0 KiB of 2.0 MiB"), "{text}");
+        let text = paused_text(&snapshot(DownloadStatus::Paused, 0, 0));
+        assert!(text.contains("file list"), "{text}");
+    }
 
     /// This test reproduces the real situation: the window calls `shut_down` from its ordinary
     /// thread, outside any async code. It used to panic.

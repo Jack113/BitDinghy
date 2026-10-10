@@ -32,8 +32,29 @@ First build once: `cargo build --workspace`. The programs are in `C:\cargo-targe
    Open the window: a note says the list couldn't be read and **where the old file was kept**
    (`downloads.db.broken-<number>`), and the window starts with an empty list.
 
-Pause, resume and remove are steps 2 and 3. To clear the Arch download for now, close everything
-and delete `downloads.db` in the data folder (the downloaded part stays in your download folder,
+### Step 2: pause and resume
+
+This also uses the Arch download from step 1 (a few seconds at a time).
+
+1. **Pause in the window.** Open the window. Each download has a button on the right of its name.
+   Press **Pause** while it downloads: the speed drops to nothing, the line says "Paused at ... of
+   ...", and the button becomes **Resume**.
+2. **Paused stays paused.** Close the window and open it again. The download comes back
+   **paused** (after "Checking files already on disk..."). Press **Resume**: it carries on.
+3. **Pause before the file list arrives.** Paste the link of a new download and press Pause at
+   once, while it still says "Looking for people...". It shows as paused; Resume starts it.
+4. **The command line, with the window closed.** Close the window. `dinghy.exe list` shows the
+   numbers. `dinghy.exe pause 1` says "Paused: ..." and `list` now shows `[paused]`. Open the
+   window: it is paused there too. Close it again and run `dinghy.exe resume 1`.
+5. **Not while the window is open.** With the window open, `dinghy.exe pause 1` refuses and says
+   to pause it in the window (until M4 lets the two talk).
+6. **Wrong numbers are explained.** `dinghy.exe pause 99` says there is no download number 99 and
+   points to `dinghy list`.
+7. **`dinghy get` means "carry on".** Pause the Arch download, close the window, then run
+   `dinghy.exe get "<the Arch magnet link>"`: it resumes it and continues. Press Ctrl+C.
+
+Remove is step 3. To clear the Arch download for now, close everything and delete
+`downloads.db` in the data folder (the downloaded part stays in your download folder,
 `Downloads\BitDinghy`, until you delete it).
 
 ## M2: portable data folder, remembered settings, and the branded window

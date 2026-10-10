@@ -16,7 +16,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -115,8 +115,12 @@ pub struct DownloadSnapshot {
 }
 
 enum EntryState {
-    GettingInfo,
+    /// Asking other people for the file list, since this moment.
+    GettingInfo(Instant),
     Active(Arc<ManagedTorrent>),
+    /// Paused before it really started (its file list isn't known yet): nothing is running for
+    /// it, and nobody is contacted. Resuming starts it.
+    Stopped,
     Failed(String),
 }
 
@@ -126,7 +130,13 @@ struct Entry {
     label: String,
     /// The download folder this download belongs to (it keeps it even if the setting changes).
     download_dir: PathBuf,
-    added: Instant,
+    /// The cleaned-up magnet link (empty if the saved one was broken). Used to try again.
+    magnet: String,
+    /// Whether the person wants it paused. This can be set before the torrent has really started
+    /// (while its file list is still being fetched); it then starts paused.
+    wants_pause: AtomicBool,
+    /// Extra addresses to try directly (`dinghy get --peer`), kept for trying again.
+    peers: Vec<SocketAddr>,
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
@@ -360,14 +370,21 @@ impl Engine {
             .with_list(|list| list.get(&parsed.info_hash))
             .flatten();
         let (label, download_dir, source) = match remembered {
-            Some(saved) => (
-                saved.name,
-                saved.download_dir,
-                match saved.torrent {
-                    Some(bytes) => Source::Torrent(bytes),
-                    None => Source::Magnet(parsed.clean_link.clone()),
-                },
-            ),
+            Some(saved) => {
+                // Asking for a download again means "carry on", even if it was paused.
+                if saved.paused {
+                    self.shared
+                        .with_list(|list| list.set_paused(&parsed.info_hash, false));
+                }
+                (
+                    saved.name,
+                    saved.download_dir,
+                    match saved.torrent {
+                        Some(bytes) => Source::Torrent(bytes),
+                        None => Source::Magnet(parsed.clean_link.clone()),
+                    },
+                )
+            }
             None => {
                 let label = parsed
                     .display_name
@@ -389,12 +406,19 @@ impl Engine {
             }
         };
 
-        let entry = self.new_entry(&parsed.info_hash, label, download_dir);
+        let entry = self.new_entry(
+            &parsed.info_hash,
+            label,
+            download_dir,
+            parsed.clean_link,
+            false,
+            extra_peers,
+        );
         let id = entry.id;
         entries.push(entry.clone());
         drop(entries);
 
-        self.spawn_start(entry, source, extra_peers, false);
+        self.spawn_start(entry, source);
         Ok(id)
     }
 
@@ -417,46 +441,180 @@ impl Engine {
         let saved = self.shared.with_list(SavedList::all).unwrap_or_default();
         for download in saved {
             // The list is our own file, but it is checked like anything else from outside.
+            let magnet = magnet::parse(&download.magnet)
+                .map(|parsed| parsed.clean_link)
+                .unwrap_or_default();
             let source = match download.torrent {
                 Some(bytes) => Source::Torrent(bytes),
-                None => match magnet::parse(&download.magnet) {
-                    Ok(parsed) => Source::Magnet(parsed.clean_link),
-                    Err(_) => {
-                        self.shared.notice(format!(
-                            "The saved download \"{}\" has a broken magnet link and was skipped.",
-                            download.name
-                        ));
-                        continue;
-                    }
-                },
+                None if !magnet.is_empty() => Source::Magnet(magnet.clone()),
+                None => {
+                    self.shared.notice(format!(
+                        "The saved download \"{}\" has a broken magnet link and was skipped.",
+                        download.name
+                    ));
+                    continue;
+                }
             };
-            let entry = self.new_entry(&download.info_hash, download.name, download.download_dir);
+            let entry = self.new_entry(
+                &download.info_hash,
+                download.name,
+                download.download_dir,
+                magnet,
+                download.paused,
+                Vec::new(),
+            );
             lock(&self.entries).push(entry.clone());
-            self.spawn_start(entry, source, Vec::new(), download.paused);
+            match source {
+                // Paused, and its file list was never fetched: contact nobody until resumed.
+                Source::Magnet(_) if download.paused => *lock(&entry.state) = EntryState::Stopped,
+                // A known file list is added paused: its files are checked so the progress shows,
+                // but nobody is contacted.
+                _ => self.spawn_start(entry, source),
+            }
         }
     }
 
-    fn new_entry(&self, info_hash: &str, label: String, download_dir: PathBuf) -> Arc<Entry> {
+    fn new_entry(
+        &self,
+        info_hash: &str,
+        label: String,
+        download_dir: PathBuf,
+        magnet: String,
+        paused: bool,
+        peers: Vec<SocketAddr>,
+    ) -> Arc<Entry> {
         Arc::new(Entry {
             id: DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed)),
             info_hash: info_hash.to_string(),
             label,
             download_dir,
-            added: Instant::now(),
-            state: Mutex::new(EntryState::GettingInfo),
+            magnet,
+            wants_pause: AtomicBool::new(paused),
+            peers,
+            state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
     }
 
-    fn spawn_start(&self, entry: Arc<Entry>, source: Source, peers: Vec<SocketAddr>, paused: bool) {
+    fn spawn_start(&self, entry: Arc<Entry>, source: Source) {
         let shared = self.shared.clone();
         self.runtime.spawn(async move {
-            let outcome = start_download(&shared, &entry, source, peers, paused).await;
-            *lock(&entry.state) = match outcome {
-                Ok(handle) => EntryState::Active(handle),
-                Err(error) => EntryState::Failed(error.to_string()),
-            };
+            match start_download(&shared, &entry, source).await {
+                Ok(handle) => {
+                    *lock(&entry.state) = EntryState::Active(handle.clone());
+                    // A pause or resume may have arrived while the download was starting. Reading
+                    // the wish only AFTER publishing the handle means that either this line sees
+                    // it, or `pause`/`resume` sees the handle: one of the two always acts on it.
+                    let wants_pause = entry.wants_pause.load(Ordering::SeqCst);
+                    if wants_pause && !handle.is_paused() {
+                        let _ = shared.session.pause(&handle).await;
+                    } else if !wants_pause && handle.is_paused() {
+                        let _ = shared.session.unpause(&handle).await;
+                    }
+                }
+                Err(error) => {
+                    let mut state = lock(&entry.state);
+                    // Paused in the meantime: the person doesn't want it running anyway, so it
+                    // simply waits to be resumed (which tries again).
+                    *state = if entry.wants_pause.load(Ordering::SeqCst) {
+                        EntryState::Stopped
+                    } else {
+                        EntryState::Failed(error.to_string())
+                    };
+                }
+            }
         });
+    }
+
+    fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
+        lock(&self.entries)
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+            .ok_or_else(|| Error::Control("That download isn't in the list any more.".to_string()))
+    }
+
+    /// Pauses a download: it stops downloading and sharing, and stays paused after a restart. A
+    /// download still fetching its file list starts paused once the list arrives.
+    pub async fn pause(&self, id: DownloadId) -> Result<()> {
+        let entry = self.entry(id)?;
+        entry.wants_pause.store(true, Ordering::SeqCst);
+        self.shared
+            .with_list(|list| list.set_paused(&entry.info_hash, true));
+        let handle = {
+            let mut state = lock(&entry.state);
+            match &*state {
+                EntryState::Active(handle) => Some(handle.clone()),
+                // Pausing a failed download means "leave it alone for now".
+                EntryState::Failed(_) => {
+                    *state = EntryState::Stopped;
+                    None
+                }
+                EntryState::GettingInfo(_) | EntryState::Stopped => None,
+            }
+        };
+        if let Some(handle) = handle
+            && !handle.is_paused()
+            && let Err(error) = self.shared.session.pause(&handle).await
+            && !handle.is_paused()
+        {
+            return Err(Error::Control(format!(
+                "Couldn't pause \"{}\": {error:#}",
+                entry.label
+            )));
+        }
+        Ok(())
+    }
+
+    /// Resumes a paused download. On a download that failed, it tries again from the start (the
+    /// file list goes through the guard again, like a new download).
+    pub async fn resume(&self, id: DownloadId) -> Result<()> {
+        let entry = self.entry(id)?;
+        entry.wants_pause.store(false, Ordering::SeqCst);
+        self.shared
+            .with_list(|list| list.set_paused(&entry.info_hash, false));
+
+        // Decide what to do while holding the lock, then act after letting go of it.
+        let handle = {
+            let mut state = lock(&entry.state);
+            match &*state {
+                EntryState::Active(handle) => Some(handle.clone()),
+                // It starts unpaused as soon as its file list arrives.
+                EntryState::GettingInfo(_) => return Ok(()),
+                EntryState::Stopped | EntryState::Failed(_) => {
+                    *state = EntryState::GettingInfo(Instant::now());
+                    None
+                }
+            }
+        };
+
+        match handle {
+            Some(handle) => {
+                if handle.is_paused()
+                    && let Err(error) = self.shared.session.unpause(&handle).await
+                    && handle.is_paused()
+                {
+                    return Err(Error::Control(format!(
+                        "Couldn't resume \"{}\": {error:#}",
+                        entry.label
+                    )));
+                }
+            }
+            None => {
+                // Start (or try again) from the saved file list if there is one.
+                let saved_file_list = self
+                    .shared
+                    .with_list(|list| list.get(&entry.info_hash))
+                    .flatten()
+                    .and_then(|saved| saved.torrent);
+                let source = match saved_file_list {
+                    Some(bytes) => Source::Torrent(bytes),
+                    None => Source::Magnet(entry.magnet.clone()),
+                };
+                self.spawn_start(entry, source);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -465,10 +623,8 @@ async fn start_download(
     shared: &Shared,
     entry: &Entry,
     source: Source,
-    peers: Vec<SocketAddr>,
-    paused: bool,
 ) -> Result<Arc<ManagedTorrent>> {
-    let initial_peers = (!peers.is_empty()).then_some(peers);
+    let initial_peers = (!entry.peers.is_empty()).then(|| entry.peers.clone());
     // The engine reports problems as general-purpose errors; `{:#}` prints the whole cause chain.
     let engine_error = |e| Error::Add(format!("{e:#}"));
 
@@ -539,7 +695,7 @@ async fn start_download(
             Some(AddTorrentOptions {
                 overwrite: true,
                 output_folder: Some(folder_text),
-                paused,
+                paused: entry.wants_pause.load(Ordering::SeqCst),
                 initial_peers,
                 ..Default::default()
             }),
@@ -603,8 +759,15 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
 
     let state = lock(&entry.state);
     match &*state {
-        EntryState::GettingInfo => {
-            snapshot.waiting_for = Some(entry.added.elapsed());
+        EntryState::GettingInfo(since) => {
+            if entry.wants_pause.load(Ordering::SeqCst) {
+                snapshot.status = DownloadStatus::Paused;
+            } else {
+                snapshot.waiting_for = Some(since.elapsed());
+            }
+        }
+        EntryState::Stopped => {
+            snapshot.status = DownloadStatus::Paused;
         }
         EntryState::Failed(message) => {
             snapshot.status = DownloadStatus::Failed;
