@@ -16,6 +16,8 @@
 //!
 //! Every file is downloaded unless the person unticked it (`file_choice.rs`). The choice can change
 //! at any time; it is passed to the engine at step 3, and straight away while a download runs.
+//! The engine still creates unticked files on disk, so BitDinghy marks them hidden once the engine
+//! has set a download up, and again after every change (see `owned_files.rs`).
 
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
@@ -657,6 +659,13 @@ impl Engine {
                     } else if !wants_pause && handle.is_paused() {
                         let _ = shared.session.unpause(&handle).await;
                     }
+                    // The engine creates the files while it sets the download up: hide the
+                    // leftovers of unticked files once it has.
+                    if handle.wait_until_initialized().await.is_ok()
+                        && !entry.removed.load(Ordering::SeqCst)
+                    {
+                        let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
+                    }
                 }
                 Err(error) => {
                     let mut state = lock(&entry.state);
@@ -681,6 +690,7 @@ impl Engine {
         let entry = self.entry(id)?;
         // Work out what would be deleted BEFORE changing anything: if its file list can't be
         // read, nothing is removed at all.
+        let known = self.known_file_list(&entry);
         let owned = if delete_files {
             self.owned_paths(&entry)?
         } else {
@@ -703,7 +713,24 @@ impl Engine {
                 .map_err(|e| Error::Control(format!("Couldn't stop \"{}\": {e:#}", entry.label)))?;
         }
         let Some((paths, output_folder)) = owned else {
-            // Keeping the files, or its file list never arrived (so nothing was written).
+            // Keeping the files: the leftovers of unticked files become visible again, so nothing
+            // BitDinghy no longer looks after stays hidden. (If its file list never arrived,
+            // nothing was written.)
+            if let Some((torrent, output_folder)) = known {
+                let download_dir = entry.download_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let everything = BTreeSet::new();
+                    if let Ok(marks) = owned_files::leftover_marks(
+                        &torrent,
+                        &download_dir,
+                        &output_folder,
+                        &everything,
+                    ) {
+                        owned_files::apply_hidden(&marks);
+                    }
+                })
+                .await;
+            }
             return Ok(Deleted::default());
         };
         let download_dir = entry.download_dir.clone();
@@ -729,13 +756,7 @@ impl Engine {
     /// Every file a download owns, and its folder: from its file list as the engine knows it, or
     /// else as it was saved. `None` when its file list never arrived (nothing was written).
     fn owned_paths(&self, entry: &Entry) -> Result<Option<(Vec<PathBuf>, PathBuf)>> {
-        let known = lock(&entry.files).clone().or_else(|| {
-            self.shared
-                .with_list(|list| list.get(&entry.info_hash))
-                .flatten()
-                .and_then(|saved| Some((saved.torrent?, saved.output_folder?)))
-        });
-        let Some((torrent, output_folder)) = known else {
+        let Some((torrent, output_folder)) = self.known_file_list(entry) else {
             return Ok(None);
         };
         let paths = owned_files::files_of(&torrent, &entry.download_dir, &output_folder)?;
@@ -794,6 +815,8 @@ impl Engine {
         self.shared
             .with_list(|list| list.set_skipped_files(&entry.info_hash, &skipped));
         *lock(&entry.skipped) = skipped;
+        // Hide what is left of newly unticked files; show newly ticked ones again.
+        let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
         Ok(())
     }
 
@@ -818,6 +841,17 @@ impl Engine {
         let files = Arc::new(file_choice::files_of_torrent(&torrent)?);
         *lock(&entry.file_list) = Some(files.clone());
         Ok(Some(files))
+    }
+
+    /// A download's checked file list (a `.torrent` file) and its folder: as the engine knows it,
+    /// or else as it was saved. `None` when its file list never arrived (nothing was written).
+    fn known_file_list(&self, entry: &Entry) -> Option<(Vec<u8>, PathBuf)> {
+        lock(&entry.files).clone().or_else(|| {
+            self.shared
+                .with_list(|list| list.get(&entry.info_hash))
+                .flatten()
+                .and_then(|saved| Some((saved.torrent?, saved.output_folder?)))
+        })
     }
 
     fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
@@ -912,6 +946,20 @@ impl Engine {
             }
         }
         Ok(())
+    }
+}
+
+/// Hides the leftovers of a download's unticked files and shows its ticked ones (see
+/// `owned_files.rs`). Best effort: a file that can't be hidden is harmless. Blocking (file system).
+fn mark_leftovers(entry: &Entry) {
+    let Some((torrent, output_folder)) = lock(&entry.files).clone() else {
+        return;
+    };
+    let skipped = lock(&entry.skipped).clone();
+    if let Ok(marks) =
+        owned_files::leftover_marks(&torrent, &entry.download_dir, &output_folder, &skipped)
+    {
+        owned_files::apply_hidden(&marks);
     }
 }
 

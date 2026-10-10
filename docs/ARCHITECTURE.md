@@ -273,7 +273,22 @@ finishes, and the torrent is taken straight back out.
   or not. An unticked file is normally left empty, but where a piece crosses from a ticked file
   into an unticked one, that part of the unticked file is written too. On Windows (NTFS) librqbit
   marks the files "sparse", so the unused rest takes no real disk space, though Explorer shows the
-  full size. M6 step 2 deals with these leftovers.
+  full size.
+- **Leftovers are hidden, not deleted** (owner's decision). Deleting them was tried: it works even
+  while librqbit holds them open, but at the next start librqbit creates them again, and the
+  pieces shared with a ticked neighbour fail their check (half their data is gone), so a finished
+  download goes back to "downloading" until someone sends those pieces again, forever if nobody
+  shares it any more. And a deleted file ticked again would be written into the deleted copy.
+  So BitDinghy marks unticked files **hidden** (Windows' file mark), and folders holding only
+  unticked files too (`owned_files::leftover_marks`, `apply_hidden`): once librqbit has set a
+  download up (`wait_until_initialized`), and after every change of choice. Ticked files are
+  made visible. "Remove, keep the files" makes everything visible again (nothing BitDinghy no
+  longer looks after stays hidden); "Remove, delete the files too" deletes them like any other
+  file of the download. The paths come from the checked file list, with the same checks as
+  deleting; links are never touched. Linux has no hidden mark (nothing happens there).
+- A better way, for later: keep the bits of unticked files in a hidden "parts" file of
+  BitDinghy's own (as qBittorrent does), so they never appear at all. It needs a storage layer of
+  our own under librqbit (see `TODO.md`).
 - The saved list is now **version 2** (one new column, added by an upgrade step); the channel's
   messages are **version 2** (`Files`, `ChooseFiles`, and file counts in each download).
 

@@ -15,6 +15,20 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Noticed while building M6
+- The proper home for the leftovers of unticked files: a hidden "parts" file of BitDinghy's own
+  (like qBittorrent), so unticked files never appear in the folder at all. Needs our own storage
+  layer under librqbit (its `StorageFactory`), and moving data between the parts file and the
+  real file when a file is ticked or unticked. Until then they are marked hidden (owner's
+  decision, 2026-10-11).
+- Linux has no "hidden" mark; the leftovers stay visible there. Decide with the Linux port (the
+  parts file above would solve it everywhere).
+- FAT32 and exFAT drives can't hold "sparse" files, so a big unticked file next to a ticked one
+  takes its full size on such a drive. Say so in plain language with the drive warnings (M12).
+- The Files list adds up file sizes (4.3 MiB) while the progress total counts whole pieces
+  (4.4 MiB), because a piece can spill into an unticked neighbour. Explain it if people ask.
+- A big torrent's file list could use a folder tree, a filter box, and "tick this folder".
+
 ## Noticed while building M5
 - Web links to `.torrent` files check addresses as WRITTEN (like trackers): a public-looking name
   that resolves to a home-network address would still be fetched. (The M5 review's other

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dinghy_core::owned_files::is_hidden;
 use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
 use librqbit::spawn_utils::BlockingSpawner;
 use librqbit::storage::StorageFactoryExt;
@@ -1187,6 +1188,11 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
         BTreeSet::from([1]),
         "the torrent's own index of b.bin is remembered"
     );
+    // The engine created b.bin anyway; it is hidden now (Windows has a "hidden" mark).
+    let folder = paused.save_folder.clone().unwrap();
+    assert!(folder.join("b.bin").exists());
+    assert_eq!(is_hidden(&folder.join("b.bin")), cfg!(windows));
+    assert!(!is_hidden(&folder.join("a.bin")));
     first_run.resume(id).await.unwrap();
     let done = wait_for_status(
         &first_run,
@@ -1215,7 +1221,10 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
     first_run.shutdown().await;
     drop(first_run);
 
-    // After a restart the choice is still there, and the download is still finished.
+    // After a restart the choice is still there, and the download is still finished. Its start
+    // hides the leftovers again (here b.bin is made visible by hand first, like a choice changed
+    // with `dinghy files` while the window was closed).
+    dinghy_core::owned_files::apply_hidden(&[(folder.join("b.bin"), false)]);
     let second_run = remembering_engine(&download_dir, &list, true).await;
     let back = wait_for_status(
         &second_run,
@@ -1224,6 +1233,11 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
     .await;
     assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
     assert_eq!((back.files_total, back.files_chosen), (3, 2));
+    let deadline = Instant::now() + TIMEOUT;
+    while is_hidden(&folder.join("b.bin")) != cfg!(windows) {
+        assert!(Instant::now() < deadline, "b.bin was not hidden again");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     second_run.shutdown().await;
     drop(second_run);
 
@@ -1258,6 +1272,21 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
         dinghy_core::SavedList::read(&list).unwrap()[0]
             .skipped_files
             .is_empty()
+    );
+    assert!(!is_hidden(&folder.join("b.bin")), "ticked again: visible");
+
+    // Unticked again, then removed keeping the files: nothing stays hidden.
+    third_run
+        .choose_files(id, &BTreeSet::from([1, 3]))
+        .await
+        .unwrap();
+    assert_eq!(is_hidden(&folder.join("b.bin")), cfg!(windows));
+    third_run.remove(id, false).await.unwrap();
+    assert!(!is_hidden(&folder.join("b.bin")));
+    assert_eq!(
+        std::fs::read(folder.join("b.bin")).unwrap(),
+        files[1].1,
+        "kept"
     );
     third_run.shutdown().await;
 }

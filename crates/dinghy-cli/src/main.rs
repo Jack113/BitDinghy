@@ -423,6 +423,19 @@ async fn remove(args: RemoveArgs) -> ExitCode {
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
+    // Keeping the files: the leftovers of unticked files become visible again, so nothing
+    // BitDinghy no longer looks after stays hidden.
+    if !args.delete_files
+        && let (Some(torrent), Some(output_folder)) = (&download.torrent, &download.output_folder)
+        && let Ok(marks) = owned_files::leftover_marks(
+            torrent,
+            &download.download_dir,
+            output_folder,
+            &Default::default(),
+        )
+    {
+        owned_files::apply_hidden(&marks);
+    }
     report_removed(
         &download.name,
         &folder,
@@ -658,7 +671,19 @@ fn print_files(number: usize, name: &str, choices: &[FileChoice]) {
     for choice in choices {
         println!("  {}", file_line(choice));
     }
-    println!("Choose with: dinghy files {number} --pick 1,3-5   (numbers and ranges, or \"all\")");
+    println!(
+        "Choose with: dinghy files {number} --pick {}   (numbers and ranges, or \"all\")",
+        example_pick(choices.len())
+    );
+}
+
+/// An example choice that fits a download with `count` files.
+fn example_pick(count: usize) -> String {
+    match count {
+        0..=2 => "1".to_string(),
+        3 => "1,3".to_string(),
+        _ => format!("1,3-{}", count.min(5)),
+    }
 }
 
 /// One file: `[x]  3. folder/file.iso  1.5 GiB  42%`.
@@ -1204,6 +1229,14 @@ mod tests {
             message.contains("still looking for its file list"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn the_example_choice_always_fits_the_download() {
+        assert_eq!(example_pick(2), "1");
+        assert_eq!(example_pick(3), "1,3");
+        assert_eq!(example_pick(4), "1,3-4");
+        assert_eq!(example_pick(400), "1,3-5");
     }
 
     #[test]

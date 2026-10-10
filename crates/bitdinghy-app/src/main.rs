@@ -641,6 +641,10 @@ fn draw_files(ui: &mut egui::Ui, id: DownloadId, files: &[FileChoice]) -> Option
                 });
             }
         });
+        ui.small(
+            "What is left of unticked files in the folder is hidden (the engine needs it to \
+             check the files next to them).",
+        );
         let row_height = ui.spacing().interact_size.y;
         // Only the rows on screen are drawn, so a torrent with thousands of files stays quick.
         egui::ScrollArea::vertical()
@@ -746,7 +750,8 @@ fn draw_download(
             );
             ui.small(
                 "\"Delete the files too\" deletes only the files BitDinghy downloaded for it. \
-                 Nothing else in the folder is touched.",
+                 Nothing else in the folder is touched. \"Keep the files\" also shows any \
+                 hidden leftovers of unticked files again.",
             );
             ui.horizontal(|ui| {
                 if ui.button("Keep the files").clicked() {

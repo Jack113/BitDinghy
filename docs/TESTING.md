@@ -3,6 +3,131 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M6: choosing which files to download
+
+Tests are done one at a time: do the test, compare with "You should see", then go to the next.
+**No download data is used:** the test torrent is made on your PC and nobody shares it, so it
+stays at 0%. The window still knows its four files at once, because they are in the `.torrent`.
+(That only the chosen files' bytes arrive, byte for byte, is checked by the automated tests.)
+
+**Step 0: get ready**
+1. Close the BitDinghy window and stop any `dinghy` (Ctrl+C).
+2. In the repo folder: `cargo build --workspace`.
+3. Still in the repo folder, make the test torrent: `cargo run -p dinghy-core --example make_test_torrent`.
+   It prints `Test torrent: C:\Users\<you>\AppData\Local\Temp\bitdinghy-m6-test\bitdinghy-m6-test.torrent`,
+   "It holds 4 made-up files..." and "Nobody shares it, so adding it to BitDinghy downloads nothing."
+4. Open a terminal in `C:\cargo-target\debug` (`cd C:\cargo-target\debug`).
+5. Make sure `Downloads\BitDinghy` has no folder called `BitDinghy M6 test`.
+6. In Explorer, turn **hidden items off** (Windows 10: **View** tab, untick **Hidden items**;
+   Windows 11: **View > Show**, untick **Hidden items**). Some tests turn them on for a moment.
+
+**Test 1: the Files button**
+- Do: open the window (`.\BitDinghy.exe`), press **Open .torrent file...**, type
+  `%TEMP%\bitdinghy-m6-test` in the dialog's address bar, press Enter, and open
+  `bitdinghy-m6-test.torrent`.
+- You should see: a row **BitDinghy M6 test** with a progress bar at 0.0% and the line
+  `0 B of 6.2 MiB   |   0 B/s   |   unknown left   |   0 people connected (0 known)` (it may
+  say "Checking files already on disk..." for a moment first). Next to **Pause** there is
+  a new button **Files**. (A one-file torrent, like Arch, has no Files button: nothing to choose.)
+
+**Test 2: the file list**
+- Do: press **Files**.
+- You should see: the button now says **Hide files**. Under the name, a box: "4 of 4 files chosen.
+  Unticked files are not downloaded.", a small line "What is left of unticked files in the folder
+  is hidden (the engine needs it to check the files next to them).", and four ticked rows:
+  `Episode 1.bin` (2.9 MiB, 0%), `Episode 2.bin` (1.9 MiB, 0%), `Extras\Making of.bin`
+  (1.4 MiB, 0%), `Extras\Poster.txt` (40 B, 0%).
+
+**Test 3: untick a file**
+- Do: untick **Episode 2.bin**.
+- You should see: "3 of 4 files chosen." and a **Choose all** button beside it. The line under the
+  progress bar now says `0 B of 4.4 MiB`. (The files add up to 4.3 MiB; the total counts whole
+  pieces, and a piece can spill a little into the unticked file next to it.) Press **Hide files**:
+  the button says **Files (3 of 4)**. Press it again to open the list.
+
+**Test 4: the last file can't be unticked**
+- Do: untick **Episode 1.bin** and **Making of.bin**, so only **Poster.txt** is ticked. Move the
+  mouse over Poster.txt's tick box.
+- You should see: "1 of 4 files chosen.", Poster.txt's tick box greyed out, and the tip "At least
+  one file stays chosen. To stop the whole download, pause or remove it."
+
+**Test 5: unticked files are hidden in the folder**
+- Do: open `Downloads\BitDinghy\BitDinghy M6 test` in Explorer (hidden items off).
+- You should see: only the **Extras** folder; inside it only **Poster.txt**. The other three files
+  are there but hidden: turn hidden items on and they appear, faded. Turn hidden items off again.
+- Then: in the window press **Choose all**. Explorer (press F5) shows all four files again, and
+  the list says "4 of 4 files chosen."
+
+**Test 6: the choice is remembered**
+- Do: untick **Episode 2.bin**. Close the window. Run `.\dinghy.exe list` and note the number of
+  BitDinghy M6 test (written `<n>` below; it is 1 if it is the only download). Run
+  `.\dinghy.exe files <n>`.
+- You should see:
+  ```
+  BitDinghy M6 test: 3 of 4 files chosen (4.3 MiB):
+    [x]   1. Episode 1.bin  2.9 MiB
+    [ ]   2. Episode 2.bin  1.9 MiB
+    [x]   3. Extras\Making of.bin  1.4 MiB
+    [x]   4. Extras\Poster.txt  40 B
+  Choose with: dinghy files <n> --pick 1,3-4   (numbers and ranges, or "all")
+  ```
+  (No percentages: with the window closed, nothing is running.)
+
+**Test 7: choose with the command line, window closed**
+- Do: `.\dinghy.exe files <n> --pick 2`
+- You should see: "BitDinghy M6 test: now downloading 1 of 4 files (1.9 MiB)." and "It is used the
+  next time BitDinghy runs this download."
+- Then: open the window. The button says **Files (1 of 4)**, the line says `0 B of 2.2 MiB`, and
+  Explorer (F5) shows only **Episode 2.bin**: the other files, and the Extras folder (nothing in
+  it is ticked), are hidden.
+
+**Test 8: choose with the command line, window open**
+- Do: with the window open, run `.\dinghy.exe files <n> --pick all`, then `.\dinghy.exe files <n>`.
+- You should see: "BitDinghy M6 test: now downloading 4 of 4 files (6.2 MiB)." and "BitDinghy's
+  open window uses it straight away." The list shows four `[x]` rows, each ending in `0%` (the
+  window is running it, so it knows how far each file got). The window's button says **Files**
+  and the line `0 B of 6.2 MiB`; Explorer shows all four files.
+
+**Test 9: mistakes are refused**
+- Do: `.\dinghy.exe files <n> --pick 9`, then `.\dinghy.exe files <n> --pick x`.
+- You should see: "There is no file number 9: this download has 4 files." and then
+  `"x" isn't a file number. Use numbers and ranges such as 1,3-5 (or the word all); ...`.
+  Nothing changes.
+
+**Test 10: Remove, delete the files too (hidden ones included)**
+- Do: in the window untick **Episode 1.bin** (it becomes hidden). Press **Remove**.
+- You should see: the question has a new last sentence: '"Keep the files" also shows any hidden
+  leftovers of unticked files again.' Press **Delete the files too**: "Removed "BitDinghy M6 test"
+  and deleted 4 files it downloaded." The `BitDinghy M6 test` folder is gone (check with hidden
+  items on, then turn them off again).
+
+**Test 11: Remove, keep the files, shows everything again**
+- Do: add the test torrent again (Open .torrent file..., same file). Press **Files** and untick
+  **Episode 1.bin** and **Making of.bin**. Explorer (F5): only Episode 2.bin and Extras\Poster.txt
+  show. Now press **Remove**, then **Keep the files**.
+- You should see: "Removed "BitDinghy M6 test". Its files are still in ...", and in Explorer
+  (F5, hidden items off) all four files show again: BitDinghy no longer looks after them, so it
+  leaves nothing hidden.
+
+**Tidy up:** delete the `Downloads\BitDinghy\BitDinghy M6 test` folder yourself (it is no longer
+in BitDinghy's list), and `%TEMP%\bitdinghy-m6-test` if you like.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The Files button | |
+| 2. The file list | |
+| 3. Untick a file | |
+| 4. The last file can't be unticked | |
+| 5. Unticked files are hidden in the folder | |
+| 6. The choice is remembered | |
+| 7. Choose with the command line, window closed | |
+| 8. Choose with the command line, window open | |
+| 9. Mistakes are refused | |
+| 10. Remove, delete the files too | |
+| 11. Remove, keep the files | |
+
 ## M5: .torrent files and links
 
 Tests are done one at a time: do the test, compare with "You should see", then go to the next.

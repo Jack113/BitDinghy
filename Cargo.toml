@@ -56,6 +56,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tempfile = "3"
 # Reads the window icon and logo pictures (already part of the build through egui).
 png = "0.18"
+# Windows only: marks the leftovers of unticked files hidden (M6). Already in the build through
+# several crates; we only switch on the file-system part.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 # Windows only, build time only: puts the icon and the "Details" information into the .exe files.
 winresource = "0.1"
 
