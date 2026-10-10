@@ -152,8 +152,22 @@ struct Entry {
 enum Source {
     /// A (cleaned-up) magnet link: the file list must be fetched from other people.
     Magnet(String),
-    /// A file list we already have (saved earlier, after it passed the guard).
-    Torrent(Vec<u8>),
+    /// A file list we already have (saved earlier, after it passed the guard), and the folder the
+    /// download was started in. A continuing download ALWAYS stays in that folder.
+    Torrent {
+        bytes: Vec<u8>,
+        folder: Option<PathBuf>,
+    },
+}
+
+impl Source {
+    /// Continue a saved download from its saved file list, if it has one.
+    fn saved(saved: SavedDownload) -> Option<Source> {
+        Some(Source::Torrent {
+            bytes: saved.torrent?,
+            folder: saved.output_folder,
+        })
+    }
 }
 
 /// Smooths a jumpy number over a few seconds.
@@ -382,14 +396,11 @@ impl Engine {
                     self.shared
                         .with_list(|list| list.set_paused(&parsed.info_hash, false));
                 }
-                (
-                    saved.name,
-                    saved.download_dir,
-                    match saved.torrent {
-                        Some(bytes) => Source::Torrent(bytes),
-                        None => Source::Magnet(parsed.clean_link.clone()),
-                    },
-                )
+                let name = saved.name.clone();
+                let download_dir = saved.download_dir.clone();
+                let source = Source::saved(saved)
+                    .unwrap_or_else(|| Source::Magnet(parsed.clean_link.clone()));
+                (name, download_dir, source)
             }
             None => {
                 let label = parsed
@@ -450,29 +461,23 @@ impl Engine {
             let magnet = magnet::parse(&download.magnet)
                 .map(|parsed| parsed.clean_link)
                 .unwrap_or_default();
-            let source = match download.torrent {
-                Some(bytes) => Source::Torrent(bytes),
+            let (info_hash, name) = (download.info_hash.clone(), download.name.clone());
+            let (download_dir, paused) = (download.download_dir.clone(), download.paused);
+            let source = match Source::saved(download) {
+                Some(source) => source,
                 None if !magnet.is_empty() => Source::Magnet(magnet.clone()),
                 None => {
                     self.shared.notice(format!(
-                        "The saved download \"{}\" has a broken magnet link and was skipped.",
-                        download.name
+                        "The saved download \"{name}\" has a broken magnet link and was skipped."
                     ));
                     continue;
                 }
             };
-            let entry = self.new_entry(
-                &download.info_hash,
-                download.name,
-                download.download_dir,
-                magnet,
-                download.paused,
-                Vec::new(),
-            );
+            let entry = self.new_entry(&info_hash, name, download_dir, magnet, paused, Vec::new());
             lock(&self.entries).push(entry.clone());
             match source {
                 // Paused, and its file list was never fetched: contact nobody until resumed.
-                Source::Magnet(_) if download.paused => *lock(&entry.state) = EntryState::Stopped,
+                Source::Magnet(_) if paused => *lock(&entry.state) = EntryState::Stopped,
                 // A known file list is added paused: its files are checked so the progress shows,
                 // but nobody is contacted.
                 _ => self.spawn_start(entry, source),
@@ -662,15 +667,12 @@ impl Engine {
             }
             None => {
                 // Start (or try again) from the saved file list if there is one.
-                let saved_file_list = self
+                let source = self
                     .shared
                     .with_list(|list| list.get(&entry.info_hash))
                     .flatten()
-                    .and_then(|saved| saved.torrent);
-                let source = match saved_file_list {
-                    Some(bytes) => Source::Torrent(bytes),
-                    None => Source::Magnet(entry.magnet.clone()),
-                };
+                    .and_then(Source::saved)
+                    .unwrap_or_else(|| Source::Magnet(entry.magnet.clone()));
                 self.spawn_start(entry, source);
             }
         }
@@ -689,9 +691,9 @@ async fn start_download(
     let engine_error = |e| Error::Add(format!("{e:#}"));
 
     // Step 1: just the file list. Nothing is created on disk.
-    let add = match source {
-        Source::Magnet(link) => AddTorrent::from_url(link),
-        Source::Torrent(bytes) => AddTorrent::from_bytes(bytes),
+    let (add, saved_folder) = match source {
+        Source::Magnet(link) => (AddTorrent::from_url(link), None),
+        Source::Torrent { bytes, folder } => (AddTorrent::from_bytes(bytes), folder),
     };
     let answer = shared
         .session
@@ -712,7 +714,13 @@ async fn start_download(
     };
 
     // Step 2: the guard. A torrent refused here is not remembered either.
-    let output_folder = match vet_listing(&shared.session_dir, &entry.download_dir, &listing) {
+    let vetted = vet_listing(
+        &shared.session_dir,
+        &entry.download_dir,
+        saved_folder.as_deref(),
+        &listing,
+    );
+    let output_folder = match vetted {
         Ok(folder) => folder,
         Err(error) => {
             if matches!(error, Error::UnsafeFileName(_)) {
@@ -722,14 +730,12 @@ async fn start_download(
         }
     };
 
-    // A NEW download must not take over files that are already there (they aren't ours). One
-    // whose file list we saved before is continuing, and the files there are its own. This one is
-    // kept in the list, so the person can move the other file away and press "Try again".
+    // A NEW download must not take over files that are already there (they aren't ours). Only a
+    // download continuing in the very folder it was started in (and checked in) skips this: the
+    // files there are its own. A refused one is kept in the list, so the person can move the
+    // other file away and press "Try again".
     let paths = owned_files::paths_in(&listing.info, &output_folder)?;
-    let continuing = shared
-        .with_list(|list| list.get(&entry.info_hash))
-        .flatten()
-        .is_some_and(|saved| saved.torrent.is_some());
+    let continuing = saved_folder.is_some();
     if !continuing {
         owned_files::refuse_existing_files(&paths)?;
     }
@@ -785,29 +791,43 @@ async fn start_download(
 /// Refuses a torrent whose files could end up outside its download folder, and returns the exact
 /// folder its files will be saved in.
 ///
-/// librqbit places a torrent relative to the folder the session started with (`session_dir`):
-/// directly in it for a single file, or in a subfolder named after the torrent. We keep that
-/// shape but move it into this download's own folder, which can differ (a remembered download
-/// stays where it was started).
+/// A NEW download: librqbit places a torrent relative to the folder the session started with
+/// (`session_dir`): directly in it for a single file, or in a subfolder named after the torrent.
+/// We keep that shape but move it into this download's own folder (a remembered download stays
+/// in the download folder it was started in, even if the setting changed).
+///
+/// A CONTINUING download (`saved_folder`): always the folder it was started in. librqbit's choice
+/// is ignored, because it can differ from last time; the security review found that a torrent
+/// could use that to move into a folder full of someone else's files.
 fn vet_listing(
     session_dir: &Path,
     download_dir: &Path,
+    saved_folder: Option<&Path>,
     listing: &ListOnlyResponse,
 ) -> Result<PathBuf> {
-    // Every name must be safe on this operating system.
+    // Every name must be safe on this operating system (this also refuses several files with no
+    // folder name).
     safety::check_torrent(&listing.info, Platform::current())?;
 
-    // And, as a second, independent check: the folder the engine chose must be inside its own
-    // folder, made only of plain names, and every file path must be a plain relative path under it.
-    let relative = listing
-        .output_folder
-        .strip_prefix(session_dir)
-        .map_err(|_| safety::UnsafePath::outside_download_folder(&listing.output_folder))?;
-    let output_folder = if relative.as_os_str().is_empty() {
-        download_dir.to_path_buf() // A single file goes straight into the download folder.
-    } else {
-        safety::join_inside(download_dir, relative)?
+    let output_folder = match saved_folder {
+        Some(folder) => folder.to_path_buf(),
+        None => {
+            // A second, independent check: the folder the engine chose must be inside its own
+            // folder and made only of plain names.
+            let relative = listing
+                .output_folder
+                .strip_prefix(session_dir)
+                .map_err(|_| safety::UnsafePath::outside_download_folder(&listing.output_folder))?;
+            if relative.as_os_str().is_empty() {
+                download_dir.to_path_buf() // A single file goes straight into the download folder.
+            } else {
+                safety::join_inside(download_dir, relative)?
+            }
+        }
     };
+    // Either way, the folder must have the only shape BitDinghy creates, and every file path must
+    // be a plain relative path under it.
+    safety::check_download_folder(download_dir, &output_folder)?;
     for file in listing.info.iter_file_details() {
         safety::join_inside(&output_folder, &file.filename.to_pathbuf())?;
     }

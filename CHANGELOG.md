@@ -32,7 +32,9 @@ format is called out here.
   anything else in it.
 - **Your files are never overwritten.** A new download whose file name already exists in the
   folder is refused with a message naming the file, and nothing is changed. Move the file away and
-  press **Try again**.
+  press **Try again**. A download that carries on always stays in the folder it was started in,
+  and a torrent with several files but no name for their folder is refused (found by the M3
+  security review: such a torrent could otherwise move into another folder after a restart).
 - **Portable data folder.** BitDinghy keeps its files in a `data` folder next to the program, so you
   can copy the whole folder to a USB stick. If that folder can't be written to, it uses your user
   settings folder instead. `BitDinghy.exe` and `dinghy.exe` share it.

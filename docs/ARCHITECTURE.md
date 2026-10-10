@@ -171,6 +171,15 @@ downloaded itself. Two rules make that true:
    After the files, folders they leave empty are removed, deepest first; a folder that still holds
    anything is left alone, and the download folder itself is never removed.
 
+**A download never changes folder.** Rule 1 relies on a continuing download being in the same
+folder it was checked in. librqbit can name a torrent's folder differently from one start to the
+next (for a torrent with several files and no name it used the magnet link's `dn=` the first
+time and the biggest file's name the next), so the M3 security review found a way to move a
+download into a folder holding someone else's files. Two fixes: a continuing download always
+uses its **saved** folder (librqbit's new choice is ignored, and the saved folder must have the
+shape above), and a torrent with several files but **no name** is refused outright (the
+BitTorrent standard requires one), so a magnet link's `dn=` never decides a folder.
+
 On Windows a file can stay "in use" for a moment after the engine lets go of it, so deleting
 tries again for up to two seconds. The engine is told to forget the torrent first, so it closes
 its files. A removal that happens while the download is still starting is caught when the start

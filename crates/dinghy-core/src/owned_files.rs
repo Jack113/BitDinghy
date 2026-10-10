@@ -51,7 +51,7 @@ pub fn files_of(torrent: &[u8], download_dir: &Path, output_folder: &Path) -> Re
              delete anything."
         ))
     };
-    if output_folder != download_dir && output_folder.parent() != Some(download_dir) {
+    if safety::check_download_folder(download_dir, output_folder).is_err() {
         return Err(unreadable(format!(
             "its folder {} isn't where BitDinghy puts downloads",
             output_folder.display()
@@ -191,12 +191,29 @@ mod tests {
             PathBuf::from("elsewhere"),
             downloads.join("deeper").join("album"),
             PathBuf::from("."),
+            downloads.join(".."),
         ] {
             assert!(
                 files_of(&bytes, downloads, &wrong).is_err(),
                 "{wrong:?} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn several_files_without_a_name_are_refused() {
+        // The BitTorrent standard requires a name. Without one, the folder would be named after
+        // the magnet link's `dn=` (chosen by whoever wrote the link) or after a file.
+        let mut bytes = torrent("x", &[(&["a.bin"], 3), (&["b.bin"], 2)]);
+        let named = b"4:name1:x";
+        let at = bytes
+            .windows(named.len())
+            .position(|window| window == named)
+            .unwrap();
+        bytes.splice(at..at + named.len(), *b"4:name0:");
+        let downloads = Path::new("downloads");
+        let error = files_of(&bytes, downloads, &downloads.join("x")).unwrap_err();
+        assert!(error.to_string().contains("no name"), "{error}");
     }
 
     #[test]

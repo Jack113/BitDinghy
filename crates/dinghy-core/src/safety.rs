@@ -45,6 +45,10 @@ pub enum Reason {
     WindowsReservedCharacter,
     WindowsDeviceName,
     WindowsTrailingDotOrSpace,
+    /// Several files but no name for their folder. The BitTorrent standard requires a name;
+    /// without one the engine would name the folder after the magnet link's `dn=` (chosen by
+    /// whoever wrote the link) or after a file, and could choose differently on the next start.
+    MissingFolderName,
 }
 
 impl Reason {
@@ -62,13 +66,23 @@ impl Reason {
             }
             Reason::WindowsDeviceName => "a name is a reserved Windows device name",
             Reason::WindowsTrailingDotOrSpace => "a name ends with a dot or a space",
+            Reason::MissingFolderName => "it has several files but no name for their folder",
         }
+    }
+}
+
+/// `: "name"` after the reason, or nothing when there is no name to show.
+fn quoted_suffix(name: &str) -> String {
+    if name.is_empty() {
+        String::new()
+    } else {
+        format!(": \"{name}\"")
     }
 }
 
 /// A name that was refused, with the reason. The name is shown safely escaped.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{}: \"{name}\"", .reason.describe())]
+#[error("{}{}", .reason.describe(), quoted_suffix(.name))]
 pub struct UnsafePath {
     pub reason: Reason,
     pub name: String,
@@ -85,6 +99,24 @@ impl UnsafePath {
     /// For the engine's second check: a folder that is not inside the download folder.
     pub(crate) fn outside_download_folder(folder: &Path) -> Self {
         Self::new(Reason::NotARelativePath, &folder.to_string_lossy())
+    }
+}
+
+/// A download's folder must be the download folder itself (a torrent with one file) or ONE
+/// plain-named folder directly inside it (a torrent with several files). That is the only shape
+/// BitDinghy ever creates, so anything else (deeper, `..`, elsewhere) is refused.
+pub fn check_download_folder(download_dir: &Path, folder: &Path) -> Result<(), UnsafePath> {
+    let fits = folder.strip_prefix(download_dir).is_ok_and(|inside| {
+        let parts: Vec<Component<'_>> = inside.components().collect();
+        parts.len() <= 1
+            && parts
+                .iter()
+                .all(|part| matches!(part, Component::Normal(_)))
+    });
+    if fits {
+        Ok(())
+    } else {
+        Err(UnsafePath::outside_download_folder(folder))
     }
 }
 
@@ -199,8 +231,14 @@ pub fn check_torrent<B: AsRef<[u8]>>(
     info: &ValidatedTorrentMetaV1Info<B>,
     platform: Platform,
 ) -> Result<(), UnsafePath> {
-    if let Some(name) = info.name() {
-        check_component(&name, platform)?;
+    match info.name() {
+        Some(name) => check_component(&name, platform)?,
+        // The engine puts two or more files in a folder named after the torrent. (One file goes
+        // straight into the download folder and needs no folder name.)
+        None if info.iter_file_details().nth(1).is_some() => {
+            return Err(UnsafePath::new(Reason::MissingFolderName, ""));
+        }
+        None => {}
     }
     for file in info.iter_file_details() {
         let parts: Vec<Cow<'_, str>> = file.filename.iter_components().collect();
@@ -401,6 +439,27 @@ mod tests {
         let root = Path::new("downloads");
         let joined = join_inside(root, Path::new("folder/file.txt")).unwrap();
         assert!(joined.starts_with(root));
+    }
+
+    #[test]
+    fn a_download_folder_is_the_folder_itself_or_one_plain_folder_inside_it() {
+        let downloads = Path::new("downloads");
+        assert!(check_download_folder(downloads, downloads).is_ok());
+        assert!(check_download_folder(downloads, &downloads.join("album")).is_ok());
+        for wrong in [
+            downloads.join("a").join("b"),
+            // `Path::parent()` would call this "one folder inside downloads"; it is the folder
+            // ABOVE it.
+            downloads.join(".."),
+            downloads.join("..").join("elsewhere"),
+            PathBuf::from("elsewhere"),
+            PathBuf::from("down"),
+        ] {
+            assert!(
+                check_download_folder(downloads, &wrong).is_err(),
+                "{wrong:?} must be refused"
+            );
+        }
     }
 
     #[test]

@@ -117,7 +117,11 @@ async fn hostile_seeder(scratch: &Path, first_path_part: &str) -> Seeder {
         first_path_part
     )
     .into_bytes();
+    memory_seeder(scratch, bytes).await
+}
 
+/// Serves the file list in `bytes` (a hand-written `.torrent`) from memory, writing nothing.
+async fn memory_seeder(scratch: &Path, bytes: Vec<u8>) -> Seeder {
     let session = start_session(scratch, true).await;
     let handle = session
         .add_torrent(
@@ -836,4 +840,147 @@ async fn removing_a_download_that_is_still_starting_leaves_nothing_behind() {
     let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
     assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
     engine.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Security review fixes (M3): a download never moves into another folder on a restart.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn several_files_without_a_folder_name_are_refused() {
+    // The attack from the review: no `name`, so the engine would name the folder after the magnet
+    // link's `dn=` the first time and after the biggest file the next time.
+    let work = tempfile::tempdir().unwrap();
+    let nameless = b"d4:infod5:filesld6:lengthi5e4:pathl11:Release.bineed6:lengthi1e4:pathl10:family.jpgeee12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee".to_vec();
+    let seeder = memory_seeder(&work.path().join("seeder-scratch"), nameless).await;
+
+    let download_dir = work.path().join("downloads");
+    let victim = download_dir.join("Release").join("family.jpg");
+    std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+    std::fs::write(&victim, b"the real photo").unwrap();
+    let list = work.path().join("downloads.db");
+
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    engine
+        .add_magnet(
+            &format!("{}&dn=Anything", seeder.magnet()),
+            vec![seeder.address],
+        )
+        .unwrap();
+    let refused = wait_for_status(
+        &engine,
+        &[DownloadStatus::Failed, DownloadStatus::Downloading],
+    )
+    .await;
+    assert_eq!(refused.status, DownloadStatus::Failed);
+    let message = refused.error.unwrap();
+    assert!(message.contains("no name for their folder"), "{message}");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"the real photo");
+    assert!(!download_dir.join("Anything").exists());
+    assert!(dinghy_core::SavedList::read(&list).unwrap().is_empty());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_continuing_download_always_uses_its_saved_folder() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Its saved folder is now somewhere the engine itself would never choose for this torrent
+    // (the engine would pick `downloads/testdata`).
+    let kept_here = download_dir.join("kept-here");
+    std::fs::rename(download_dir.join("testdata"), &kept_here).unwrap();
+    {
+        let opened = dinghy_core::SavedList::open(&list).unwrap();
+        let saved = opened.list.all().unwrap().remove(0);
+        opened
+            .list
+            .record_file_list(
+                &saved.info_hash,
+                &saved.name,
+                saved.torrent.as_deref().unwrap(),
+                &kept_here,
+            )
+            .unwrap();
+    }
+
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    assert_eq!(back.save_folder.as_deref(), Some(kept_here.as_path()));
+    assert!(
+        !download_dir.join("testdata").exists(),
+        "it must not move to the engine's own choice of folder"
+    );
+    for (name, bytes) in &files {
+        assert_eq!(
+            &std::fs::read(kept_here.join(name)).unwrap(),
+            bytes,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        dinghy_core::SavedList::read(&list).unwrap()[0]
+            .output_folder
+            .as_deref(),
+        Some(kept_here.as_path())
+    );
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_folder_with_the_wrong_shape_is_refused() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // A damaged (or tampered) list pointing above the download folder.
+    {
+        let opened = dinghy_core::SavedList::open(&list).unwrap();
+        let saved = opened.list.all().unwrap().remove(0);
+        opened
+            .list
+            .record_file_list(
+                &saved.info_hash,
+                &saved.name,
+                saved.torrent.as_deref().unwrap(),
+                &download_dir.join(".."),
+            )
+            .unwrap();
+    }
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let refused = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Failed, DownloadStatus::Finished],
+    )
+    .await;
+    assert_eq!(refused.status, DownloadStatus::Failed);
+    assert!(
+        !work.path().join("a.bin").exists(),
+        "nothing written above the folder"
+    );
+    second_run.shutdown().await;
 }
