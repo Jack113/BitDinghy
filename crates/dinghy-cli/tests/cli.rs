@@ -208,15 +208,21 @@ struct Seeder {
     _session: Arc<Session>,
     address: std::net::SocketAddr,
     magnet: String,
+    /// The torrent's name (also its folder's name).
+    name: &'static str,
     files: Vec<(&'static str, Vec<u8>)>,
 }
 
-async fn start_seeder(work: &Path) -> Seeder {
-    let source = work.join("source").join("sample");
+/// A seeder sharing a torrent called `name`. Different names give different torrents.
+async fn start_seeder(work: &Path, name: &'static str) -> Seeder {
+    let source = work.join("source").join(name);
     std::fs::create_dir_all(&source).unwrap();
     let files: Vec<(&'static str, Vec<u8>)> = vec![
         ("one.bin", (0..90_000u32).map(|n| (n % 251) as u8).collect()),
-        ("two.txt", b"hello from the seeder".to_vec()),
+        (
+            "two.txt",
+            format!("hello from the seeder of {name}").into_bytes(),
+        ),
     ];
     for (name, bytes) in &files {
         std::fs::write(source.join(name), bytes).unwrap();
@@ -233,7 +239,7 @@ async fn start_seeder(work: &Path) -> Seeder {
     .await
     .unwrap();
     let session = Session::new_with_opts(
-        work.join("seeder-scratch"),
+        work.join(format!("seeder-scratch-{name}")),
         SessionOptions {
             dht: None,
             listen: Some(ListenerOptions {
@@ -265,6 +271,7 @@ async fn start_seeder(work: &Path) -> Seeder {
     Seeder {
         address: session.listen_addr().unwrap(),
         magnet: format!("magnet:?xt=urn:btih:{}", created.info_hash().as_string()),
+        name,
         files,
         _session: session,
     }
@@ -279,39 +286,47 @@ async fn run_blocking(command: Command) -> Output {
 
 fn assert_downloaded(seeder: &Seeder, folder: &Path) {
     for (name, bytes) in &seeder.files {
-        let saved = std::fs::read(folder.join("sample").join(name)).unwrap();
+        let saved = std::fs::read(folder.join(seeder.name).join(name)).unwrap();
         assert_eq!(&saved, bytes, "{name}");
     }
 }
 
-/// The whole thing for real: a pretend person on this computer shares files, and the actual
-/// `dinghy get` program downloads them, prints progress, saves every byte and exits with success.
-/// It does so twice: once into a folder given with `--dir`, and once into the REMEMBERED download
-/// folder, set by a separate earlier run of the program. No internet is used.
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn get_downloads_from_a_peer_into_the_chosen_and_the_remembered_folder() {
-    let work = tempfile::tempdir().unwrap();
-    let data = work.path().join("data");
-    let seeder = start_seeder(work.path()).await;
-    let offline_args = |c: &mut Command| {
-        c.args(["--no-dht", "--no-listen", "--peer"])
-            .arg(seeder.address.to_string());
-    };
+/// `dinghy get <seeder's link>` with no internet: only the seeder on this computer is asked.
+fn get_from(data: &Path, seeder: &Seeder) -> Command {
+    let mut command = dinghy(data);
+    command
+        .args(["get", &seeder.magnet, "--no-dht", "--no-listen", "--peer"])
+        .arg(seeder.address.to_string());
+    command
+}
 
-    // 1. With --dir.
-    let with_dir = work.path().join("via-dir-flag");
-    let mut command = dinghy(&data);
-    command.args(["get", &seeder.magnet]);
-    offline_args(&mut command);
-    command.arg("--dir").arg(&with_dir);
-    let output = run_blocking(command).await;
+fn assert_success(output: &Output) -> String {
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     assert!(
         output.status.success(),
         "stdout: {stdout}\nstderr: {stderr}"
     );
+    stdout
+}
+
+/// The whole thing for real: pretend people on this computer share files, and the actual
+/// `dinghy get` program downloads them, prints progress, saves every byte and exits with success.
+/// It downloads into a folder given with `--dir`, then into the REMEMBERED download folder (set by
+/// a separate earlier run of the program), and both end up in the saved list. No internet is used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn get_downloads_from_a_peer_into_the_chosen_and_the_remembered_folder() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let first = start_seeder(work.path(), "sample").await;
+    let second = start_seeder(work.path(), "another").await;
+
+    // 1. With --dir.
+    let with_dir = work.path().join("via-dir-flag");
+    let mut command = get_from(&data, &first);
+    command.arg("--dir").arg(&with_dir);
+    let stdout = assert_success(&run_blocking(command).await);
     assert!(stdout.contains("Done: sample"), "stdout: {stdout}");
-    assert_downloaded(&seeder, &with_dir);
+    assert_downloaded(&first, &with_dir);
 
     // 2. With the remembered folder (a different run of the program saved it).
     let remembered = work.path().join("via-saved-setting");
@@ -321,14 +336,96 @@ async fn get_downloads_from_a_peer_into_the_chosen_and_the_remembered_folder() {
         .arg(&remembered);
     assert!(run_blocking(command).await.status.success());
 
-    let mut command = dinghy(&data);
-    command.args(["get", &seeder.magnet]);
-    offline_args(&mut command);
-    let output = run_blocking(command).await;
-    let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
+    let stdout = assert_success(&run_blocking(get_from(&data, &second)).await);
+    assert!(stdout.contains("Done: another"), "stdout: {stdout}");
+    assert_downloaded(&second, &remembered);
+
+    // 3. The first link again, even with a different --dir: it is already in the list, so it
+    //    carries on (here: is already finished) in the folder it was started in.
+    let mut command = get_from(&data, &first);
+    command.arg("--dir").arg(work.path().join("somewhere-else"));
+    let stdout = assert_success(&run_blocking(command).await);
+    assert!(stdout.contains("already in your list"), "stdout: {stdout}");
     assert!(
-        output.status.success(),
-        "stdout: {stdout}\nstderr: {stderr}"
+        stdout.contains(&with_dir.display().to_string()),
+        "stdout: {stdout}"
     );
-    assert_downloaded(&seeder, &remembered);
+    assert!(!work.path().join("somewhere-else").join("sample").exists());
+
+    // 4. `dinghy list` shows both, in the order they were added, with their folders.
+    let mut command = dinghy(&data);
+    command.arg("list");
+    let stdout = assert_success(&run_blocking(command).await);
+    assert!(stdout.contains("2 saved downloads"), "stdout: {stdout}");
+    let sample_line = stdout.find("1. sample").expect(&stdout);
+    let another_line = stdout.find("2. another").expect(&stdout);
+    assert!(sample_line < another_line, "stdout: {stdout}");
+    assert!(
+        stdout.contains(&with_dir.join("sample").display().to_string()),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn list_with_nothing_saved_says_so() {
+    let data = tempfile::tempdir().unwrap();
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.arg("list");
+        c
+    });
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("No saved downloads yet"), "{stdout}");
+}
+
+#[test]
+fn get_is_refused_while_another_bitdinghy_is_running() {
+    let data = tempfile::tempdir().unwrap();
+    // Pretend the window is open: it holds the saved list.
+    let window = dinghy_core::SavedList::open(&data.path().join("downloads.db")).unwrap();
+
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.args([
+            "get",
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "--no-dht",
+            "--no-listen",
+        ]);
+        c
+    });
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("already running"), "{stderr}");
+
+    // Reading the list still works while the window has it.
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.arg("list");
+        c
+    });
+    assert_success(&output);
+    drop(window);
+}
+
+#[test]
+fn a_damaged_saved_list_is_reported_not_guessed() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("downloads.db"), b"not a database").unwrap();
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.arg("list");
+        c
+    });
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("couldn't read the download list"),
+        "{stderr}"
+    );
+    // `list` only reads: the file is left exactly as it was.
+    assert_eq!(
+        std::fs::read(data.path().join("downloads.db")).unwrap(),
+        b"not a database"
+    );
 }

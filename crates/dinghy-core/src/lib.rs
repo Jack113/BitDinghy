@@ -16,12 +16,14 @@ pub mod error;
 pub mod magnet;
 pub mod profile;
 pub mod safety;
+pub mod saved_list;
 pub mod settings;
 
 pub use data_dir::{DataDir, DataKind};
 pub use engine::{DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
 pub use error::{Error, Result};
 pub use profile::Profile;
+pub use saved_list::{SavedDownload, SavedList};
 pub use settings::Settings;
 
 /// The program's display name.

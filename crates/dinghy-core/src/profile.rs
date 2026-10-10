@@ -2,11 +2,12 @@
 //! remembers, and any problems worth mentioning. The window and the command line both use this,
 //! so they always agree.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::data_dir::DataDir;
 use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
+use crate::saved_list;
 use crate::settings::{Loaded, Settings, SettingsStore, validate_download_dir};
 
 /// The name of the file where the DHT keeps its saved contacts, inside the data folder.
@@ -71,15 +72,23 @@ impl Profile {
         &self.settings
     }
 
-    /// Settings for the engine: the remembered download folder, and the DHT's saved contacts kept
-    /// inside the data folder.
+    /// Settings for the engine: the remembered download folder, and the DHT's saved contacts and
+    /// the saved download list, both kept inside the data folder.
     pub fn engine_config(&self) -> EngineConfig {
         let mut config = EngineConfig::new(self.settings.download_dir_or_default());
         config.dht_state_file = self
             .data_dir
             .as_ref()
             .map(|data_dir| data_dir.file(DHT_STATE_FILE));
+        config.saved_list_file = self.saved_list_path();
         config
+    }
+
+    /// Where the saved download list is kept, if there is a data folder.
+    pub fn saved_list_path(&self) -> Option<PathBuf> {
+        self.data_dir
+            .as_ref()
+            .map(|data_dir| data_dir.file(saved_list::FILE_NAME))
     }
 
     /// Remembers a new download folder (or goes back to the standard one with `None`). The folder
@@ -175,6 +184,19 @@ mod tests {
     }
 
     #[test]
+    fn the_saved_list_lives_inside_the_data_folder() {
+        let work = tempfile::tempdir().unwrap();
+        let profile = profile_in(work.path());
+        let expected = profile
+            .data_dir()
+            .unwrap()
+            .path()
+            .join(saved_list::FILE_NAME);
+        assert_eq!(profile.saved_list_path(), Some(expected.clone()));
+        assert_eq!(profile.engine_config().saved_list_file, Some(expected));
+    }
+
+    #[test]
     fn a_damaged_settings_file_gives_a_notice_and_keeps_the_original() {
         let work = tempfile::tempdir().unwrap();
         std::fs::write(work.path().join(FILE_NAME), "= = broken").unwrap();
@@ -192,6 +214,7 @@ mod tests {
         let profile = Profile::from_data_dir(DataDir::custom(blocker.join("data")));
         assert!(profile.data_dir().is_none());
         assert!(profile.engine_config().dht_state_file.is_none());
+        assert!(profile.engine_config().saved_list_file.is_none());
         assert!(profile.notices()[0].contains("can't remember your settings"));
 
         let mut profile = profile;

@@ -1,5 +1,5 @@
 //! The `dinghy` command-line program. A thin front-end: it parses what you typed and hands the
-//! real work to `dinghy-core`. More commands (`add`, `list`, `pause`...) arrive feature by feature.
+//! real work to `dinghy-core`. More commands (`pause`, `resume`...) arrive feature by feature.
 
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
-use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, Profile, magnet};
+use dinghy_core::{
+    DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, magnet,
+};
 
 /// BitDinghy on the command line.
 #[derive(Parser)]
@@ -23,6 +25,8 @@ struct Cli {
 enum Command {
     /// Download a magnet link, showing progress, and stop when it is finished
     Get(GetArgs),
+    /// Show the saved download list (it works while the window is open, too)
+    List,
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -81,6 +85,7 @@ struct GetArgs {
 async fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
+        Some(Command::List) => list(),
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -152,6 +157,58 @@ fn settings(args: SettingsArgs) -> ExitCode {
     }
 }
 
+/// `dinghy list`: the saved download list, numbered.
+fn list() -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    let Some(path) = profile.saved_list_path() else {
+        println!("BitDinghy has no data folder right now, so it doesn't remember any downloads.");
+        return ExitCode::SUCCESS;
+    };
+    let saved = match SavedList::read(&path) {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if saved.is_empty() {
+        println!("No saved downloads yet. Add one with: dinghy get \"<magnet link>\"");
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "{} saved download{}:",
+        saved.len(),
+        if saved.len() == 1 { "" } else { "s" }
+    );
+    for (index, download) in saved.iter().enumerate() {
+        println!(
+            "{:>3}. {}  [{}]",
+            index + 1,
+            shorten(&download.name, 60),
+            saved_state(download)
+        );
+        let folder = download
+            .output_folder
+            .as_deref()
+            .unwrap_or(&download.download_dir);
+        println!("     {}", folder.display());
+    }
+    println!("Progress shows in the BitDinghy window, or while `dinghy get` runs.");
+    ExitCode::SUCCESS
+}
+
+/// A saved download's state in a word or two (without the engine running, progress isn't known).
+fn saved_state(download: &SavedDownload) -> &'static str {
+    if download.paused {
+        "paused"
+    } else if download.torrent.is_none() {
+        "looking for its file list"
+    } else {
+        "active"
+    }
+}
+
 /// `dinghy get`: download one magnet link in this terminal.
 async fn get(args: GetArgs) -> ExitCode {
     if args.verbose {
@@ -173,11 +230,13 @@ async fn get(args: GetArgs) -> ExitCode {
     let profile = Profile::load();
     print_notices(&profile);
     let mut config = profile.engine_config();
-    if let Some(dir) = args.dir {
-        config.download_dir = dir;
+    if let Some(dir) = &args.dir {
+        config.download_dir = dir.clone();
     }
     config.use_dht = !args.no_dht;
     config.accept_incoming = !args.no_listen;
+    // Only this one download: the others in the saved list wait for the window.
+    config.restore_saved = false;
     let engine = match Engine::start(config).await {
         Ok(engine) => engine,
         Err(error) => {
@@ -185,7 +244,9 @@ async fn get(args: GetArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    println!("Saving to {}", engine.download_dir().display());
+    for notice in engine.notices() {
+        eprintln!("Note: {notice}");
+    }
 
     let id = match engine.add_magnet(&args.link, args.peers) {
         Ok(id) => id,
@@ -195,6 +256,16 @@ async fn get(args: GetArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A download already in the saved list carries on in the folder it was started in.
+    let folder = engine
+        .download_dir_of(id)
+        .unwrap_or_else(|| engine.download_dir().to_path_buf());
+    if args.dir.is_some() && folder != engine.download_dir() {
+        println!(
+            "This download is already in your list, so it carries on in the folder it was started in."
+        );
+    }
+    println!("Saving to {}", folder.display());
 
     let mut printer = ProgressPrinter::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
@@ -215,7 +286,7 @@ async fn get(args: GetArgs) -> ExitCode {
                             "Done: {} ({}) is in {}",
                             snapshot.name,
                             format_bytes(snapshot.total_bytes),
-                            snapshot.save_folder.as_deref().unwrap_or(engine.download_dir()).display()
+                            snapshot.save_folder.as_deref().unwrap_or(&folder).display()
                         );
                         break ExitCode::SUCCESS;
                     }
@@ -324,6 +395,7 @@ mod tests {
     fn snapshot(status: DownloadStatus) -> DownloadSnapshot {
         DownloadSnapshot {
             id: DownloadId(1),
+            info_hash: "c9e15763f722f23e98a29decdfae341b98d53056".to_string(),
             name: "ubuntu-24.04-desktop-amd64.iso".to_string(),
             status,
             progress_bytes: 512 * 1024 * 1024,
@@ -357,6 +429,21 @@ mod tests {
             line.contains("Looking for people sharing this torrent"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn a_saved_download_is_described_in_plain_words() {
+        let mut saved = SavedDownload::new(
+            "c9e15763f722f23e98a29decdfae341b98d53056",
+            "Ubuntu",
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            Path::new("downloads"),
+        );
+        assert_eq!(saved_state(&saved), "looking for its file list");
+        saved.torrent = Some(b"d4:infodee".to_vec());
+        assert_eq!(saved_state(&saved), "active");
+        saved.paused = true;
+        assert_eq!(saved_state(&saved), "paused");
     }
 
     #[test]

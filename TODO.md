@@ -15,6 +15,13 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Noticed while building M3
+- `dinghy get --no-dht` on a link with no trackers and no `--peer` waits forever ("Looking for
+  people...") although it has no way to find anyone. Say so straight away (plain-language errors,
+  M12).
+- `rusqlite` with `bundled` compiles SQLite into both programs. Re-measure the exe sizes against
+  the M0b baseline at the first release.
+
 ## Noticed while building M2
 - Changing the download folder only applies on the next start. Applying it live fits M3, when the
   engine and the saved list get reworked.

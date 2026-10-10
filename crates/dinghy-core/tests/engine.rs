@@ -143,13 +143,44 @@ async fn hostile_seeder(scratch: &Path, first_path_part: &str) -> Seeder {
     }
 }
 
-/// An engine that never touches the internet: no DHT, no local-network search, no listening.
-async fn offline_engine(download_dir: &Path) -> Engine {
+/// Settings for an engine that never touches the internet: no DHT, no local-network search, no
+/// listening, and no saved list.
+fn offline_config(download_dir: &Path) -> EngineConfig {
     let mut config = EngineConfig::new(download_dir);
     config.use_dht = false;
     config.accept_incoming = false;
     config.local_discovery = false;
+    config
+}
+
+async fn offline_engine(download_dir: &Path) -> Engine {
+    Engine::start(offline_config(download_dir))
+        .await
+        .expect("engine should start")
+}
+
+/// An offline engine that remembers its downloads in `list`. `restore` brings back what is
+/// already in the list (like the window does).
+async fn remembering_engine(download_dir: &Path, list: &Path, restore: bool) -> Engine {
+    let mut config = offline_config(download_dir);
+    config.saved_list_file = Some(list.to_path_buf());
+    config.restore_saved = restore;
     Engine::start(config).await.expect("engine should start")
+}
+
+/// A small one-folder torrent with real files, shared by a seeder on this computer.
+async fn small_shared_torrent(work: &Path) -> (Seeder, Vec<(&'static str, Vec<u8>)>) {
+    let source = work.join("source").join("testdata");
+    std::fs::create_dir_all(&source).unwrap();
+    let files = vec![
+        ("a.bin", pseudo_random_bytes(60_000, 11)),
+        ("b.bin", pseudo_random_bytes(40_000, 12)),
+    ];
+    for (name, bytes) in &files {
+        std::fs::write(source.join(name), bytes).unwrap();
+    }
+    let seeder = real_seeder(&work.join("seeder-scratch"), &source).await;
+    (seeder, files)
 }
 
 /// Waits until the first download reaches one of `wanted`, then returns its snapshot.
@@ -326,4 +357,186 @@ async fn hostile_torrents_are_refused_and_nothing_is_written() {
 
         engine.shutdown().await;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The saved list (M3): downloads are remembered and come back after a restart.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_finished_download_is_remembered_and_comes_back_after_a_restart() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("data").join("downloads.db");
+    std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(
+        &first_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    first_run.shutdown().await;
+    drop(first_run); // "BitDinghy closes"
+
+    // The list holds the checked file list, so the next start needs nobody to ask.
+    let saved = dinghy_core::SavedList::read(&list).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].name, "testdata");
+    assert!(saved[0].torrent.is_some());
+    assert_eq!(
+        saved[0].output_folder.as_deref(),
+        done.save_folder.as_deref()
+    );
+
+    // "BitDinghy opens again", with no seeder to ask: everything comes from the list and the disk.
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    assert_eq!(back.name, "testdata");
+    assert_eq!(back.save_folder, done.save_folder);
+    let folder = back.save_folder.unwrap();
+    for (name, bytes) in &files {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes, "{name}");
+    }
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remembered_download_stays_in_its_own_folder_when_the_setting_changes() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let old_folder = work.path().join("old-downloads");
+    let new_folder = work.path().join("new-downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&old_folder, &list, true).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(
+        &first_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // The person picked a new download folder in the meantime.
+    let second_run = remembering_engine(&new_folder, &list, true).await;
+    let back = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    assert!(back.save_folder.unwrap().starts_with(&old_folder));
+    assert_eq!(second_run.download_dir_of(back.id), Some(old_folder));
+    assert!(
+        entries_in(&new_folder).is_empty(),
+        "nothing should be created in the new folder"
+    );
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_dinghy_get_again_carries_on_from_the_saved_file_list() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, false).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Same link again, and this time no seeder address: the saved file list is enough.
+    let second_run = remembering_engine(&download_dir, &list, false).await;
+    assert!(
+        second_run.snapshot().is_empty(),
+        "`get` doesn't restore others"
+    );
+    second_run.add_magnet(&seeder.magnet(), vec![]).unwrap();
+    let back = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(back.status, DownloadStatus::Finished, "{:?}", back.error);
+    assert_eq!(dinghy_core::SavedList::read(&list).unwrap().len(), 1);
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_still_waiting_for_its_file_list_is_remembered_too() {
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let link = "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Waiting%20Example";
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    first_run.add_magnet(link, vec![]).unwrap();
+    first_run.shutdown().await;
+    drop(first_run);
+
+    let saved = dinghy_core::SavedList::read(&list).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].name, "Waiting Example");
+    assert!(saved[0].torrent.is_none());
+
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let shown = second_run.snapshot();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].name, "Waiting Example");
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_torrent_is_not_remembered() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = hostile_seeder(&work.path().join("seeder-scratch"), "bad\u{7}name").await;
+    let list = work.path().join("downloads.db");
+    let engine = remembering_engine(&work.path().join("downloads"), &list, true).await;
+    engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let result = wait_for_status(
+        &engine,
+        &[DownloadStatus::Failed, DownloadStatus::Downloading],
+    )
+    .await;
+    assert_eq!(result.status, DownloadStatus::Failed);
+    assert!(dinghy_core::SavedList::read(&list).unwrap().is_empty());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_one_engine_can_use_a_saved_list_at_a_time() {
+    let work = tempfile::tempdir().unwrap();
+    let list = work.path().join("downloads.db");
+    let window = remembering_engine(&work.path().join("a"), &list, true).await;
+
+    let mut second = offline_config(&work.path().join("b"));
+    second.saved_list_file = Some(list.clone());
+    let refused = Engine::start(second.clone()).await;
+    assert!(matches!(refused, Err(dinghy_core::Error::AlreadyRunning)));
+
+    // Closing the first one (even before it is dropped) lets the next one in.
+    window.shutdown().await;
+    let next = Engine::start(second).await.expect("the list is free again");
+    next.shutdown().await;
 }

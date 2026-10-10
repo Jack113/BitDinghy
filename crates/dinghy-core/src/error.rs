@@ -37,6 +37,18 @@ pub enum Error {
     /// Settings couldn't be saved (or must not be, for example when a newer version wrote them).
     #[error("{0}")]
     Settings(String),
+
+    /// Another BitDinghy (the window, or `dinghy` in another terminal) is already using this data
+    /// folder. Two engines would download into the same files and fight over the saved list.
+    #[error(
+        "BitDinghy is already running (in its window or in another terminal). Use that one, or \
+         close it first."
+    )]
+    AlreadyRunning,
+
+    /// The saved download list couldn't be read or changed.
+    #[error("{0}")]
+    SavedList(String),
 }
 
 /// Shorthand used throughout the crate.

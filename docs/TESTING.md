@@ -3,6 +3,39 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M3: the saved list, pause, resume and remove (built in three steps)
+
+M3 arrives in steps. This section grows with each one.
+
+### Step 1: downloads are remembered (and only one BitDinghy runs at a time)
+
+This uses the internet and some data: it starts the Arch Linux download from the M1 section
+below (about 1.5 GB). You only need it to run for a few seconds each time, so stop early.
+Development builds keep their list in `C:\cargo-target\debug\data\downloads.db`.
+
+First build once: `cargo build --workspace`. The programs are in `C:\cargo-target\debug\`.
+
+1. **Nothing saved yet.** `C:\cargo-target\debug\dinghy.exe list` says "No saved downloads yet".
+2. **The window remembers.** Open `BitDinghy.exe`, paste the Arch magnet link and press Download.
+   When it shows progress, close the window. Open it again: the download is **back by itself**. It
+   first shows "Checking files already on disk..." and then carries on from where it was.
+3. **Only one BitDinghy at a time.** With the window open, run
+   `dinghy.exe get "<the Arch magnet link>"`. It refuses with "BitDinghy is already running", and
+   nothing else happens.
+4. **`dinghy list` works any time.** With the window still open, run `dinghy.exe list`: it shows
+   the Arch download, numbered, with its folder.
+5. **The command line carries on the same download.** Close the window, then run
+   `dinghy.exe get "<the Arch magnet link>"`. It says "Saving to" the same folder and continues
+   from where the window stopped (it checks the files first). Press Ctrl+C after a few seconds.
+6. **A damaged list is never thrown away.** With everything closed, open
+   `C:\cargo-target\debug\data\downloads.db` in Notepad, replace everything with `broken`, and save.
+   Open the window: a note says the list couldn't be read and **where the old file was kept**
+   (`downloads.db.broken-<number>`), and the window starts with an empty list.
+
+Pause, resume and remove are steps 2 and 3. To clear the Arch download for now, close everything
+and delete `downloads.db` in the data folder (the downloaded part stays in your download folder,
+`Downloads\BitDinghy`, until you delete it).
+
 ## M2: portable data folder, remembered settings, and the branded window
 
 Everything here is **safe to try**: it uses no internet (except the optional last step) and only

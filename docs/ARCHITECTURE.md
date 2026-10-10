@@ -30,7 +30,7 @@ command line and the window.
       |  queue, limits, seeding rules, safety checks     |
       +-------+------------------+-----------------------+
               |                  |
-          librqbit        settings.toml + dinghy.db
+          librqbit       settings.toml + downloads.db
        (the internet)        (next to the program)
 ```
 
@@ -92,8 +92,8 @@ speed, time left, people connected) that the window and the command line both dr
  BitDinghy.exe   dinghy.exe        data\                      <- next to the programs
         \          /                 settings.toml  (versioned, readable)
          Profile::load()  ------->   dht.json       (the DHT's saved contacts)
-   (finds the data folder,           (later: the download list and history)
-    loads the settings)
+   (finds the data folder,           downloads.db   (the saved download list, M3)
+    loads the settings)              downloads.db.lock  (held while BitDinghy runs)
 ```
 
 - **`data_dir.rs`** decides the folder: the `data` folder next to the programs if it can be
@@ -106,6 +106,41 @@ speed, time left, people connected) that the window and the command line both dr
   - saving writes a temporary file and swaps it in, so a crash can't leave half a file.
 - **`profile.rs`** is the one call both programs make at start-up. It never fails: if something is
   wrong, BitDinghy carries on with standard settings and shows a notice.
+
+## The saved download list (M3)
+
+```
+  add a link --> saved_list: remember it -----------------+
+       |                                                  |
+       v                                                  v
+  1. file list only --> 2. safety check --> remember the checked file list
+                                 |                        |
+                                 v                        |
+                        3. start for real                 |
+                                                          |
+  next start: every saved download goes through 1-2-3 <--+
+              again, from the saved file list (no need to ask anyone)
+```
+
+- **`saved_list.rs`** keeps `downloads.db`, an SQLite file, with the same promises as the
+  settings: a version number inside the file and step-by-step upgrades, a damaged file kept aside
+  as `downloads.db.broken-<time>`, a list from a newer BitDinghy never changed. SQLite writes each
+  change completely or not at all, so a crash or a pulled USB stick can't leave half a change.
+- For each download it keeps the fingerprint, the name, the cleaned magnet link, the **checked
+  file list** (once known), the download folder it was started in, the exact folder its files are
+  in, and whether it is paused. A remembered download stays in its own folder even if the
+  download-folder setting changes later.
+- **Why not librqbit's own saved list?** It exists, but a damaged file stops its engine from
+  starting at all, its format isn't ours to version, and it re-adds torrents without our safety
+  check. So it stays off, and each start re-checks the files already on disk instead (a few
+  seconds per GB).
+- **One BitDinghy at a time.** Opening the list for changes takes a lock on `downloads.db.lock`.
+  Windows releases it when the program ends, even after a crash. A second window or `dinghy get`
+  gets a plain "BitDinghy is already running" message. `dinghy list` only reads, so it works any
+  time.
+- The window brings back every saved download when it opens. `dinghy get` only starts the one it
+  was given: if that link is already in the list, it carries on in its own folder from the saved
+  file list.
 
 ## Where each piece appears
 

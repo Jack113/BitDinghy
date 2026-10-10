@@ -43,6 +43,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 url = "2"
 # Finds the user's normal Downloads folder.
 directories = "6"
+# The saved download list (SQLite). `bundled` compiles SQLite itself into the program, so nothing
+# extra has to be installed and every PC runs the same, tested SQLite version.
+rusqlite = { version = "0.40", features = ["bundled"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 tempfile = "3"
 # Reads the window icon and logo pictures (already part of the build through egui).

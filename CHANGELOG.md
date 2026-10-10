@@ -10,6 +10,17 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Downloads are remembered.** Every download goes into a saved list (`downloads.db` in the data
+  folder) as soon as it is added. When the window opens again, everything in the list comes back
+  and carries on where it stopped, in the folder it was started in. The list is versioned, a
+  damaged one is kept aside (`downloads.db.broken-<time>`) and never deleted, and a list from a
+  newer BitDinghy is never changed.
+- **`dinghy list`** shows the saved list, numbered, with each download's folder. It works while
+  the window is open.
+- **Only one BitDinghy at a time.** A second window, or `dinghy get` while the window is open, is
+  refused with a plain message, so two engines can never write into the same files.
+- `dinghy get` on a link that is already in the list carries on in its own folder, using the file
+  list saved last time.
 - **Portable data folder.** BitDinghy keeps its files in a `data` folder next to the program, so you
   can copy the whole folder to a USB stick. If that folder can't be written to, it uses your user
   settings folder instead. `BitDinghy.exe` and `dinghy.exe` share it.

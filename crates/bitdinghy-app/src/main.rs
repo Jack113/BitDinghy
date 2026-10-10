@@ -214,6 +214,11 @@ impl eframe::App for BitDinghyApp {
             }
         };
 
+        // Problems with the saved download list, for example.
+        for notice in engine.notices() {
+            ui.colored_label(warning_color(ui), notice);
+        }
+
         // Redraw a couple of times a second so progress keeps moving.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
 
