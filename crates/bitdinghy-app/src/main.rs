@@ -36,6 +36,12 @@ fn info_color(ui: &egui::Ui) -> egui::Color32 {
     brand::palette(ui.ctx().theme()).info
 }
 
+/// The "busy" spinner, in the teal of the line beside it. Not `ui.spinner()`: egui paints that in
+/// the pressed-button color, which the brand makes dark navy, so it vanished on the background.
+fn spinner(ui: &mut egui::Ui) {
+    ui.add(egui::Spinner::new().color(info_color(ui)));
+}
+
 /// How tall the logo is drawn at the top of the window, in points.
 const LOGO_HEIGHT: f32 = 48.0;
 
@@ -412,7 +418,7 @@ impl eframe::App for BitDinghyApp {
         self.collect_fetch();
         if let Some(fetching) = &self.fetching {
             ui.horizontal(|ui| {
-                ui.spinner();
+                spinner(ui);
                 ui.colored_label(
                     info_color(ui),
                     format!("Fetching the .torrent file from {}...", fetching.host),
@@ -626,7 +632,7 @@ fn draw_download(
     match download.status {
         DownloadStatus::GettingInfo => {
             ui.horizontal(|ui| {
-                ui.spinner();
+                spinner(ui);
                 ui.colored_label(
                     info_color(ui),
                     waiting_text(download.waiting_for.unwrap_or_default()),
@@ -635,7 +641,7 @@ fn draw_download(
         }
         DownloadStatus::Checking => {
             ui.horizontal(|ui| {
-                ui.spinner();
+                spinner(ui);
                 ui.colored_label(info_color(ui), "Checking files already on disk...");
             });
         }

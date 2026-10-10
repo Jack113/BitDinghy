@@ -24,6 +24,9 @@ project is built **one feature at a time**.
 - `dinghy settings set allow-http-links` while the window is open only reaches the window at its
   next start (the window's own Settings checkbox applies at once). The channel could pass it on.
 - Opening `.torrent` files / magnet links from Explorer or a browser is M16 (default app).
+- `dinghy get` following a download in the open window shows a paused download as
+  `76.6% ... 0 B/s  ETA unknown  peers 0`, which looks stuck (found in the M5 guided test). Say
+  "paused at 76.6%" like `dinghy list` does (`progress_line` in the CLI). Fits M12.
 
 ## Noticed while building M4
 - Another user on the same PC could create a pipe with BitDinghy's channel name before the window
