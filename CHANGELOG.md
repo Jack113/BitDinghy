@@ -87,9 +87,12 @@ format is called out here.
 - Dual license: MIT OR Apache-2.0.
 
 ### Fixed
+- The window's busy spinners ("Fetching...", "Looking for people...", "Checking files...") were
+  invisible, dark on the dark background. They are teal now, like the line beside them.
 - Closing the window no longer crashes the program (it panicked while shutting down).
 
 ### Known limits
 - A new download folder is used from the next start, not immediately.
-- No pause/resume buttons, no saved download list, no `.torrent` files yet, and only one setting.
+- A change made with `dinghy settings set allow-http-links` while the window is open reaches the
+  window at its next start (the window's own checkbox applies at once).
 - The torrent engine does not support encrypted connections yet.
