@@ -25,6 +25,14 @@ format is called out here.
   `dinghy resume <n>` (numbers from `dinghy list`; while the window is closed). A paused download
   stays paused after a restart; one paused before its file list arrived contacts nobody until it
   is resumed. On a download that failed, the button says **Try again**.
+- **Remove**, in the window (a **Remove** button that asks: keep the files, delete the files too,
+  or cancel) and with `dinghy remove <n>` (add `--delete-files` to delete them; it lists them and
+  asks you to type `yes`, or `--yes` for scripts). Only the files BitDinghy downloaded for that
+  download are ever deleted, plus folders they leave empty; never the download folder, and never
+  anything else in it.
+- **Your files are never overwritten.** A new download whose file name already exists in the
+  folder is refused with a message naming the file, and nothing is changed. Move the file away and
+  press **Try again**.
 - **Portable data folder.** BitDinghy keeps its files in a `data` folder next to the program, so you
   can copy the whole folder to a USB stick. If that folder can't be written to, it uses your user
   settings folder instead. `BitDinghy.exe` and `dinghy.exe` share it.

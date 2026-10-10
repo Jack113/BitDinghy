@@ -53,9 +53,32 @@ This also uses the Arch download from step 1 (a few seconds at a time).
 7. **`dinghy get` means "carry on".** Pause the Arch download, close the window, then run
    `dinghy.exe get "<the Arch magnet link>"`: it resumes it and continues. Press Ctrl+C.
 
-Remove is step 3. To clear the Arch download for now, close everything and delete
-`downloads.db` in the data folder (the downloaded part stays in your download folder,
-`Downloads\BitDinghy`, until you delete it).
+### Step 3: remove, and never overwriting your files
+
+This also uses the Arch download (a few seconds at a time).
+
+1. **Remove and keep the files.** In the window, press **Remove** on the Arch download. A question
+   appears under it. Press **Keep the files**: it disappears from the list, a message says where
+   its files still are, and the file is still in `Downloads\BitDinghy`. Close and reopen the
+   window: it stays gone.
+2. **A new download never takes over your file.** Paste the Arch link again and press Download.
+   It is **refused**: the message names the `.iso` that is already there and says BitDinghy never
+   overwrites files it didn't download (after "Keep the files", that file is no longer
+   BitDinghy's). Nothing is changed. Move the `.iso` somewhere else and press **Try again**: it
+   starts, from the beginning this time (so pause it after a few seconds to save data).
+3. **Remove and delete the files.** Put a small file of your own (for example `notes.txt`) in
+   `Downloads\BitDinghy`. Press **Remove** on the Arch download, then **Delete the files too**.
+   The message says it deleted 1 file. The `.iso` is gone; **`notes.txt` and the folder are still
+   there**.
+4. **Cancel does nothing.** Start a download, press **Remove**, then **Cancel**: it carries on.
+5. **The command line, with the window closed.** Start the Arch download again, close the window,
+   then:
+   - `dinghy.exe remove 1` removes it from the list and says where the files still are.
+   - Start it again (window or `dinghy get`) after moving the file away, close the window, then
+     `dinghy.exe remove 1 --delete-files`: it lists the file it will delete and asks you to type
+     `yes`. Type `no` and nothing happens; run it again and type `yes`, and it is deleted.
+6. **Not while the window is open.** With the window open, `dinghy.exe remove 1` refuses and says
+   to remove it in the window.
 
 ## M2: portable data folder, remembered settings, and the branded window
 

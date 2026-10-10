@@ -497,9 +497,108 @@ fn pause_is_refused_while_the_window_is_open() {
     assert!(!output.status.success());
     let stderr = text(&output.stderr);
     assert!(stderr.contains("pause it there"), "{stderr}");
+    let output = dinghy_output(data.path(), &["remove", "1"]);
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("remove it there"), "{stderr}");
     drop(window);
 
     // Nothing changed.
     let stdout = assert_success(&dinghy_output(data.path(), &["list"]));
     assert!(!stdout.contains("[paused]"), "{stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn remove_keeps_the_files_and_a_new_download_never_overwrites_them() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+
+    let mut command = get_from(&data, &seeder);
+    command.arg("--dir").arg(&downloads);
+    assert_success(&run_blocking(command).await);
+
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.args(["remove", "1"]);
+            c
+        })
+        .await,
+    );
+    assert!(stdout.contains("Removed: sample"), "{stdout}");
+    assert!(stdout.contains("still in"), "{stdout}");
+    assert_downloaded(&seeder, &downloads);
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.arg("list");
+            c
+        })
+        .await,
+    );
+    assert!(stdout.contains("No saved downloads"), "{stdout}");
+
+    // The files are no longer BitDinghy's, so the same torrent added again must not take them over.
+    let mut command = get_from(&data, &seeder);
+    command.arg("--dir").arg(&downloads);
+    let output = run_blocking(command).await;
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("same name"), "{stderr}");
+    assert_downloaded(&seeder, &downloads);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn remove_with_delete_files_asks_first_and_deletes_only_its_own_files() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+
+    let mut command = get_from(&data, &seeder);
+    command.arg("--dir").arg(&downloads);
+    assert_success(&run_blocking(command).await);
+    let neighbour = downloads.join("my own file.txt");
+    std::fs::write(&neighbour, b"mine").unwrap();
+
+    // No person at the keyboard (tests run without one): it won't delete without --yes.
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.args(["remove", "1", "--delete-files"]);
+        c
+    })
+    .await;
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert_downloaded(&seeder, &downloads);
+
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.args(["remove", "1", "--delete-files", "--yes"]);
+            c
+        })
+        .await,
+    );
+    assert!(stdout.contains("Deleted 2 files"), "{stdout}");
+    assert!(
+        !downloads.join("sample").exists(),
+        "the torrent's folder is gone"
+    );
+    assert_eq!(std::fs::read(&neighbour).unwrap(), b"mine");
+}
+
+#[test]
+fn yes_on_its_own_is_refused() {
+    let data = tempfile::tempdir().unwrap();
+    let output = dinghy_output(data.path(), &["remove", "1", "--yes"]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output.stderr).contains("--delete-files"),
+        "{}",
+        text(&output.stderr)
+    );
 }

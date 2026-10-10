@@ -155,6 +155,27 @@ speed, time left, people connected) that the window and the command line both dr
 - `dinghy pause <n>` / `dinghy resume <n>` change the saved list while BitDinghy isn't running
   (they need the lock, like an engine). With the window open they are refused until M4.
 
+### Remove, and "only ever delete our own files" (`owned_files.rs`)
+
+BitDinghy deletes files only when the person asks ("Delete the files too"), and then only files it
+downloaded itself. Two rules make that true:
+
+1. **A new download never takes over an existing file.** Before a new download starts, every
+   path in its checked file list is looked up. If any already exists, the download is refused
+   with a message naming the file. (A download continuing from its own saved file list skips
+   this: the files there are its own.) So every file at one of a download's paths was written by
+   that download.
+2. **What gets deleted comes from the download's own checked file list**, never from looking
+   around in the folder. The list goes through the same safety guard again, and its folder must
+   be the download folder itself (one file) or one folder directly inside it (several files).
+   After the files, folders they leave empty are removed, deepest first; a folder that still holds
+   anything is left alone, and the download folder itself is never removed.
+
+On Windows a file can stay "in use" for a moment after the engine lets go of it, so deleting
+tries again for up to two seconds. The engine is told to forget the torrent first, so it closes
+its files. A removal that happens while the download is still starting is caught when the start
+finishes, and the torrent is taken straight back out.
+
 ## Where each piece appears
 
 | Milestone | What lands |

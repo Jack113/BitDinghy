@@ -50,9 +50,18 @@ pub enum Error {
     #[error("{0}")]
     SavedList(String),
 
-    /// Pausing or resuming a download didn't work. The message says why.
+    /// Pausing, resuming or removing a download didn't work. The message says why.
     #[error("{0}")]
     Control(String),
+
+    /// A new download would have overwritten a file that BitDinghy didn't download.
+    #[error(
+        "BitDinghy didn't start this download because a file with the same name is already in \
+         the download folder: {}. BitDinghy never overwrites files it didn't download. Move or \
+         rename that file, then try again.",
+        .0.display()
+    )]
+    NameClash(PathBuf),
 }
 
 /// Shorthand used throughout the crate.

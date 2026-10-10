@@ -60,8 +60,10 @@ struct BitDinghyApp {
     folder_text: String,
     /// The result of the last settings change: the message, and whether it is an error.
     settings_message: Option<(String, bool)>,
-    /// A problem with the last Pause/Resume press.
-    control_problem: Option<String>,
+    /// The result of the last Pause/Resume/Remove press: the message, and whether it is an error.
+    control_message: Option<(String, bool)>,
+    /// The download whose "Remove?" question is showing, if any.
+    confirming_remove: Option<DownloadId>,
 }
 
 impl BitDinghyApp {
@@ -92,7 +94,8 @@ impl BitDinghyApp {
             link_problem: None,
             folder_text,
             settings_message: None,
-            control_problem: None,
+            control_message: None,
+            confirming_remove: None,
         }
     }
 
@@ -129,6 +132,45 @@ impl BitDinghyApp {
             }
             Err(error) => (error.to_string(), true),
         });
+    }
+
+    /// Carries out a button press on one download.
+    fn act(&mut self, engine: &Engine, downloads: &[DownloadSnapshot], control: Control) {
+        let name_of = |id| {
+            downloads
+                .iter()
+                .find(|download| download.id == id)
+                .map(|download| download.name.clone())
+                .unwrap_or_default()
+        };
+        let outcome = match control {
+            Control::Pause(id) => self.runtime.block_on(engine.pause(id)).map(|()| None),
+            Control::Resume(id) => self.runtime.block_on(engine.resume(id)).map(|()| None),
+            Control::AskRemove(id) => {
+                self.confirming_remove = Some(id);
+                Ok(None)
+            }
+            Control::CancelRemove => {
+                self.confirming_remove = None;
+                Ok(None)
+            }
+            Control::Remove { id, delete_files } => {
+                self.confirming_remove = None;
+                let name = name_of(id);
+                let folder = engine
+                    .download_dir_of(id)
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default();
+                self.runtime
+                    .block_on(engine.remove(id, delete_files))
+                    .map(|deleted| Some(removed_message(&name, &folder, delete_files, &deleted)))
+            }
+        };
+        self.control_message = match outcome {
+            Ok(None) => None,
+            Ok(Some(message)) => Some(message),
+            Err(error) => Some((error.to_string(), true)),
+        };
     }
 
     /// The logo (or, if it couldn't be loaded, the name) with the version beside it.
@@ -248,8 +290,13 @@ impl eframe::App for BitDinghyApp {
         ui.add_space(4.0);
         ui.separator();
 
-        if let Some(problem) = &self.control_problem {
-            ui.colored_label(error_color(ui), problem);
+        if let Some((message, is_error)) = &self.control_message {
+            let color = if *is_error {
+                error_color(ui)
+            } else {
+                ui.visuals().text_color()
+            };
+            ui.colored_label(color, message);
         }
         let downloads = engine.snapshot();
         if downloads.is_empty() {
@@ -260,19 +307,14 @@ impl eframe::App for BitDinghyApp {
         let mut clicked = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for download in &downloads {
-                clicked = draw_download(ui, download).or(clicked);
+                let confirming = self.confirming_remove == Some(download.id);
+                clicked = draw_download(ui, download, confirming).or(clicked);
                 ui.separator();
             }
         });
         // Act on a button only after drawing, so the list isn't changed halfway through.
         if let Some(control) = clicked {
-            let result = self.runtime.block_on(async {
-                match control {
-                    Control::Pause(id) => engine.pause(id).await,
-                    Control::Resume(id) => engine.resume(id).await,
-                }
-            });
-            self.control_problem = result.err().map(|error| error.to_string());
+            self.act(&engine, &downloads, control);
         }
     }
 
@@ -301,6 +343,40 @@ fn shut_down(runtime: &tokio::runtime::Runtime, engine: &Engine) {
 enum Control {
     Pause(DownloadId),
     Resume(DownloadId),
+    /// "Remove" was pressed: show the question.
+    AskRemove(DownloadId),
+    CancelRemove,
+    /// The question was answered.
+    Remove {
+        id: DownloadId,
+        delete_files: bool,
+    },
+}
+
+/// What to say after a download was removed: the message, and whether it is an error.
+fn removed_message(
+    name: &str,
+    folder: &str,
+    delete_files: bool,
+    deleted: &dinghy_core::owned_files::Deleted,
+) -> (String, bool) {
+    if !delete_files {
+        return (
+            format!("Removed \"{name}\". Its files are still in {folder}."),
+            false,
+        );
+    }
+    let count = deleted.files;
+    let mut message = format!(
+        "Removed \"{name}\" and deleted {count} file{} it downloaded.",
+        if count == 1 { "" } else { "s" }
+    );
+    if deleted.problems.is_empty() {
+        return (message, false);
+    }
+    message.push_str(" These couldn't be deleted, so you can delete them yourself: ");
+    message.push_str(&deleted.problems.join("; "));
+    (message, true)
 }
 
 /// The button a download shows: Resume when paused, "Try again" when it failed, Pause otherwise.
@@ -325,9 +401,13 @@ fn paused_text(download: &DownloadSnapshot) -> String {
     }
 }
 
-/// Draws one download: its name and button, then a progress bar and numbers (or a message).
-/// Returns the button press, if there was one.
-fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) -> Option<Control> {
+/// Draws one download: its name and buttons, then a progress bar and numbers (or a message).
+/// `confirming` shows the "Remove?" question under it. Returns the button press, if any.
+fn draw_download(
+    ui: &mut egui::Ui,
+    download: &DownloadSnapshot,
+    confirming: bool,
+) -> Option<Control> {
     let mut clicked = None;
     ui.horizontal(|ui| {
         // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes
@@ -338,13 +418,46 @@ fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) -> Option<Contr
                 .size(15.0)
                 .color(name_color),
         );
+        // Right to left: the first button added sits at the far right.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Remove").clicked() {
+                clicked = Some(Control::AskRemove(download.id));
+            }
             let (label, control) = control_for(download);
             if ui.button(label).clicked() {
                 clicked = Some(control);
             }
         });
     });
+    if confirming {
+        ui.group(|ui| {
+            ui.colored_label(
+                warning_color(ui),
+                format!("Remove \"{}\" from the list?", download.name),
+            );
+            ui.small(
+                "\"Delete the files too\" deletes only the files BitDinghy downloaded for it. \
+                 Nothing else in the folder is touched.",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Keep the files").clicked() {
+                    clicked = Some(Control::Remove {
+                        id: download.id,
+                        delete_files: false,
+                    });
+                }
+                if ui.button("Delete the files too").clicked() {
+                    clicked = Some(Control::Remove {
+                        id: download.id,
+                        delete_files: true,
+                    });
+                }
+                if ui.button("Cancel").clicked() {
+                    clicked = Some(Control::CancelRemove);
+                }
+            });
+        });
+    }
 
     match download.status {
         DownloadStatus::GettingInfo => {
@@ -479,6 +592,31 @@ mod tests {
             control_for(&snapshot(DownloadStatus::Failed, 0, 0)),
             ("Try again", Control::Resume(id))
         );
+    }
+
+    #[test]
+    fn the_removed_message_says_what_happened_to_the_files() {
+        use dinghy_core::owned_files::Deleted;
+        let (kept, error) = removed_message("Ubuntu", r"C:\Downloads", false, &Deleted::default());
+        assert!(!error);
+        assert!(kept.contains(r"still in C:\Downloads"), "{kept}");
+
+        let all_gone = Deleted {
+            files: 3,
+            problems: vec![],
+        };
+        let (deleted, error) = removed_message("Ubuntu", r"C:\Downloads", true, &all_gone);
+        assert!(!error);
+        assert!(deleted.contains("deleted 3 files"), "{deleted}");
+
+        let stuck = Deleted {
+            files: 1,
+            problems: vec![r"C:\Downloads\x.iso: in use".to_string()],
+        };
+        let (partly, error) = removed_message("Ubuntu", r"C:\Downloads", true, &stuck);
+        assert!(error);
+        assert!(partly.contains("deleted 1 file it downloaded"), "{partly}");
+        assert!(partly.contains(r"x.iso: in use"), "{partly}");
     }
 
     #[test]

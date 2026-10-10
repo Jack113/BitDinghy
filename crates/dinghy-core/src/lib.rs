@@ -14,6 +14,7 @@ pub mod display;
 pub mod engine;
 pub mod error;
 pub mod magnet;
+pub mod owned_files;
 pub mod profile;
 pub mod safety;
 pub mod saved_list;

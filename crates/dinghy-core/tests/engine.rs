@@ -714,3 +714,126 @@ async fn asking_for_a_paused_download_again_resumes_it() {
     assert!(!dinghy_core::SavedList::read(&list).unwrap()[0].paused);
     second_run.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Remove, and never overwriting someone's file (M3 step 3).
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_forgets_the_download_and_keeps_its_files() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    let deleted = engine.remove(id, false).await.unwrap();
+    assert_eq!(deleted.files, 0);
+    assert!(engine.snapshot().is_empty());
+    assert!(dinghy_core::SavedList::read(&list).unwrap().is_empty());
+    let folder = done.save_folder.unwrap();
+    for (name, bytes) in &files {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes, "{name}");
+    }
+    engine.shutdown().await;
+    drop(engine);
+
+    // Gone after a restart too.
+    let restarted = remembering_engine(&download_dir, &list, true).await;
+    assert!(restarted.snapshot().is_empty());
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_with_delete_files_deletes_exactly_its_own_files() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Someone else's file right next to the download.
+    let neighbour = download_dir.join("my own notes.txt");
+    std::fs::write(&neighbour, b"not BitDinghy's").unwrap();
+
+    // Removing after a restart: the file list comes from the saved list.
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    let folder = back.save_folder.unwrap();
+    let deleted = engine.remove(back.id, true).await.unwrap();
+    assert_eq!(deleted.files, files.len(), "{:?}", deleted.problems);
+    assert!(deleted.problems.is_empty(), "{:?}", deleted.problems);
+    assert!(!folder.exists(), "the torrent's own folder is gone");
+    assert!(download_dir.is_dir(), "the download folder stays");
+    assert_eq!(std::fs::read(&neighbour).unwrap(), b"not BitDinghy's");
+    assert!(dinghy_core::SavedList::read(&list).unwrap().is_empty());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_download_never_overwrites_an_existing_file() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    // A file of the person's own, exactly where the torrent wants to write one.
+    let theirs = download_dir.join("testdata").join("a.bin");
+    std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    std::fs::write(&theirs, b"precious").unwrap();
+
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let refused =
+        wait_for_status(&engine, &[DownloadStatus::Failed, DownloadStatus::Finished]).await;
+    assert_eq!(refused.status, DownloadStatus::Failed);
+    let message = refused.error.unwrap();
+    assert!(message.contains("same name"), "{message}");
+    assert!(message.contains("a.bin"), "{message}");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"precious");
+    assert!(!download_dir.join("testdata").join("b.bin").exists());
+    // It stays in the list, so the person can fix it and try again.
+    assert_eq!(dinghy_core::SavedList::read(&list).unwrap().len(), 1);
+
+    std::fs::rename(&theirs, work.path().join("moved-away.bin")).unwrap();
+    engine.resume(id).await.unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!(std::fs::read(&theirs).unwrap(), files[0].1);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_a_download_that_is_still_starting_leaves_nothing_behind() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let list = work.path().join("downloads.db");
+    let engine = remembering_engine(&work.path().join("downloads"), &list, true).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    engine.remove(id, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(engine.snapshot().is_empty());
+    assert!(dinghy_core::SavedList::read(&list).unwrap().is_empty());
+    // Adding it again works normally.
+    engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    engine.shutdown().await;
+}

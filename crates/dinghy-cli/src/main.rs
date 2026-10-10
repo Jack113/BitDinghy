@@ -11,6 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::{
     DownloadSnapshot, DownloadStatus, Engine, Profile, SavedDownload, SavedList, magnet,
+    owned_files,
 };
 
 /// BitDinghy on the command line.
@@ -31,6 +32,8 @@ enum Command {
     Pause(NumberArg),
     /// Resume a paused download (it carries on when BitDinghy next runs it)
     Resume(NumberArg),
+    /// Remove a download from the saved list (its files stay, unless you add --delete-files)
+    Remove(RemoveArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -39,6 +42,20 @@ enum Command {
 struct NumberArg {
     /// The download's number, as shown by `dinghy list`
     number: usize,
+}
+
+#[derive(Args)]
+struct RemoveArgs {
+    /// The download's number, as shown by `dinghy list`
+    number: usize,
+
+    /// Also delete the files it downloaded (only those). You are asked to confirm
+    #[arg(long)]
+    delete_files: bool,
+
+    /// Don't ask before deleting files (for scripts)
+    #[arg(long, requires = "delete_files")]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -98,6 +115,7 @@ async fn main() -> ExitCode {
         Some(Command::List) => list(),
         Some(Command::Pause(which)) => set_paused(which.number, true),
         Some(Command::Resume(which)) => set_paused(which.number, false),
+        Some(Command::Remove(args)) => remove(args),
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -210,42 +228,49 @@ fn list() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `dinghy pause <n>` and `dinghy resume <n>`: changes the saved list while BitDinghy isn't running.
-fn set_paused(number: usize, paused: bool) -> ExitCode {
+/// Opens the saved list to change it (only while BitDinghy isn't running), and finds download
+/// number `number`. On a problem, it has already been explained and `Err` holds the exit code.
+fn open_for_change(number: usize, verb: &str) -> Result<(SavedList, SavedDownload), ExitCode> {
     let profile = Profile::load();
     print_notices(&profile);
     let Some(path) = profile.saved_list_path() else {
         eprintln!("BitDinghy has no data folder right now, so there is no saved list to change.");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     let opened = match SavedList::open(&path) {
         Ok(opened) => opened,
         Err(dinghy_core::Error::AlreadyRunning) => {
             eprintln!(
-                "BitDinghy is running (in its window or in another terminal), so {} it there. \
-                 (A later version lets the command line pass this on.)",
-                if paused { "pause" } else { "resume" }
+                "BitDinghy is running (in its window or in another terminal), so {verb} it \
+                 there. (A later version lets the command line pass this on.)"
             );
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         Err(error) => {
             eprintln!("{error}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     if let Some(problem) = &opened.problem {
         eprintln!("Note: {}", problem.message());
     }
-    let saved = match opened.list.all() {
-        Ok(saved) => saved,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let saved = opened.list.all().map_err(|error| {
+        eprintln!("{error}");
+        ExitCode::FAILURE
+    })?;
     let Some(download) = number.checked_sub(1).and_then(|index| saved.get(index)) else {
         eprintln!("There is no download number {number}. `dinghy list` shows the numbers.");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
+    };
+    Ok((opened.list, download.clone()))
+}
+
+/// `dinghy pause <n>` and `dinghy resume <n>`: changes the saved list while BitDinghy isn't running.
+fn set_paused(number: usize, paused: bool) -> ExitCode {
+    let verb = if paused { "pause" } else { "resume" };
+    let (list, download) = match open_for_change(number, verb) {
+        Ok(found) => found,
+        Err(code) => return code,
     };
 
     if download.paused == paused {
@@ -256,7 +281,7 @@ fn set_paused(number: usize, paused: bool) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    if let Err(error) = opened.list.set_paused(&download.info_hash, paused) {
+    if let Err(error) = list.set_paused(&download.info_hash, paused) {
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
@@ -272,6 +297,95 @@ fn set_paused(number: usize, paused: bool) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+/// `dinghy remove <n> [--delete-files [--yes]]`: forgets a download, and if asked deletes the files
+/// it downloaded (only those: see `owned_files.rs` in dinghy-core).
+fn remove(args: RemoveArgs) -> ExitCode {
+    let (list, download) = match open_for_change(args.number, "remove") {
+        Ok(found) => found,
+        Err(code) => return code,
+    };
+    let folder = download
+        .output_folder
+        .clone()
+        .unwrap_or_else(|| download.download_dir.clone());
+
+    // Work out exactly which files would go BEFORE anything is changed.
+    let to_delete = if args.delete_files {
+        match (&download.torrent, &download.output_folder) {
+            (Some(torrent), Some(output_folder)) => {
+                match owned_files::files_of(torrent, &download.download_dir, output_folder) {
+                    Ok(paths) => paths.into_iter().filter(|path| path.exists()).collect(),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // Its file list never arrived, so it never wrote anything.
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    if !to_delete.is_empty() && !args.yes && !confirm_deleting(&download.name, &to_delete) {
+        println!("Nothing was removed or deleted.");
+        return ExitCode::FAILURE;
+    }
+
+    let deleted = owned_files::delete(&to_delete, &download.download_dir, &folder);
+    if let Err(error) = list.remove(&download.info_hash) {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    println!("Removed: {}.", download.name);
+    if !args.delete_files {
+        println!("Its files are still in {}.", folder.display());
+    } else if deleted.files > 0 {
+        println!(
+            "Deleted {} file{} it downloaded.",
+            deleted.files,
+            if deleted.files == 1 { "" } else { "s" }
+        );
+    }
+    if deleted.problems.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("These files couldn't be deleted; you can delete them yourself:");
+        for problem in &deleted.problems {
+            eprintln!("  {problem}");
+        }
+        ExitCode::FAILURE
+    }
+}
+
+/// Shows what would be deleted and asks for "yes". Without a person at the keyboard (a script),
+/// it refuses and points to `--yes`.
+fn confirm_deleting(name: &str, paths: &[PathBuf]) -> bool {
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "Deleting files needs a confirmation. Run this in a terminal, or add --yes if you are \
+             sure."
+        );
+        return false;
+    }
+    println!(
+        "This deletes {} file{} that BitDinghy downloaded for \"{name}\":",
+        paths.len(),
+        if paths.len() == 1 { "" } else { "s" }
+    );
+    for path in paths.iter().take(5) {
+        println!("  {}", path.display());
+    }
+    if paths.len() > 5 {
+        println!("  ...and {} more", paths.len() - 5);
+    }
+    print!("Type yes to delete them: ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("yes")
 }
 
 /// A saved download's state in a word or two (without the engine running, progress isn't known).

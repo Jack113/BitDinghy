@@ -28,6 +28,7 @@ use librqbit::{
 
 use crate::error::{Error, Result};
 use crate::magnet;
+use crate::owned_files::{self, Deleted};
 use crate::safety::{self, Platform};
 use crate::saved_list::{SavedDownload, SavedList};
 
@@ -137,6 +138,11 @@ struct Entry {
     wants_pause: AtomicBool,
     /// Extra addresses to try directly (`dinghy get --peer`), kept for trying again.
     peers: Vec<SocketAddr>,
+    /// Set when the person removes it, so a start that is still on its way doesn't go ahead.
+    removed: AtomicBool,
+    /// Its checked file list (a `.torrent` file) and the folder its files are in, once known.
+    /// This is what "remove and delete files" uses.
+    files: Mutex<Option<(Vec<u8>, PathBuf)>>,
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
@@ -491,6 +497,8 @@ impl Engine {
             magnet,
             wants_pause: AtomicBool::new(paused),
             peers,
+            removed: AtomicBool::new(false),
+            files: Mutex::new(None),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
@@ -500,6 +508,10 @@ impl Engine {
         let shared = self.shared.clone();
         self.runtime.spawn(async move {
             match start_download(&shared, &entry, source).await {
+                // Removed while it was starting: take it straight back out of the engine.
+                Ok(handle) if entry.removed.load(Ordering::SeqCst) => {
+                    let _ = shared.session.delete(handle.id().into(), false).await;
+                }
                 Ok(handle) => {
                     *lock(&entry.state) = EntryState::Active(handle.clone());
                     // A pause or resume may have arrived while the download was starting. Reading
@@ -524,6 +536,54 @@ impl Engine {
                 }
             }
         });
+    }
+
+    /// Removes a download: it stops, leaves the window and the saved list, and is forgotten.
+    ///
+    /// With `delete_files`, the files it downloaded are deleted too: exactly the files in its own
+    /// checked file list, and any folders they leave empty (see `owned_files.rs`). Nothing else is
+    /// ever deleted. Without it, the files stay where they are.
+    pub async fn remove(&self, id: DownloadId, delete_files: bool) -> Result<Deleted> {
+        let entry = self.entry(id)?;
+        entry.removed.store(true, Ordering::SeqCst);
+        lock(&self.entries).retain(|other| other.id != id);
+        let saved = self
+            .shared
+            .with_list(|list| list.get(&entry.info_hash))
+            .flatten();
+        self.shared.with_list(|list| list.remove(&entry.info_hash));
+
+        // Stop it in the engine first: on Windows a file can't be deleted while it is open.
+        let handle = match &*lock(&entry.state) {
+            EntryState::Active(handle) => Some(handle.clone()),
+            _ => None,
+        };
+        if let Some(handle) = handle {
+            self.shared
+                .session
+                .delete(handle.id().into(), false)
+                .await
+                .map_err(|e| Error::Control(format!("Couldn't stop \"{}\": {e:#}", entry.label)))?;
+        }
+        if !delete_files {
+            return Ok(Deleted::default());
+        }
+
+        // Its file list: as the engine knows it, or else as it was saved.
+        let known = lock(&entry.files)
+            .clone()
+            .or_else(|| saved.and_then(|saved| Some((saved.torrent?, saved.output_folder?))));
+        let Some((torrent, output_folder)) = known else {
+            return Ok(Deleted::default()); // Its file list never arrived, so nothing was written.
+        };
+        let paths = owned_files::files_of(&torrent, &entry.download_dir, &output_folder)?;
+        let download_dir = entry.download_dir.clone();
+        // Deleting can wait a moment for Windows to let go of a file, so it runs off to the side.
+        tokio::task::spawn_blocking(move || {
+            owned_files::delete(&paths, &download_dir, &output_folder)
+        })
+        .await
+        .map_err(|e| Error::Control(format!("Deleting the files stopped unexpectedly: {e}")))
     }
 
     fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
@@ -661,6 +721,22 @@ async fn start_download(
             return Err(error);
         }
     };
+
+    // A NEW download must not take over files that are already there (they aren't ours). One
+    // whose file list we saved before is continuing, and the files there are its own. This one is
+    // kept in the list, so the person can move the other file away and press "Try again".
+    let paths = owned_files::paths_in(&listing.info, &output_folder)?;
+    let continuing = shared
+        .with_list(|list| list.get(&entry.info_hash))
+        .flatten()
+        .is_some_and(|saved| saved.torrent.is_some());
+    if !continuing {
+        owned_files::refuse_existing_files(&paths)?;
+    }
+    *lock(&entry.files) = Some((listing.torrent_bytes.to_vec(), output_folder.clone()));
+    if entry.removed.load(Ordering::SeqCst) {
+        return Err(Error::Control("removed".to_string()));
+    }
     let folder_text = output_folder
         .to_str()
         .ok_or_else(|| {
