@@ -68,9 +68,9 @@ cargo run --bin BitDinghy
 
 1. **The brand look.** Deep navy background, the BitDinghy logo at the top with the version beside
    it, and the sailboat icon in the title bar and on the taskbar.
-2. **Light and dark.** Change Windows' own mode (*Settings > Personalization > Colors > Choose your
-   mode*). The window follows: navy with white lettering and a lime-green progress bar in dark mode;
-   a pale background, navy lettering and a darker green in light mode. The logo switches too.
+2. **Dark only.** The window is always dark, for now. Change Windows' own mode (*Settings >
+   Personalization > Colors > Choose your mode*) to light: the window must **stay** navy with white
+   lettering and a lime-green progress bar, and keep the white-lettered logo.
 3. **Settings.** Click **Settings**. It shows where BitDinghy keeps its files. Type a folder and
    press **Save**: a message says it was saved and will be used from the next start. Close the
    window, open it again: the new folder shows next to "Saving to:". **Use the standard folder**
@@ -85,7 +85,7 @@ cargo run --bin BitDinghy
    the green "Finished" line, and close the window after a few seconds.
 
 ### Already tested automatically
-`cargo test --workspace` runs 93 tests. For this feature they include: the fallback to the user
+`cargo test --workspace` runs 95 tests. For this feature they include: the fallback to the user
 profile when the folder next to the program can't be written; a version-1 settings file that must
 load forever; damaged and newer files being left alone; the remembered folder surviving a restart
 in a separate program run; and the window shutting down without crashing.

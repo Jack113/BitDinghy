@@ -375,4 +375,27 @@ mod tests {
         let two_lines = format!("magnet:?xt=urn:btih:{HASH}\nmagnet:?xt=urn:btih:{HASH}");
         assert!(message(parse(&two_lines)).contains("single magnet link"));
     }
+
+    #[test]
+    fn a_doubled_prefix_is_refused_not_repaired() {
+        // A copy-paste slip seen in a real link. The owner's decision: refuse it, don't guess.
+        let link = format!("magnet:?magnet:?xt=urn:btih:{HASH}&dn=Something");
+        assert!(message(parse(&link)).contains("no torrent fingerprint"));
+    }
+
+    #[test]
+    fn only_the_fingerprint_name_and_trackers_survive() {
+        let link = format!(
+            "magnet:?xt=urn:btih:{HASH}&dn=Some%20Name&tr=udp%3A%2F%2Ftracker.example.org%3A1337\
+             &tr=udp%3A%2F%2Fother.example.net%3A6969%2Fannounce&xl=123&ws=http%3A%2F%2Fweb.example\
+             &kt=words&x.pe=1.2.3.4%3A5&as=http%3A%2F%2Fsource.example"
+        );
+        let clean = parse(&link).unwrap().clean_link;
+        let keys: Vec<String> = Url::parse(&clean)
+            .unwrap()
+            .query_pairs()
+            .map(|(key, _)| key.into_owned())
+            .collect();
+        assert_eq!(keys, ["xt", "dn", "tr", "tr"]);
+    }
 }

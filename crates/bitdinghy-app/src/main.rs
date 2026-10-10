@@ -276,7 +276,14 @@ fn shut_down(runtime: &tokio::runtime::Runtime, engine: &Engine) {
 
 /// Draws one download: its name, then a progress bar and numbers (or a message).
 fn draw_download(ui: &mut egui::Ui, download: &DownloadSnapshot) {
-    ui.label(egui::RichText::new(&download.name).strong());
+    // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes dark navy
+    // (for text on the green button), so the name vanished on the navy background.
+    let name_color = brand::palette(ui.ctx().theme()).text;
+    ui.label(
+        egui::RichText::new(&download.name)
+            .size(15.0)
+            .color(name_color),
+    );
 
     match download.status {
         DownloadStatus::GettingInfo => {

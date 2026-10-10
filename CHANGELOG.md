@@ -19,8 +19,8 @@ format is called out here.
   and a file from a newer BitDinghy is left untouched. `dinghy get --dir` still overrides the folder
   for one run.
 - The DHT (the shared phone book of peers) now keeps its saved contacts inside the data folder.
-- **Brand look.** The window uses the BitDinghy logo, colors and icon, in a dark and a light theme
-  that follow your Windows setting. `BitDinghy.exe` and `dinghy.exe` have the brand icon and a
+- **Brand look.** The window uses the BitDinghy logo, colors and icon, in the brand's dark theme
+  (dark only for now). `BitDinghy.exe` and `dinghy.exe` have the brand icon and a
   Details tab with the product name, description and version.
 - **Download from a magnet link**, in both the window and the command line
   (`dinghy get "<link>"`). Shows progress, speed, time left and how many people you are connected

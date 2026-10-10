@@ -10,6 +10,12 @@ project is built **one feature at a time**.
 - Rename the project folder to `E:\BitDinghy` (needs VS Code closed on it).
 - Done: the M1 download was checked against the published SHA256 and matched (2026-10-09).
 
+## Revisit at the end (owner's decision, 2026-10-10)
+- The window is **dark only** for now. The light theme and the "follow Windows' light/dark setting"
+  behaviour are still in the code (`brand.rs`, one line in `apply`: `ctx.set_theme(Dark)`), so
+  bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
+  before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
+
 ## Noticed while building M2
 - Changing the download folder only applies on the next start. Applying it live fits M3, when the
   engine and the saved list get reworked.

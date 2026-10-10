@@ -164,11 +164,12 @@ impl Logos {
     }
 }
 
-/// Gives the window the brand look, in both the dark and the light theme. The window follows the
-/// computer's own light/dark setting.
+/// Gives the window the brand look. For now the window is always dark, whatever the computer's
+/// light/dark setting says (the light theme below is kept ready; see `TODO.md` to bring it back).
 pub fn apply(ctx: &egui::Context) {
     ctx.set_visuals_of(Theme::Dark, visuals_for(Theme::Dark));
     ctx.set_visuals_of(Theme::Light, visuals_for(Theme::Light));
+    ctx.set_theme(egui::ThemePreference::Dark);
 }
 
 fn visuals_for(theme: Theme) -> egui::Visuals {

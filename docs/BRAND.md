@@ -19,7 +19,9 @@ Everything is compiled into the programs, so there are no extra files to carry a
 
 ## Light and dark
 
-The window follows the computer's own light/dark setting. The dark theme uses the bright
+**For now the window is dark only** (the owner's decision, 2026-10-10; to be revisited before the
+first release, see `TODO.md`). The light theme is still in the code but switched off, so the window
+ignores the computer's own light/dark setting. The dark theme uses the bright
 `#57F000` green; the light theme uses the darker `#1F8F46`, because the bright green is hard to read
 on white (the pack's own README says the same).
 
