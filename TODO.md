@@ -20,7 +20,14 @@ project is built **one feature at a time**.
   opens. The window then says its channel is in use (it never shares it), but `dinghy` would talk
   to the impostor, which could see the links sent and answer falsely. Checking that the pipe
   belongs to the same user (`GetNamedPipeServerProcessId` + the process's user) closes it.
-  Low risk on a one-person PC; do it before the first release.
+  Low risk on a one-person PC; do it before the first release. Simplest check (from the M4
+  security review): read the pipe's owner with `GetSecurityInfo` on the client handle and require
+  the current user's SID. The pipe name isn't secret (anyone can list pipes), and the client
+  already uses SECURITY_IDENTIFICATION, so an impostor can't act as the user.
+- Linux: the socket gets mode 0600 just after `bind`; for the Linux port, create it inside a
+  0700 folder or check the caller with `SO_PEERCRED`.
+- `dinghy get --no-dht/--no-listen` with the window open: the window's settings apply (a note is
+  printed). If they should be strict, refuse them like `--dir`.
 - Linux: a socket file's path is limited to about 108 bytes. A deeply nested portable data folder
   could exceed it; fall back to a short path under `$XDG_RUNTIME_DIR` with the Linux port.
 - `dinghy get` while a `dinghy get` runs in another terminal is still refused ("already
