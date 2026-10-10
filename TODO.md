@@ -5,9 +5,8 @@ project is built **one feature at a time**.
 
 ## Owner checks still open
 - M2: run the checks in `docs/TESTING.md` (section M2), including the window.
-- Decide whether `assets/source/` (two PNGs, about 2.7 MB) stays in git history. It was committed by
-  VS Code (`69b0d89`); removing it is easiest before the branch is first pushed.
-- Rename the project folder to `E:\BitDinghy` (needs VS Code closed on it).
+- Done: `assets/source/` stays in git history (owner's decision, 2026-10-10).
+- Done: the project folder is renamed to `BitDinghy`.
 - Done: the M1 download was checked against the published SHA256 and matched (2026-10-09).
 
 ## Revisit at the end (owner's decision, 2026-10-10)
