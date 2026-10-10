@@ -113,9 +113,9 @@ async fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
         Some(Command::List) => list().await,
-        Some(Command::Pause(which)) => set_paused(which.number, true),
-        Some(Command::Resume(which)) => set_paused(which.number, false),
-        Some(Command::Remove(args)) => remove(args),
+        Some(Command::Pause(which)) => set_paused(which.number, true).await,
+        Some(Command::Resume(which)) => set_paused(which.number, false).await,
+        Some(Command::Remove(args)) => remove(args).await,
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -235,9 +235,11 @@ async fn list() -> ExitCode {
 
 /// Opens the saved list to change it (only while BitDinghy isn't running), and finds download
 /// number `number`. On a problem, it has already been explained and `Err` holds the exit code.
-fn open_for_change(number: usize, verb: &str) -> Result<(SavedList, SavedDownload), ExitCode> {
-    let profile = Profile::load();
-    print_notices(&profile);
+fn open_for_change(
+    profile: &Profile,
+    number: usize,
+    verb: &str,
+) -> Result<(SavedList, SavedDownload), ExitCode> {
     let Some(path) = profile.saved_list_path() else {
         eprintln!("BitDinghy has no data folder right now, so there is no saved list to change.");
         return Err(ExitCode::FAILURE);
@@ -245,9 +247,11 @@ fn open_for_change(number: usize, verb: &str) -> Result<(SavedList, SavedDownloa
     let opened = match SavedList::open(&path) {
         Ok(opened) => opened,
         Err(dinghy_core::Error::AlreadyRunning) => {
+            // The window would have answered on its channel, so this is `dinghy get` running in
+            // another terminal (or a window that is still starting up).
             eprintln!(
-                "BitDinghy is running (in its window or in another terminal), so {verb} it \
-                 there. (A later version lets the command line pass this on.)"
+                "BitDinghy is busy in another terminal (`dinghy get`), so this can't {verb} \
+                 anything right now. Stop it with Ctrl+C first, or use the window."
             );
             return Err(ExitCode::FAILURE);
         }
@@ -270,10 +274,34 @@ fn open_for_change(number: usize, verb: &str) -> Result<(SavedList, SavedDownloa
     Ok((opened.list, download.clone()))
 }
 
-/// `dinghy pause <n>` and `dinghy resume <n>`: changes the saved list while BitDinghy isn't running.
-fn set_paused(number: usize, paused: bool) -> ExitCode {
+/// `dinghy pause <n>` and `dinghy resume <n>`: through the open window, or with the window closed,
+/// in the saved list.
+async fn set_paused(number: usize, paused: bool) -> ExitCode {
     let verb = if paused { "pause" } else { "resume" };
-    let (list, download) = match open_for_change(number, verb) {
+    let profile = Profile::load();
+    print_notices(&profile);
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => {
+            let target = remote::Target::Number(number);
+            let command = if paused {
+                remote::Command::Pause { target }
+            } else {
+                remote::Command::Resume { target }
+            };
+            return match window.ask(command).await {
+                Ok(remote::Reply::Changed { name }) => {
+                    let done = if paused { "Paused" } else { "Resumed" };
+                    println!("{done}: {name} (in BitDinghy's open window).");
+                    ExitCode::SUCCESS
+                }
+                other => explain_unexpected(other),
+            };
+        }
+        Ok(None) => {}
+    }
+
+    let (list, download) = match open_for_change(&profile, number, verb) {
         Ok(found) => found,
         Err(code) => return code,
     };
@@ -305,9 +333,18 @@ fn set_paused(number: usize, paused: bool) -> ExitCode {
 }
 
 /// `dinghy remove <n> [--delete-files [--yes]]`: forgets a download, and if asked deletes the files
-/// it downloaded (only those: see `owned_files.rs` in dinghy-core).
-fn remove(args: RemoveArgs) -> ExitCode {
-    let (list, download) = match open_for_change(args.number, "remove") {
+/// it downloaded (only those: see `owned_files.rs` in dinghy-core). Through the open window, or with
+/// the window closed, in the saved list.
+async fn remove(args: RemoveArgs) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => return remove_in_window(&mut window, &args).await,
+        Ok(None) => {}
+    }
+
+    let (list, download) = match open_for_change(&profile, args.number, "remove") {
         Ok(found) => found,
         Err(code) => return code,
     };
@@ -345,25 +382,94 @@ fn remove(args: RemoveArgs) -> ExitCode {
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
-    println!("Removed: {}.", download.name);
-    if !args.delete_files {
+    report_removed(
+        &download.name,
+        &folder,
+        args.delete_files,
+        deleted.files,
+        &deleted.problems,
+    )
+}
+
+/// `dinghy remove` through the open window. With `--delete-files` the window first says exactly
+/// which files would go; after "yes", the removal names the download by its fingerprint, so a list
+/// that changed in the meantime can never make it remove a different download.
+async fn remove_in_window(window: &mut remote::Client, args: &RemoveArgs) -> ExitCode {
+    let target = if args.delete_files {
+        match window
+            .ask(remote::Command::FilesToDelete {
+                target: remote::Target::Number(args.number),
+            })
+            .await
+        {
+            Ok(remote::Reply::Files {
+                info_hash,
+                name,
+                paths,
+            }) => {
+                if !paths.is_empty() && !args.yes && !confirm_deleting(&name, &paths) {
+                    println!("Nothing was removed or deleted.");
+                    return ExitCode::FAILURE;
+                }
+                remote::Target::InfoHash(info_hash)
+            }
+            other => return explain_unexpected(other),
+        }
+    } else {
+        remote::Target::Number(args.number)
+    };
+    match window
+        .ask(remote::Command::Remove {
+            target,
+            delete_files: args.delete_files,
+        })
+        .await
+    {
+        Ok(remote::Reply::Removed {
+            name,
+            folder,
+            deleted,
+            problems,
+        }) => report_removed(&name, &folder, args.delete_files, deleted, &problems),
+        other => explain_unexpected(other),
+    }
+}
+
+/// What `dinghy remove` says afterwards, the same with or without the window.
+fn report_removed(
+    name: &str,
+    folder: &Path,
+    delete_files: bool,
+    deleted: usize,
+    problems: &[String],
+) -> ExitCode {
+    println!("Removed: {name}.");
+    if !delete_files {
         println!("Its files are still in {}.", folder.display());
-    } else if deleted.files > 0 {
+    } else if deleted > 0 {
         println!(
-            "Deleted {} file{} it downloaded.",
-            deleted.files,
-            if deleted.files == 1 { "" } else { "s" }
+            "Deleted {deleted} file{} it downloaded.",
+            if deleted == 1 { "" } else { "s" }
         );
     }
-    if deleted.problems.is_empty() {
+    if problems.is_empty() {
         ExitCode::SUCCESS
     } else {
         eprintln!("These files couldn't be deleted; you can delete them yourself:");
-        for problem in &deleted.problems {
+        for problem in problems {
             eprintln!("  {problem}");
         }
         ExitCode::FAILURE
     }
+}
+
+/// A problem reported by the window (or an answer that doesn't fit the question).
+fn explain_unexpected(answer: dinghy_core::Result<remote::Reply>) -> ExitCode {
+    match answer {
+        Err(error) => eprintln!("{error}"),
+        Ok(_) => eprintln!("BitDinghy's window gave an unexpected answer."),
+    }
+    ExitCode::FAILURE
 }
 
 /// Shows what would be deleted and asks for "yes". Without a person at the keyboard (a script),

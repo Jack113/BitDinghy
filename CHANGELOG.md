@@ -15,6 +15,10 @@ format is called out here.
   follows its progress in the terminal (Ctrl+C only stops following). They talk over a local
   channel that only this computer can use: a named pipe that refuses network connections, never a
   network port. With the window closed, `dinghy` works on its own as before.
+  `dinghy pause`, `resume` and `remove` work through the open window too. `remove --delete-files`
+  first shows exactly which files the window would delete and asks for `yes`; the removal then
+  names the download by its fingerprint, so a list that changed in the meantime can't make it
+  remove a different download.
 - **Downloads are remembered.** Every download goes into a saved list (`downloads.db` in the data
   folder) as soon as it is added. When the window opens again, everything in the list comes back
   and carries on where it stopped, in the folder it was started in. The list is versioned, a

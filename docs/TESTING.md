@@ -30,6 +30,29 @@ as before. The programs are in `C:\cargo-target\debug\` (build first with
 6. **With the window closed, `dinghy` works alone as before.** `dinghy.exe list` shows the saved
    list again (`[active]`, `[paused]`...).
 
+### Step 2: pause, resume and remove with the window open
+
+Keep the window open for all of these, with at least one download in it (the Arch download is
+fine; pause it in the window first to save data). Run `dinghy.exe list` to see the numbers.
+
+1. **Pause and resume.** `dinghy.exe pause 1` says "Paused: ... (in BitDinghy's open window)", and
+   within a second the window shows it paused (the button says **Resume**). `dinghy.exe resume 1`
+   says "Resumed: ..." and the window carries on. Pause it again.
+2. **Wrong numbers.** `dinghy.exe pause 99` says there is no download number 99 in the window.
+3. **Remove, keep the files.** Add the "Nobody Has It" link from the M3 walkthrough (part 4) in the
+   window. `dinghy.exe list` shows its number. `dinghy.exe remove <its number>` says "Removed:
+   Nobody Has It." and it disappears from the window.
+4. **Remove and delete the files, asked first.** Put `notes.txt` in `Downloads\BitDinghy`. Run
+   `dinghy.exe remove 1 --delete-files` (1 = the Arch download). It lists the `.iso` and asks you to
+   type `yes`. Type `no`: "Nothing was removed or deleted", and the window still shows it. Run it
+   again and type `yes`: it says "Deleted 1 file it downloaded", Arch disappears from the window,
+   the `.iso` is gone, and `notes.txt` is still there.
+5. **`dinghy get` in another terminal.** Close the window. In one terminal start
+   `dinghy.exe get "<the Arch magnet link>"` and leave it running. In a second terminal run
+   `dinghy.exe pause 1`: it says BitDinghy is busy in another terminal and to stop it with Ctrl+C
+   first. Press Ctrl+C in the first terminal; now `dinghy.exe pause 1` works (window closed, so
+   it changes the saved list).
+
 ## M3: the saved list, pause, resume and remove (built in three steps)
 
 ### The window, everything in M3, step by step

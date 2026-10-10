@@ -488,20 +488,21 @@ fn a_number_that_is_not_in_the_list_is_explained() {
 }
 
 #[test]
-fn pause_is_refused_while_the_window_is_open() {
+fn changes_are_refused_while_dinghy_get_runs_in_another_terminal() {
     let data = tempfile::tempdir().unwrap();
     save_one_download(data.path(), "Example");
-    let window = dinghy_core::SavedList::open(&data.path().join("downloads.db")).unwrap();
+    // Something holds the saved list but doesn't answer on the window's channel: that is
+    // `dinghy get` running in another terminal.
+    let other_terminal = dinghy_core::SavedList::open(&data.path().join("downloads.db")).unwrap();
 
-    let output = dinghy_output(data.path(), &["pause", "1"]);
-    assert!(!output.status.success());
-    let stderr = text(&output.stderr);
-    assert!(stderr.contains("pause it there"), "{stderr}");
-    let output = dinghy_output(data.path(), &["remove", "1"]);
-    assert!(!output.status.success());
-    let stderr = text(&output.stderr);
-    assert!(stderr.contains("remove it there"), "{stderr}");
-    drop(window);
+    for (args, verb) in [(["pause", "1"], "pause"), (["remove", "1"], "remove")] {
+        let output = dinghy_output(data.path(), &args);
+        assert!(!output.status.success());
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains("busy in another terminal"), "{stderr}");
+        assert!(stderr.contains(&format!("can't {verb}")), "{stderr}");
+    }
+    drop(other_terminal);
 
     // Nothing changed.
     let stdout = assert_success(&dinghy_output(data.path(), &["list"]));
@@ -713,6 +714,92 @@ async fn a_bad_link_is_refused_before_the_window_is_even_asked() {
     .await;
     assert!(!output.status.success());
     assert!(text(&output.stderr).contains("isn't a magnet link"));
+    assert!(window.snapshot().is_empty());
+    window.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn with_the_window_open_pause_resume_and_remove_go_through_it() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let window = open_window(&data, &work.path().join("window-downloads")).await;
+    // A download the (offline) window can't fetch: it just stays in its list.
+    window
+        .add_magnet(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example",
+            vec![],
+        )
+        .unwrap();
+
+    let ask = |args: &'static [&'static str]| {
+        let mut command = dinghy(&data);
+        command.args(args);
+        run_blocking(command)
+    };
+
+    let stdout = assert_success(&ask(&["pause", "1"]).await);
+    assert!(
+        stdout.contains("Paused: Example (in BitDinghy's open window)"),
+        "{stdout}"
+    );
+    assert_eq!(
+        window.snapshot()[0].status,
+        dinghy_core::DownloadStatus::Paused
+    );
+
+    let stdout = assert_success(&ask(&["resume", "1"]).await);
+    assert!(stdout.contains("Resumed: Example"), "{stdout}");
+    assert_ne!(
+        window.snapshot()[0].status,
+        dinghy_core::DownloadStatus::Paused
+    );
+
+    let output = ask(&["pause", "9"]).await;
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("no download number 9"), "{stderr}");
+
+    let stdout = assert_success(&ask(&["remove", "1"]).await);
+    assert!(stdout.contains("Removed: Example"), "{stdout}");
+    assert!(window.snapshot().is_empty());
+    window.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn with_the_window_open_remove_delete_files_asks_first_and_deletes_only_its_files() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    let downloads = work.path().join("window-downloads");
+    let seeder = start_seeder(work.path(), "sample").await;
+    let window = open_window(&data, &downloads).await;
+    assert_success(&run_blocking(get_from(&data, &seeder)).await);
+    assert_downloaded(&seeder, &downloads);
+    let neighbour = downloads.join("my own file.txt");
+    std::fs::write(&neighbour, b"mine").unwrap();
+
+    // No person at the keyboard: nothing happens without --yes.
+    let output = run_blocking({
+        let mut c = dinghy(&data);
+        c.args(["remove", "1", "--delete-files"]);
+        c
+    })
+    .await;
+    assert!(!output.status.success());
+    assert!(text(&output.stderr).contains("--yes"));
+    assert_downloaded(&seeder, &downloads);
+    assert_eq!(window.snapshot().len(), 1, "still in the window");
+
+    let stdout = assert_success(
+        &run_blocking({
+            let mut c = dinghy(&data);
+            c.args(["remove", "1", "--delete-files", "--yes"]);
+            c
+        })
+        .await,
+    );
+    assert!(stdout.contains("Deleted 2 files"), "{stdout}");
+    assert!(!downloads.join("sample").exists());
+    assert_eq!(std::fs::read(&neighbour).unwrap(), b"mine");
     assert!(window.snapshot().is_empty());
     window.shutdown().await;
 }

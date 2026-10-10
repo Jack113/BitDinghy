@@ -218,6 +218,14 @@ finishes, and the torrent is taken straight back out.
 - With the window open, `dinghy get` hands the link to the window and follows its progress; Ctrl+C
   only stops following. `--dir` is refused (the window decides the folder), and `--no-dht` /
   `--no-listen` don't apply.
+- `dinghy pause/resume/remove <n>` name the download by its number in the window's list (the same
+  numbers `dinghy list` shows while the window is open). `remove --delete-files` asks the window
+  which files it would delete (a request that changes nothing), shows them, and only after "yes"
+  sends the removal, naming the download by its **fingerprint**: if the list changed in between,
+  it can't hit a different download.
+- Which side answers: the window, if it is listening; otherwise, if something holds the saved list
+  (that is `dinghy get` in another terminal), changes are refused with "busy in another terminal";
+  otherwise `dinghy` changes the saved list itself.
 
 ## Where each piece appears
 

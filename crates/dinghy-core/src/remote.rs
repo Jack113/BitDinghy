@@ -54,6 +54,31 @@ pub enum Command {
         link: String,
         peers: Vec<SocketAddr>,
     },
+    Pause {
+        target: Target,
+    },
+    Resume {
+        target: Target,
+    },
+    /// Which files "remove, delete the files too" would delete right now. Changes nothing.
+    FilesToDelete {
+        target: Target,
+    },
+    Remove {
+        target: Target,
+        delete_files: bool,
+    },
+}
+
+/// Which download a request is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    /// Its number in the window's list, as `dinghy list` shows it (starting at 1).
+    Number(usize),
+    /// Its fingerprint. Used for the actual removal after a confirmation, so a list that changed
+    /// in between can never make it remove a different download.
+    InfoHash(String),
 }
 
 /// The window's answer.
@@ -67,6 +92,22 @@ pub enum Reply {
     },
     /// The link was added (or was already there). `folder` is the download folder it belongs to.
     Added { info_hash: String, folder: PathBuf },
+    /// Paused or resumed.
+    Changed { name: String },
+    /// The files that would be deleted (they exist right now).
+    Files {
+        info_hash: String,
+        name: String,
+        paths: Vec<PathBuf>,
+    },
+    /// Removed. `folder` is where its files are (or were); `deleted` and `problems` say what
+    /// deleting them did.
+    Removed {
+        name: String,
+        folder: PathBuf,
+        deleted: usize,
+        problems: Vec<String>,
+    },
     /// The request didn't work; the message is for the person.
     Problem { message: String },
 }
@@ -194,14 +235,47 @@ fn parse_request(line: &str) -> std::result::Result<Command, String> {
         .map_err(|_| not_understood())
 }
 
+/// Finds the download a request is about, in the window's list as it is right now.
+fn find(engine: &Engine, target: &Target) -> std::result::Result<DownloadSnapshot, String> {
+    let downloads = engine.snapshot();
+    let found = match target {
+        Target::Number(number) => number
+            .checked_sub(1)
+            .and_then(|index| downloads.into_iter().nth(index)),
+        Target::InfoHash(info_hash) => downloads
+            .into_iter()
+            .find(|download| download.info_hash == *info_hash),
+    };
+    found.ok_or_else(|| match target {
+        Target::Number(number) => format!(
+            "There is no download number {number} in BitDinghy's window. `dinghy list` shows \
+             the numbers."
+        ),
+        Target::InfoHash(_) => "That download isn't in BitDinghy's window any more.".to_string(),
+    })
+}
+
+/// Answers one request. Any problem becomes a `Reply::Problem` with a message for the person.
 async fn answer(engine: &Engine, command: Command) -> Reply {
-    match command {
+    answer_or_problem(engine, command)
+        .await
+        .unwrap_or_else(|message| Reply::Problem { message })
+}
+
+/// `?` below means "stop here and answer with this problem".
+async fn answer_or_problem(
+    engine: &Engine,
+    command: Command,
+) -> std::result::Result<Reply, String> {
+    let said = |error: Error| error.to_string();
+    Ok(match command {
         Command::List => Reply::Downloads {
             downloads: engine.snapshot(),
             download_dir: engine.download_dir().to_path_buf(),
         },
-        Command::Add { link, peers } => match engine.add_magnet(&link, peers) {
-            Ok(id) => Reply::Added {
+        Command::Add { link, peers } => {
+            let id = engine.add_magnet(&link, peers).map_err(said)?;
+            Reply::Added {
                 info_hash: engine
                     .snapshot()
                     .into_iter()
@@ -211,12 +285,52 @@ async fn answer(engine: &Engine, command: Command) -> Reply {
                 folder: engine
                     .download_dir_of(id)
                     .unwrap_or_else(|| engine.download_dir().to_path_buf()),
-            },
-            Err(error) => Reply::Problem {
-                message: error.to_string(),
-            },
-        },
-    }
+            }
+        }
+        Command::Pause { target } => {
+            let download = find(engine, &target)?;
+            engine.pause(download.id).await.map_err(said)?;
+            Reply::Changed {
+                name: download.name,
+            }
+        }
+        Command::Resume { target } => {
+            let download = find(engine, &target)?;
+            engine.resume(download.id).await.map_err(said)?;
+            Reply::Changed {
+                name: download.name,
+            }
+        }
+        Command::FilesToDelete { target } => {
+            let download = find(engine, &target)?;
+            Reply::Files {
+                paths: engine.files_to_delete(download.id).map_err(said)?,
+                info_hash: download.info_hash,
+                name: download.name,
+            }
+        }
+        Command::Remove {
+            target,
+            delete_files,
+        } => {
+            let download = find(engine, &target)?;
+            let folder = download
+                .save_folder
+                .clone()
+                .or_else(|| engine.download_dir_of(download.id))
+                .unwrap_or_default();
+            let deleted = engine
+                .remove(download.id, delete_files)
+                .await
+                .map_err(said)?;
+            Reply::Removed {
+                name: download.name,
+                folder,
+                deleted: deleted.files,
+                problems: deleted.problems,
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -389,10 +503,20 @@ mod platform {
             // A leftover from a BitDinghy that crashed.
             let _ = std::fs::remove_file(path);
         }
-        let listener = UnixListener::bind(path).map_err(|e| channel_error("opening", e))?;
+        let cant_open = |e: std::io::Error| {
+            Error::Remote(format!(
+                "The command line can't reach this window, because its channel couldn't be \
+                 opened ({e})."
+            ))
+        };
+        // The socket file lives in the data folder, which normally exists already.
+        if let Some(folder) = path.parent() {
+            std::fs::create_dir_all(folder).map_err(cant_open)?;
+        }
+        let listener = UnixListener::bind(path).map_err(cant_open)?;
         // Only this user may connect.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| channel_error("protecting", e))?;
+            .map_err(cant_open)?;
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let engine = engine.clone();
@@ -513,6 +637,91 @@ mod tests {
         };
         assert_eq!(downloads.len(), 1);
         assert_eq!(downloads[0].name, "Example");
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_resume_and_remove_find_the_download_by_number_or_fingerprint() {
+        let work = tempfile::tempdir().unwrap();
+        let engine = offline_engine(work.path()).await;
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        engine
+            .add_magnet(&format!("magnet:?xt=urn:btih:{hash}&dn=Example"), vec![])
+            .unwrap();
+        let request = |command: Command| {
+            serde_json::to_string(&Request {
+                version: PROTOCOL_VERSION,
+                command,
+            })
+            .unwrap()
+        };
+        let lines = [
+            request(Command::Pause {
+                target: Target::Number(1),
+            }),
+            request(Command::Resume {
+                target: Target::Number(1),
+            }),
+            request(Command::Pause {
+                target: Target::Number(5),
+            }),
+            request(Command::FilesToDelete {
+                target: Target::Number(1),
+            }),
+            request(Command::Remove {
+                target: Target::InfoHash(hash.to_string()),
+                delete_files: true,
+            }),
+            request(Command::Remove {
+                target: Target::InfoHash(hash.to_string()),
+                delete_files: false,
+            }),
+        ];
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let answers: Vec<Reply> = exchange(&engine, &lines)
+            .await
+            .iter()
+            .map(|answer| serde_json::from_str(answer).unwrap())
+            .collect();
+
+        assert_eq!(
+            answers[0],
+            Reply::Changed {
+                name: "Example".into()
+            }
+        );
+        assert_eq!(
+            answers[1],
+            Reply::Changed {
+                name: "Example".into()
+            }
+        );
+        assert!(
+            matches!(&answers[2], Reply::Problem { message } if message.contains("no download number 5")),
+            "{:?}",
+            answers[2]
+        );
+        // Its file list never arrived, so there is nothing to delete.
+        assert_eq!(
+            answers[3],
+            Reply::Files {
+                info_hash: hash.to_string(),
+                name: "Example".into(),
+                paths: vec![]
+            }
+        );
+        assert!(
+            matches!(&answers[4], Reply::Removed { name, deleted: 0, .. } if name == "Example"),
+            "{:?}",
+            answers[4]
+        );
+        // Removed by fingerprint once; a second time there is nothing left to remove.
+        assert!(
+            matches!(&answers[5], Reply::Problem { message } if message.contains("isn't in BitDinghy's window")),
+            "{:?}",
+            answers[5]
+        );
+        assert!(engine.snapshot().is_empty());
         engine.shutdown().await;
     }
 

@@ -551,12 +551,15 @@ impl Engine {
     /// ever deleted. Without it, the files stay where they are.
     pub async fn remove(&self, id: DownloadId, delete_files: bool) -> Result<Deleted> {
         let entry = self.entry(id)?;
+        // Work out what would be deleted BEFORE changing anything: if its file list can't be
+        // read, nothing is removed at all.
+        let owned = if delete_files {
+            self.owned_paths(&entry)?
+        } else {
+            None
+        };
         entry.removed.store(true, Ordering::SeqCst);
         lock(&self.entries).retain(|other| other.id != id);
-        let saved = self
-            .shared
-            .with_list(|list| list.get(&entry.info_hash))
-            .flatten();
         self.shared.with_list(|list| list.remove(&entry.info_hash));
 
         // Stop it in the engine first: on Windows a file can't be deleted while it is open.
@@ -571,18 +574,10 @@ impl Engine {
                 .await
                 .map_err(|e| Error::Control(format!("Couldn't stop \"{}\": {e:#}", entry.label)))?;
         }
-        if !delete_files {
+        let Some((paths, output_folder)) = owned else {
+            // Keeping the files, or its file list never arrived (so nothing was written).
             return Ok(Deleted::default());
-        }
-
-        // Its file list: as the engine knows it, or else as it was saved.
-        let known = lock(&entry.files)
-            .clone()
-            .or_else(|| saved.and_then(|saved| Some((saved.torrent?, saved.output_folder?))));
-        let Some((torrent, output_folder)) = known else {
-            return Ok(Deleted::default()); // Its file list never arrived, so nothing was written.
         };
-        let paths = owned_files::files_of(&torrent, &entry.download_dir, &output_folder)?;
         let download_dir = entry.download_dir.clone();
         // Deleting can wait a moment for Windows to let go of a file, so it runs off to the side.
         tokio::task::spawn_blocking(move || {
@@ -590,6 +585,33 @@ impl Engine {
         })
         .await
         .map_err(|e| Error::Control(format!("Deleting the files stopped unexpectedly: {e}")))
+    }
+
+    /// The files "Remove, delete the files too" would delete right now: those in the download's
+    /// own file list that exist. Nothing is changed. (`dinghy remove --delete-files` shows these
+    /// before asking for "yes".)
+    pub fn files_to_delete(&self, id: DownloadId) -> Result<Vec<PathBuf>> {
+        let entry = self.entry(id)?;
+        Ok(self
+            .owned_paths(&entry)?
+            .map(|(paths, _)| paths.into_iter().filter(|path| path.exists()).collect())
+            .unwrap_or_default())
+    }
+
+    /// Every file a download owns, and its folder: from its file list as the engine knows it, or
+    /// else as it was saved. `None` when its file list never arrived (nothing was written).
+    fn owned_paths(&self, entry: &Entry) -> Result<Option<(Vec<PathBuf>, PathBuf)>> {
+        let known = lock(&entry.files).clone().or_else(|| {
+            self.shared
+                .with_list(|list| list.get(&entry.info_hash))
+                .flatten()
+                .and_then(|saved| Some((saved.torrent?, saved.output_folder?)))
+        });
+        let Some((torrent, output_folder)) = known else {
+            return Ok(None);
+        };
+        let paths = owned_files::files_of(&torrent, &entry.download_dir, &output_folder)?;
+        Ok(Some((paths, output_folder)))
     }
 
     fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
