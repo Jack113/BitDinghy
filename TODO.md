@@ -4,7 +4,7 @@ Things noticed along the way. They are written here instead of being built early
 project is built **one feature at a time**.
 
 ## Owner checks still open
-- M2: run the checks in `docs/TESTING.md` (section M2), including the window.
+- Done: M2 tested OK by the owner, window included (2026-10-10).
 - Done: `assets/source/` stays in git history (owner's decision, 2026-10-10).
 - Done: the project folder is renamed to `BitDinghy`.
 - Done: the M1 download was checked against the published SHA256 and matched (2026-10-09).
