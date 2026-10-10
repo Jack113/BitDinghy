@@ -5,7 +5,107 @@ below are official, openly licensed Linux downloads.
 
 ## M3: the saved list, pause, resume and remove (built in three steps)
 
-M3 arrives in steps. This section grows with each one.
+### The window, everything in M3, step by step
+
+This walkthrough covers everything M3 added to the window. It uses the official Arch Linux
+download (the magnet link is in the M1 section below; about 1.5 GB in total). Pause it whenever a
+step doesn't need it running, and the whole walkthrough uses a few hundred MB. Expect "Looking for
+people sharing this torrent..." to take anywhere from a few seconds to a minute the first time.
+
+**Before you start**
+- Build once: `cargo build --workspace` (in `D:\BitDinghy` or `E:\BitDinghy`). The window is
+  `C:\cargo-target\debug\BitDinghy.exe`; its list is `C:\cargo-target\debug\data\downloads.db`.
+- Look in `Downloads\BitDinghy`. Files left there by earlier tests are NOT in the new list: adding
+  one of those links again is refused on purpose (see part 6). If an Arch `.iso` is already there,
+  move it somewhere else first.
+- Keep File Explorer open on `Downloads\BitDinghy`, so you can watch files appear and disappear.
+
+**1. Downloads are remembered**
+1. Open the window. Below the link box it says "Nothing downloading yet".
+2. Paste the Arch link, press **Download**. The row shows the name, a **Pause** and a **Remove**
+   button on the right, then "Looking for people sharing this torrent..." with a spinner, then a
+   green progress bar with "X of Y | speed | time left | people connected".
+3. Let it reach a few percent, then close the window with the X. It closes at once.
+4. Open it again. The Arch download is **back by itself**: first "Checking files already on
+   disk..." (BitDinghy checks what is already saved), then it carries on from about the same
+   percentage, not from zero.
+
+**2. Only one BitDinghy at a time**
+1. With the window open, start `BitDinghy.exe` a second time.
+2. The second window opens with **Settings** unfolded and a red line: "BitDinghy is already
+   running (in its window or in another terminal). Use that one, or close it first." It shows no
+   downloads and changes nothing. Close the second window; the first one keeps going.
+
+**3. Pause and resume**
+1. While Arch downloads, press **Pause**. Within a second or two the line under the bar says
+   "Paused at X of Y. Nothing is downloaded or shared until you resume it." and the button says
+   **Resume**. The speed, time left and people connected are gone from the row. (The `.iso` in
+   Explorer shows its full size from the start, because space for the whole file is set aside
+   at once, so its size doesn't tell you anything.)
+2. Close the window and open it again. After "Checking files already on disk..." it comes back
+   **still paused**.
+3. Press **Resume**: it says "Looking"/progress again and carries on.
+4. Pause it again for the next parts.
+
+**4. Pause before the file list arrives** (no download data used)
+1. Paste this link, which nobody shares, and press Download:
+   `magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Nobody%20Has%20It`
+   It says "Looking for people sharing this torrent..." and keeps looking.
+2. Press **Pause**. It shows a 0% bar and "Paused. BitDinghy will look for its file list when you
+   resume it."
+3. Close and reopen the window: it is still paused, straight away (nobody is contacted for it).
+4. Keep it for part 5.
+
+**5. Remove: Cancel, and Keep the files**
+1. On "Nobody Has It", press **Remove**. A box appears under it: "Remove "Nobody Has It" from the
+   list?" in amber, a short note, and three buttons: **Keep the files**, **Delete the files too**,
+   **Cancel**.
+2. Press **Cancel**: the box closes and nothing changes.
+3. Press **Remove** again, then **Keep the files**. The row disappears, and a message at the top of
+   the list says it was removed and where its files are (it never had any).
+4. On the paused Arch download, press **Remove**, then **Keep the files**. The row disappears; the
+   message names the folder; in Explorer the `.iso` **is still there**.
+5. Close and reopen the window: both stay gone.
+
+**6. Your files are never overwritten**
+1. The Arch `.iso` from part 5 is still in `Downloads\BitDinghy`, but BitDinghy has forgotten it,
+   so it is no longer BitDinghy's file. Paste the Arch link again and press Download.
+2. After it finds the file list, the row turns red: "BitDinghy didn't start this download because a
+   file with the same name is already in the download folder: ...archlinux....iso. BitDinghy never
+   overwrites files it didn't download. Move or rename that file, then try again." The button says
+   **Try again**. In Explorer, the `.iso`'s size and date haven't changed.
+3. Move the `.iso` out of `Downloads\BitDinghy` (for example to your Desktop), then press **Try
+   again**. It starts, from zero this time. Let it get a few MB, then **Pause**.
+
+**7. Remove and delete the files**
+1. Put a small file of your own in `Downloads\BitDinghy`, for example `notes.txt`.
+2. On the Arch download press **Remove**, then **Delete the files too**.
+3. The row disappears and the message says it "deleted 1 file it downloaded". In Explorer the
+   new `.iso` is gone; **`notes.txt` and the `BitDinghy` folder are still there**, and so is the
+   `.iso` you moved to the Desktop (it was never touched).
+
+**8. A remembered download keeps its folder**
+1. Start the Arch download again (it will be refused if an Arch `.iso` is in `Downloads\BitDinghy`;
+   move it away first). Let it get a few MB, then **Pause**.
+2. Open **Settings**, type another folder (for example `C:\BitDinghy-test3`), press **Save**.
+   Close and reopen the window.
+3. "Saving to:" now shows the new folder (for NEW downloads), but the Arch download is still in
+   `Downloads\BitDinghy` and carries on there when resumed. Nothing appears in the new folder.
+4. Press **Use the standard folder** in Settings to go back.
+
+**9. A damaged list is kept, never thrown away**
+1. Close the window. Open `C:\cargo-target\debug\data\downloads.db` in Notepad, replace everything
+   with the word `broken`, and save.
+2. Open the window: an amber note says BitDinghy couldn't read the saved download list, started a
+   new, empty one, and **kept the old file** as `downloads.db.broken-<number>` (look in the data
+   folder). The window works normally.
+
+**10. Tidy up**
+After part 9 the list is empty, so BitDinghy no longer knows about the paused Arch `.iso` from
+part 8. Delete it from `Downloads\BitDinghy` yourself, along with `C:\BitDinghy-test3`, the `.iso`
+on your Desktop, and the `downloads.db.broken-<number>` file in the data folder.
+
+If anything looks different from this, a screenshot is the most useful thing to send back.
 
 ### Step 1: downloads are remembered (and only one BitDinghy runs at a time)
 
