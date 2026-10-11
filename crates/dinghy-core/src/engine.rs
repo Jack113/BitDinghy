@@ -498,7 +498,7 @@ impl Shared {
                         || lock(&entry.counts).sharing == Sharing::StoppedByLimit;
                     if wants_pause && !handle.is_paused() {
                         let _ = shared.session.pause(&handle).await;
-                    } else if !wants_pause && handle.is_paused() {
+                    } else if !wants_pause && is_stopped(&handle) {
                         let _ = shared.session.unpause(&handle).await;
                     }
                     // The engine creates the files while it sets the download up: hide the
@@ -592,7 +592,7 @@ impl Shared {
                     _ if stats.finished => {
                         entry.held.store(false, Ordering::SeqCst);
                         let stopped = lock(&entry.counts).sharing == Sharing::StoppedByLimit;
-                        if handle.is_paused() && !stopped {
+                        if is_stopped(handle) && !stopped {
                             self.unpause_later(handle.clone());
                         }
                         continue;
@@ -616,7 +616,7 @@ impl Shared {
                             self.start_again(entry);
                         }
                     }
-                    Some(handle) if handle.is_paused() => self.unpause_later(handle),
+                    Some(handle) if is_stopped(&handle) => self.unpause_later(handle),
                     Some(_) => {}
                 }
             } else {
@@ -1895,6 +1895,14 @@ fn now_seconds() -> u64 {
 /// A limit in KiB/s as librqbit wants it: bytes per second, `None` for no limit.
 fn bytes_per_second(kib: u32) -> Option<NonZeroU32> {
     NonZeroU32::new(kib.saturating_mul(1024))
+}
+
+/// Whether librqbit has this download stopped. Its `is_paused()` flag alone isn't enough: a
+/// download added paused and resumed while librqbit was still checking its files ends up paused
+/// with the flag saying "not paused" (the check finishes with the old "start paused" wish), so
+/// nothing would ever start it again. Found in the big guided test.
+fn is_stopped(handle: &ManagedTorrent) -> bool {
+    handle.is_paused() || matches!(handle.stats().state, TorrentStatsState::Paused)
 }
 
 /// Whether another program already listens on `port`: `Some(why)` if so. Checked with plain

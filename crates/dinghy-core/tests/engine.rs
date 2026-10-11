@@ -614,6 +614,39 @@ async fn a_paused_download_stays_paused_after_a_restart_and_resumes() {
     second_run.shutdown().await;
 }
 
+/// Found in the big guided test: a finished download, paused, restarted and resumed with NOBODY
+/// sharing it must still find its files on disk (the seeder above would hide a missing check by
+/// simply sending everything again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_download_resumed_after_a_restart_finds_its_files_without_anyone() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    let id = first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    first_run.pause(id).await.unwrap();
+    wait_until(&first_run, "paused", really_paused).await;
+    first_run.shutdown().await;
+    drop(first_run);
+    drop(seeder);
+
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_until(&second_run, "paused after restart", really_paused).await;
+    second_run.resume(back.id).await.unwrap();
+    let done = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    second_run.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_download_can_be_paused_before_its_file_list_arrives() {
     let work = tempfile::tempdir().unwrap();
@@ -2000,6 +2033,63 @@ async fn pausing_while_files_are_checked_pauses_and_resume_checks_again() {
     assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
     assert_eq!(done.progress_bytes, 80_000_005);
     engine.shutdown().await;
+}
+
+/// Found in the big guided test: a finished download using files already there, paused, the
+/// window restarted, then resumed with nobody sharing it: it must find its 80 MB on disk again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_big_download_resumed_after_a_restart_finds_its_files_without_anyone() {
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let folder = download_dir.join("big");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("big.bin"), pseudo_random_bytes(80_000_000, 42)).unwrap();
+    std::fs::write(folder.join("small.txt"), b"hello").unwrap();
+    let created = create_torrent(
+        &folder,
+        CreateTorrentOptions {
+            piece_length: Some(1024 * 1024),
+            ..Default::default()
+        },
+        &BlockingSpawner::new(1),
+    )
+    .await
+    .unwrap();
+    let torrent = work.path().join("big.torrent");
+    std::fs::write(&torrent, created.as_bytes().unwrap()).unwrap();
+
+    let first_run = remembering_engine(&download_dir, &list, true).await;
+    let options = dinghy_core::AddOptions {
+        peers: Vec::new(),
+        use_existing_files: true,
+    };
+    let id = first_run
+        .add_any_with(&torrent.display().to_string(), options)
+        .await
+        .unwrap();
+    let done = wait_for_status(
+        &first_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    first_run.pause(id).await.unwrap();
+    wait_until(&first_run, "paused", really_paused).await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    let second_run = remembering_engine(&download_dir, &list, true).await;
+    let back = wait_until(&second_run, "paused after restart", really_paused).await;
+    second_run.resume(back.id).await.unwrap();
+    let done = wait_for_status(
+        &second_run,
+        &[DownloadStatus::Finished, DownloadStatus::Failed],
+    )
+    .await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!(done.progress_bytes, 80_000_005);
+    second_run.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------------------------

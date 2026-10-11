@@ -343,6 +343,8 @@ struct BitDinghyApp {
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
     fetching: Option<Fetching>,
+    /// Button actions still running in the background (see [`Running`]).
+    running: Vec<Running>,
 }
 
 /// A web link to a `.torrent` file being fetched in the background, so the window never freezes.
@@ -350,6 +352,16 @@ struct Fetching {
     /// The web site's name, for the "Fetching..." line.
     host: String,
     task: tokio::task::JoinHandle<dinghy_core::Result<DownloadId>>,
+}
+
+/// A button action (Pause, Resume, Check files, choosing files, Remove) running in the
+/// background. The engine library can take many seconds to pause a busy download; if the window
+/// waited, it would freeze, and clicks made meanwhile would land on whatever button is under the
+/// mouse afterwards (a Pause click turning into Resume). So the window keeps drawing, and the
+/// download's buttons are greyed out until the action is done.
+struct Running {
+    id: DownloadId,
+    task: tokio::task::JoinHandle<dinghy_core::Result<Option<(String, bool)>>>,
 }
 
 impl BitDinghyApp {
@@ -419,6 +431,7 @@ impl BitDinghyApp {
             connections_choice,
             channel_problem,
             fetching: None,
+            running: Vec::new(),
         }
     }
 
@@ -516,8 +529,9 @@ impl BitDinghyApp {
         });
     }
 
-    /// Carries out a button press on one download.
-    fn act(&mut self, engine: &Engine, downloads: &[DownloadSnapshot], control: Control) {
+    /// Carries out a button press on one download. Actions that wait for the engine run in the
+    /// background (see [`Running`]); their result is shown when they finish.
+    fn act(&mut self, engine: &Arc<Engine>, downloads: &[DownloadSnapshot], control: Control) {
         let name_of = |id| {
             downloads
                 .iter()
@@ -526,8 +540,16 @@ impl BitDinghyApp {
                 .unwrap_or_default()
         };
         let outcome = match control {
-            Control::Pause(id) => self.runtime.block_on(engine.pause(id)).map(|()| None),
-            Control::Resume(id) => self.runtime.block_on(engine.resume(id)).map(|()| None),
+            Control::Pause(id) => {
+                let engine = engine.clone();
+                self.run(id, async move { engine.pause(id).await.map(|()| None) });
+                return;
+            }
+            Control::Resume(id) => {
+                let engine = engine.clone();
+                self.run(id, async move { engine.resume(id).await.map(|()| None) });
+                return;
+            }
             Control::AskRemove(id) => {
                 self.confirming_remove = Some(id);
                 Ok(None)
@@ -542,13 +564,20 @@ impl BitDinghyApp {
                 }
                 Ok(None)
             }
-            Control::Check(id) => self.runtime.block_on(engine.check(id)).map(|()| None),
+            Control::Check(id) => {
+                let engine = engine.clone();
+                self.run(id, async move { engine.check(id).await.map(|()| None) });
+                return;
+            }
             Control::Move { id, to } => engine.move_download(id, to).map(|()| None),
             Control::UseExistingFiles(id) => engine.use_existing_files(id).map(|()| None),
-            Control::ChooseFiles { id, chosen } => self
-                .runtime
-                .block_on(engine.choose_files(id, &chosen))
-                .map(|()| None),
+            Control::ChooseFiles { id, chosen } => {
+                let engine = engine.clone();
+                self.run(id, async move {
+                    engine.choose_files(id, &chosen).await.map(|()| None)
+                });
+                return;
+            }
             Control::Remove { id, delete_files } => {
                 self.confirming_remove = None;
                 self.showing_files.remove(&id);
@@ -557,11 +586,45 @@ impl BitDinghyApp {
                     .download_dir_of(id)
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default();
-                self.runtime
-                    .block_on(engine.remove(id, delete_files))
-                    .map(|deleted| Some(removed_message(&name, &folder, delete_files, &deleted)))
+                let engine = engine.clone();
+                self.run(id, async move {
+                    engine.remove(id, delete_files).await.map(|deleted| {
+                        Some(removed_message(&name, &folder, delete_files, &deleted))
+                    })
+                });
+                return;
             }
         };
+        self.show_outcome(outcome);
+    }
+
+    /// Starts a button's action in the background.
+    fn run(
+        &mut self,
+        id: DownloadId,
+        action: impl Future<Output = dinghy_core::Result<Option<(String, bool)>>> + Send + 'static,
+    ) {
+        self.control_message = None;
+        let task = self.runtime.spawn(action);
+        self.running.push(Running { id, task });
+    }
+
+    /// Shows the result of the background actions that have finished.
+    fn collect_running(&mut self) {
+        let (finished, still): (Vec<Running>, Vec<Running>) = std::mem::take(&mut self.running)
+            .into_iter()
+            .partition(|running| running.task.is_finished());
+        self.running = still;
+        for running in finished {
+            let outcome = match self.runtime.block_on(running.task) {
+                Ok(outcome) => outcome,
+                Err(_) => Ok(Some(("That stopped unexpectedly.".to_string(), true))),
+            };
+            self.show_outcome(outcome);
+        }
+    }
+
+    fn show_outcome(&mut self, outcome: dinghy_core::Result<Option<(String, bool)>>) {
         self.control_message = match outcome {
             Ok(None) => None,
             Ok(Some(message)) => Some(message),
@@ -1117,6 +1180,7 @@ impl eframe::App for BitDinghyApp {
         ui.add_space(4.0);
         ui.separator();
 
+        self.collect_running();
         if let Some((message, is_error)) = &self.control_message {
             let color = if *is_error {
                 error_color(ui)
@@ -1141,8 +1205,14 @@ impl eframe::App for BitDinghyApp {
                     .contains(&download.id)
                     .then(|| engine.files(download.id).map_err(|error| error.to_string()));
                 let movable = downloads.len() > 1;
-                clicked =
-                    draw_download(ui, download, confirming, files, movable).or(clicked.take());
+                // Greyed out while one of its actions is still running.
+                let busy = self.running.iter().any(|running| running.id == download.id);
+                let pressed = ui
+                    .add_enabled_ui(!busy, |ui| {
+                        draw_download(ui, download, confirming, files, movable)
+                    })
+                    .inner;
+                clicked = pressed.or(clicked.take());
                 ui.separator();
             }
         });
