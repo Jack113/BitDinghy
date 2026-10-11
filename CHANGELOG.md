@@ -10,6 +10,11 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **History.** A History section in the window shows the download and upload speed of the last
+  ten minutes, how much was downloaded and uploaded each day of the last 30 days, and the
+  downloads you removed. `dinghy history` shows the days and the removed downloads too. The saved
+  download list moves to **version 5**; older lists are upgraded the first time BitDinghy opens
+  them.
 - **Crash reports.** If BitDinghy or `dinghy` crashes, it saves a short report (version, Windows
   version, what went wrong and where) in the data folder's `crash-reports`. It never leaves your
   computer. The next time the window opens it tells you, with a button to open the folder.

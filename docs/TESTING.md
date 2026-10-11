@@ -3,6 +3,52 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M14: history and charts
+
+Data-free, but best done after the M9 test on the same day (its short Arch download gives the
+day's total something to show).
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, PowerShell in
+   `C:\cargo-target\debug`.
+
+**Test 1: the History section**
+- Do: open the window. Under the link box there is a folded **History**; open it.
+- You should see: "Speed in the last 10 minutes (MiB/s):" with a small chart (two flat lines,
+  Downloading and Uploading, while nothing runs); "Today: downloaded X, uploaded Y. Last 30 days:
+  downloaded X, uploaded Y." (after the M9 test, today shows about 10 to 15 MiB downloaded);
+  a bar chart "days ago (MiB per day)"; and "Removed downloads:" with the downloads you removed
+  in the earlier tests, newest first, like "Queue test 1 (585.9 KiB), not finished, removed
+  2026-10-11, 0 B uploaded".
+
+**Test 2: removing a download puts it in the history**
+- Do: add `%TEMP%\bitdinghy-m6-test\queue-1.torrent` (Open .torrent file...), then **Remove**,
+  **Delete the files too**.
+- You should see: within a second, "Queue test 1 (585.9 KiB), not finished, removed <today>, 0 B
+  uploaded" at the top of "Removed downloads:".
+
+**Test 3: `dinghy history`**
+- Do: `.\dinghy.exe history`, then `.\dinghy.exe history --days 30`, then
+  `.\dinghy.exe history --days 0`.
+- You should see: "Downloaded and uploaded per day (last 7 days):" with a line per day that had
+  something (today's date, "downloaded ... uploaded ..."), a "Together" line, and "Removed
+  downloads (newest first):" with the same entries as the window (or "Nothing was downloaded or
+  uploaded in the last 7 days." if nothing was). `--days 30` covers 30 days. `--days 0` is
+  refused: "invalid value '0' for '--days <DAYS>': 0 is not in 1..=400".
+
+**Test 4: the speed chart moves (optional, uses data)**
+- Do: if you have a paused Arch download, resume it for 20 seconds, then pause it.
+- You should see: the Downloading line rises while it runs and falls back to 0.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The History section | |
+| 2. Removing a download puts it in the history | |
+| 3. `dinghy history` | |
+| 4. The speed chart moves (optional) | |
+
 ## M13: crash reports
 
 Data-free. The crashes are made on purpose with a setting only used for testing.

@@ -419,6 +419,25 @@ finishes, and the torrent is taken straight back out.
   build (M18) so reports can be read.
 - Crashes outside Rust (an access violation in a C library) aren't caught yet (`TODO.md`).
 
+## History and charts (M14)
+
+- The saved list (**version 5**) gains two tables: `history` (downloads that were removed: name,
+  size of the chosen files, when added, finished and removed, total uploaded, folder; the newest
+  1000) and `daily_totals` (bytes downloaded and uploaded per local day; 400 days).
+  `SavedList::remove` files a download in the history in the same transaction as removing it;
+  `forget` (used when the safety check refuses a torrent) leaves no trace.
+- The engine's once-a-second count also adds to **today's totals**: uploads as before, and
+  downloads from librqbit's `fetched_bytes` (everything fetched from people, so it matches the
+  data used; files found already on disk never count). Today's part is saved with the other
+  counts (every 15 seconds and at shutdown); a new day saves the old one first. The total
+  download and upload speeds of the last 10 minutes are kept in memory for the chart.
+- **`days.rs`**: days are numbered since 1970 in local time (Windows' time zone; UTC elsewhere),
+  so "today" starts at local midnight; `date_text` turns them into dates.
+- The window's **History** section (folded away until opened) draws the speed chart and the
+  last 30 days as bars (`egui_plot` 0.37, the version for egui 0.36), today's and the 30-day
+  totals, and the last 20 removed downloads. `dinghy history [--days N]` prints the same from
+  the saved list (it works while the window is open).
+
 ## Where each piece appears
 
 | Milestone | What lands |
