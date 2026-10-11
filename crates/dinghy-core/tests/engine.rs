@@ -1168,9 +1168,27 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
     let paused = wait_until(&first_run, "paused with its file list", really_paused).await;
     assert_eq!((paused.files_total, paused.files_chosen), (3, 3));
     let shown = first_run.files(id).unwrap();
-    let names: Vec<_> = shown.iter().map(|f| f.path.display().to_string()).collect();
+    // The torrent's order depends on how the operating system listed the folder when it was
+    // made, so files are found by name.
+    let mut names: Vec<_> = shown.iter().map(|f| f.path.display().to_string()).collect();
+    names.sort();
     assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
     assert!(shown.iter().all(|f| f.chosen));
+    let number_of = |name: &str| {
+        shown
+            .iter()
+            .find(|f| f.path == Path::new(name))
+            .unwrap()
+            .number
+    };
+    let (a, c) = (number_of("a.bin"), number_of("c.bin"));
+    let by_name = |shown: &[dinghy_core::FileChoice], name: &str| {
+        shown
+            .iter()
+            .find(|f| f.path == Path::new(name))
+            .unwrap()
+            .clone()
+    };
 
     // Refused: nothing chosen, and a number that isn't in the list.
     let none = first_run.choose_files(id, &BTreeSet::new()).await;
@@ -1180,12 +1198,14 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
 
     // Files 1 and 3 only.
     first_run
-        .choose_files(id, &BTreeSet::from([1, 3]))
+        .choose_files(id, &BTreeSet::from([a, c]))
         .await
         .unwrap();
     assert_eq!(
-        dinghy_core::SavedList::read(&list).unwrap()[0].skipped_files,
-        BTreeSet::from([1]),
+        dinghy_core::SavedList::read(&list).unwrap()[0]
+            .skipped_files
+            .len(),
+        1,
         "the torrent's own index of b.bin is remembered"
     );
     // The engine created b.bin anyway; it is hidden now (Windows has a "hidden" mark).
@@ -1215,9 +1235,9 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
         "b.bin was not downloaded"
     );
     let shown = first_run.files(id).unwrap();
-    assert_eq!(shown[0].done_bytes, Some(60_000));
-    assert!(!shown[1].chosen);
-    assert_eq!(shown[2].done_bytes, Some(40_000));
+    assert_eq!(by_name(&shown, "a.bin").done_bytes, Some(60_000));
+    assert!(!by_name(&shown, "b.bin").chosen);
+    assert_eq!(by_name(&shown, "c.bin").done_bytes, Some(40_000));
     first_run.shutdown().await;
     drop(first_run);
 
@@ -1277,7 +1297,7 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
 
     // Unticked again, then removed keeping the files: nothing stays hidden.
     third_run
-        .choose_files(id, &BTreeSet::from([1, 3]))
+        .choose_files(id, &BTreeSet::from([a, c]))
         .await
         .unwrap();
     assert_eq!(is_hidden(&folder.join("b.bin")), cfg!(windows));
