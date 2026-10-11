@@ -180,6 +180,12 @@ struct GetArgs {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // If dinghy crashes, it saves a report first (it stays on this computer).
+    let data_dir = dinghy_core::DataDir::locate()
+        .ok()
+        .map(|dir| dir.path().to_path_buf());
+    dinghy_core::crash::install("dinghy", data_dir);
+    dinghy_core::crash::crash_if_testing();
     match Cli::parse().command {
         Some(Command::Get(args)) => get(args).await,
         Some(Command::List) => list().await,
@@ -218,6 +224,16 @@ fn show_settings(profile: &Profile) {
     }
     if let Some(path) = profile.settings_path() {
         println!("Settings file: {}", path.display());
+    }
+    let reports = dinghy_core::crash::report_folder(profile.data_dir().map(|dir| dir.path()));
+    let count = std::fs::read_dir(&reports)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    if count > 0 {
+        println!(
+            "Crash reports: {count} in {} (they stay on this computer)",
+            reports.display()
+        );
     }
     let remembered = profile.settings().download_dir.is_some();
     println!(

@@ -401,6 +401,24 @@ finishes, and the torrent is taken straight back out.
   find anyone, instead of waiting forever. A paused download that `dinghy get` follows says
   "paused at N%" instead of looking stuck.
 
+## Crash reports (M13)
+
+- **`crash.rs`**: both programs install a panic hook at start (`crash::install`). If either
+  crashes, it first writes `crash-<time>-<n>.txt` in the data folder's `crash-reports` (the temp
+  folder if there is no data folder): the program and version, the Windows version (read from
+  the registry), the thread, the problem and a backtrace, under a note that the report stays on
+  the computer and may contain folder names. Rust's own message still appears, and `dinghy`
+  says where the report is. Only the newest 10 are kept; other files in the folder are never
+  touched.
+- **Nothing is sent anywhere.** The next time the window opens it says that a report was saved,
+  with **Open the folder** and **OK** (OK renames the reports `....seen.txt`, so it says it
+  once). `dinghy settings` shows how many reports there are.
+- `BITDINGHY_CRASH_TEST` (any value) makes either program crash on purpose, to try this out.
+- Backtraces need the program's debug information to show function names. Development builds
+  keep line numbers (`debug = "line-tables-only"`); for releases, keep the `.pdb` files of each
+  build (M18) so reports can be read.
+- Crashes outside Rust (an access violation in a C library) aren't caught yet (`TODO.md`).
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -416,4 +434,5 @@ finishes, and the torrent is taken straight back out.
 | M10 | Sharing limits |
 | M11 | Port and UPnP |
 | M12 | Plain-language problems, drive checks |
+| M13 | Crash reports |
 | M14 | History and charts |

@@ -10,6 +10,9 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Crash reports.** If BitDinghy or `dinghy` crashes, it saves a short report (version, Windows
+  version, what went wrong and where) in the data folder's `crash-reports`. It never leaves your
+  computer. The next time the window opens it tells you, with a button to open the folder.
 - **Problems in plain words.** A full disk, a file another program has open, no permission to
   write, or an unplugged drive now say what happened and what to do (the technical details stay
   at the end). A download with a file of 4 GB or more is refused at once on a FAT32 drive,

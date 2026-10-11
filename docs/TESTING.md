@@ -3,6 +3,52 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M13: crash reports
+
+Data-free. The crashes are made on purpose with a setting only used for testing.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, PowerShell in
+   `C:\cargo-target\debug`.
+
+**Test 1: `dinghy` crashes and says where the report is**
+- Do: `$env:BITDINGHY_CRASH_TEST=1; .\dinghy.exe list` then `Remove-Item Env:BITDINGHY_CRASH_TEST`
+- You should see: "dinghy ran into a problem it can't carry on from. A report was saved in
+  C:\cargo-target\debug\data\crash-reports\crash-...-0.txt (it stays on this computer)." and
+  Rust's own "panicked at ... a crash on purpose, because BITDINGHY_CRASH_TEST is set".
+
+**Test 2: what a report says**
+- Do: open that file in Notepad.
+- You should see: "dinghy crash report", the line "This report stays on your computer. It may
+  contain folder names (such as your user name). If you send it to anyone to help find the
+  problem, read it first.", "Program: dinghy 0.0.1", "System: Windows 10 Pro ..., build ...",
+  "Problem: ... a crash on purpose ...", and a "Where (backtrace):" list.
+
+**Test 3: the window crashes, and says so next time**
+- Do: `$env:BITDINGHY_CRASH_TEST=1; .\BitDinghy.exe` (the window closes at once, or never
+  appears), then `Remove-Item Env:BITDINGHY_CRASH_TEST` and `.\BitDinghy.exe`.
+- You should see: at the top of the window, in orange: "BitDinghy closed unexpectedly last time.
+  A report was saved in C:\cargo-target\debug\data\crash-reports. It stays on this computer; if
+  you report the problem, sending it along helps to find the cause." with **Open the folder** and
+  **OK**. **Open the folder** opens Explorer there. Press **OK**: the message goes. Close and
+  reopen the window: it doesn't come back.
+
+**Test 4: `dinghy settings`**
+- Do: `.\dinghy.exe settings`
+- You should see: a line "Crash reports: 2 in C:\cargo-target\debug\data\crash-reports (they
+  stay on this computer)".
+
+**Tidy up:** delete the `crash-reports` folder in `C:\cargo-target\debug\data` if you like.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. `dinghy` crashes and says where the report is | |
+| 2. What a report says | |
+| 3. The window crashes, and says so next time | |
+| 4. `dinghy settings` | |
+
 ## M12: problems in plain words
 
 Data-free. Test 2 uses your FAT32 USB stick (the one the repo is on); skip it if you have none.

@@ -59,6 +59,25 @@ fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
     !editing.dragged() && !editing.has_focus()
 }
 
+/// What the window says after a crash.
+fn crash_notice_text(folder: &Path) -> String {
+    format!(
+        "BitDinghy closed unexpectedly last time. A report was saved in {}. It stays on this \
+         computer; if you report the problem, sending it along helps to find the cause.",
+        folder.display()
+    )
+}
+
+/// Opens a folder in Explorer (or the desktop's file manager).
+fn open_folder(folder: &Path) {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(folder).spawn();
+}
+
 /// Whether, and on which port, BitDinghy accepts connections right now.
 fn listening_text(port: Option<u16>) -> String {
     match port {
@@ -155,6 +174,8 @@ struct BitDinghyApp {
     confirming_remove: Option<DownloadId>,
     /// The downloads whose file list (with tick boxes) is open.
     showing_files: HashSet<DownloadId>,
+    /// Crash reports saved since the person was last told (M13).
+    crash_reports: Vec<std::path::PathBuf>,
     /// The "downloads at the same time" number being edited in the settings.
     max_active_choice: u32,
     /// The speed limits being edited in the settings (KiB/s, 0: no limit): download, upload.
@@ -202,6 +223,8 @@ impl BitDinghyApp {
             }
             _ => None,
         };
+        let crash_reports =
+            dinghy_core::crash::unseen_reports(profile.data_dir().map(|dir| dir.path()));
         let max_active_choice = profile.settings().max_active_downloads;
         let connections_choice = (
             profile.settings().accept_incoming,
@@ -233,6 +256,7 @@ impl BitDinghyApp {
             control_message: None,
             confirming_remove: None,
             showing_files: HashSet::new(),
+            crash_reports,
             max_active_choice,
             limits_choice,
             sharing_choice,
@@ -387,6 +411,28 @@ impl BitDinghyApp {
             Ok(Some(message)) => Some(message),
             Err(error) => Some((error.to_string(), true)),
         };
+    }
+
+    /// After a crash: says a report was saved, with a button to open its folder.
+    fn draw_crash_notice(&mut self, ui: &mut egui::Ui) {
+        let Some(newest) = self.crash_reports.last() else {
+            return;
+        };
+        let folder = newest.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut done = false;
+        ui.group(|ui| {
+            ui.colored_label(warning_color(ui), crash_notice_text(&folder));
+            ui.horizontal(|ui| {
+                if ui.button("Open the folder").clicked() {
+                    open_folder(&folder);
+                }
+                done = ui.button("OK").clicked();
+            });
+        });
+        if done {
+            dinghy_core::crash::mark_seen(&self.crash_reports);
+            self.crash_reports.clear();
+        }
     }
 
     /// The logo (or, if it couldn't be loaded, the name) with the version beside it.
@@ -664,7 +710,9 @@ impl BitDinghyApp {
 
 impl eframe::App for BitDinghyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        dinghy_core::crash::crash_if_testing();
         self.draw_header(ui);
+        self.draw_crash_notice(ui);
         for notice in self.profile.notices() {
             ui.colored_label(warning_color(ui), notice);
         }
@@ -1229,6 +1277,12 @@ fn checking_text(download: &DownloadSnapshot) -> String {
 }
 
 fn main() -> eframe::Result {
+    // If the window crashes, it saves a report first (it stays on this computer); the next start
+    // says so.
+    let data_dir = dinghy_core::DataDir::locate()
+        .ok()
+        .map(|dir| dir.path().to_path_buf());
+    dinghy_core::crash::install("BitDinghy", data_dir);
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([820.0, 600.0])
         .with_min_inner_size([480.0, 340.0]);
@@ -1276,6 +1330,13 @@ mod tests {
             sharing_stopped: false,
             warning: None,
         }
+    }
+
+    #[test]
+    fn the_crash_notice_says_where_and_that_it_stays_here() {
+        let text = crash_notice_text(Path::new(r"C:\data\crash-reports"));
+        assert!(text.contains(r"saved in C:\data\crash-reports"), "{text}");
+        assert!(text.contains("stays on this computer"), "{text}");
     }
 
     #[test]

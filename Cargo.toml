@@ -56,9 +56,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tempfile = "3"
 # Reads the window icon and logo pictures (already part of the build through egui).
 png = "0.18"
-# Windows only: marks the leftovers of unticked files hidden (M6). Already in the build through
-# several crates; we only switch on the file-system part.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Windows only: marks the leftovers of unticked files hidden (M6), asks a drive's format and free
+# room (M12), and reads the Windows version for crash reports (M13). Already in the build through
+# several crates; we only switch on the parts we use.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Registry"] }
 # Windows only, build time only: puts the icon and the "Details" information into the .exe files.
 winresource = "0.1"
 
@@ -67,6 +68,12 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 # The "Open .torrent file..." dialog: Windows' own file dialog (on Linux, the desktop portal, so no
 # GTK is needed). No default features: only the parts we use.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[profile.dev]
+# Line numbers only (not every variable): backtraces and crash reports still show file and line,
+# while the build folder stays much smaller (with full debug information it had grown to 36 GB
+# and filled drive C:, M13).
+debug = "line-tables-only"
 
 [profile.release]
 # Slower to compile, smaller and faster to run. Size/speed tuning is revisited at the first release.

@@ -145,7 +145,9 @@ project is built **one feature at a time**.
   reports need function names, so stripping has a cost. Report real size and memory numbers.
 - Add an MSRV (minimum Rust version) CI job.
 - Add Dependabot or Renovate for crates and GitHub Actions.
-- Native crash handling (access violations) beyond Rust panics.
+- Native crash handling (access violations) beyond Rust panics. (M13 catches Rust panics.)
+- Release builds: keep each build's `.pdb` files (not shipped) so crash-report backtraces can be
+  turned into function names (M18).
 - Hardening: reject tracker URLs that point at localhost or the LAN, cap `.torrent` size and
   file counts, and fuzz the torrent and magnet parsers.
 - Generate the third-party license notices file with `cargo-about` before the first release.

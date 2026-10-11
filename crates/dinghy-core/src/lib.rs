@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+pub mod crash;
 pub mod data_dir;
 pub mod display;
 pub mod drive;
