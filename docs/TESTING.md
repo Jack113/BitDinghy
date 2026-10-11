@@ -3,6 +3,78 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M8: the queue
+
+Data-free: three little test torrents nobody shares, so each download simply waits at 0%.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`. `cargo build --workspace`, then
+   `cargo run -p dinghy-core --example make_test_torrent`. It ends with "Queue test torrents:
+   queue-1.torrent, queue-2.torrent and queue-3.torrent in ...\bitdinghy-m6-test".
+2. Terminal in `C:\cargo-target\debug`. Run `.\dinghy.exe settings set max-active-downloads 1`.
+   You should see "Saved. It will be used from now on, in the window too." and the settings, with
+   the line `max-active-downloads:  1  (the others wait in the queue)`.
+3. The window's list should be empty (remove anything left from earlier tests).
+
+**Test 1: one at a time**
+- Do: open the window. Open **Settings**: "Downloads at the same time: 1" with "(0 = no limit. The
+  others wait in the queue; finished downloads that are sharing don't count.)". Press **Open
+  .torrent file...**, go to `%TEMP%\bitdinghy-m6-test`, select `queue-1`, `queue-2` and `queue-3`
+  together (Ctrl+click) and open them.
+- You should see: **Queue test 1** with a progress bar and `0 B of 585.9 KiB ... 0 people
+  connected`; **Queue test 2** and **Queue test 3** say "Queued: it starts when another download
+  finishes (Settings: downloads at the same time)." Every row has two small buttons, ⏶ and ⏷,
+  before its name.
+
+**Test 2: moving changes which one runs**
+- Do: press ⏶ on Queue test 3 twice.
+- You should see: Queue test 3 is now at the top and has the progress bar; Queue test 1 (now
+  second) says "Queued...". Hovering ⏶ says "Move up the list (downloads start in list order)".
+
+**Test 3: pausing frees the place**
+- Do: press **Pause** on Queue test 3.
+- You should see: Queue test 3 "Paused at 0 B of 585.9 KiB..."; Queue test 1 starts (progress
+  bar). Press **Resume** on Queue test 3: being first in the list, it takes the place back and
+  Queue test 1 is "Queued" again.
+
+**Test 4: two at a time**
+- Do: in Settings, change "Downloads at the same time" to 2 (click the number, type 2, press
+  Enter).
+- You should see: "2 downloads run at the same time, from now on." and two downloads with
+  progress bars; the third is queued.
+
+**Test 5: the command line**
+- Do: `.\dinghy.exe list`, then `.\dinghy.exe move 3 top`, then `.\dinghy.exe list` again.
+- You should see: the list shows the third one as `[queued: starts when another download
+  finishes]`. After the move: "Moved: Queue test 2 (in BitDinghy's open window)." (or the name
+  that was third), it is first in the window, and it runs.
+
+**Test 6: the order is remembered**
+- Do: close the window, run `.\dinghy.exe list`, then open the window again.
+- You should see: the same order in `dinghy list` (all three `[active]`) and in the window, with the
+  same two running and one queued.
+
+**Test 7: a setting from the command line reaches the open window**
+- Do: with the window open, `.\dinghy.exe settings set max-active-downloads 0`.
+- You should see: "Saved. BitDinghy's open window uses it straight away." and in the window all
+  three downloads run (no "Queued" left). (The window's Settings box still shows 2 until the
+  window is restarted.)
+
+**Tidy up:** remove the three queue tests (**Remove**, **Delete the files too**), and
+`.\dinghy.exe settings set max-active-downloads 3`.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. One at a time | |
+| 2. Moving changes which one runs | |
+| 3. Pausing frees the place | |
+| 4. Two at a time | |
+| 5. The command line | |
+| 6. The order is remembered | |
+| 7. A setting from the command line reaches the open window | |
+
 ## M7: checking files, and using files already there
 
 Data-free like M6: it uses the M6 test torrent, whose files exist on your PC. Nobody shares it, so

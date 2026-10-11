@@ -27,13 +27,14 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
 
-use crate::engine::{AddOptions, DownloadSnapshot, Engine};
+use crate::engine::{AddOptions, DownloadSnapshot, Engine, Move};
 use crate::error::{Error, Result};
 use crate::file_choice::FileChoice;
 
 /// The version of the messages below. Change it whenever a message changes shape.
 /// Version 2 (M6 and later, not released before): choosing files (`Files`, `ChooseFiles`), file
-/// counts in each download, `Check`, and `use_existing_files` on `Add`.
+/// counts in each download, `Check`, `use_existing_files` on `Add`, `Move`, `SetMaxActiveDownloads`
+/// and the `Queued` status.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The longest message accepted, in bytes. A list of hundreds of downloads fits easily.
@@ -88,6 +89,19 @@ pub enum Command {
     /// Check a download's files on disk again (the result shows up in its `note`).
     Check {
         target: Target,
+    },
+    /// Move a download in the list (the queue order).
+    Move {
+        target: Target,
+        to: Move,
+    },
+    /// Change how many downloads run at the same time, for this run (the CLI saves the setting).
+    SetMaxActiveDownloads {
+        limit: usize,
+    },
+    /// Change the "allow plain http links" setting, for this run (the CLI saves the setting).
+    SetAllowHttpLinks {
+        allow: bool,
     },
 }
 
@@ -371,6 +385,25 @@ async fn answer_or_problem(
                 files: engine.files(download.id).map_err(said)?,
                 info_hash: download.info_hash,
                 name: download.name,
+            }
+        }
+        Command::Move { target, to } => {
+            let download = find(engine, &target)?;
+            engine.move_download(download.id, to).map_err(said)?;
+            Reply::Changed {
+                name: download.name,
+            }
+        }
+        Command::SetMaxActiveDownloads { limit } => {
+            engine.set_max_active_downloads(limit);
+            Reply::Changed {
+                name: String::new(),
+            }
+        }
+        Command::SetAllowHttpLinks { allow } => {
+            engine.set_allow_http_links(allow);
+            Reply::Changed {
+                name: String::new(),
             }
         }
         Command::Check { target } => {

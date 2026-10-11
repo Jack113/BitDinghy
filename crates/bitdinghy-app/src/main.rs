@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
+use dinghy_core::settings::MAX_ACTIVE_DOWNLOADS_LIMIT;
 use dinghy_core::{
-    DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, remote,
+    DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, remote,
 };
 use eframe::egui;
 
@@ -44,6 +45,11 @@ fn info_color(ui: &egui::Ui) -> egui::Color32 {
 fn spinner(ui: &mut egui::Ui) {
     ui.add(egui::Spinner::new().color(info_color(ui)));
 }
+
+/// The up and down symbols. egui's own fonts have these two (and not the usual arrows); a test
+/// checks it, so a font change can't turn them into empty boxes.
+const UP: &str = "\u{23F6}";
+const DOWN: &str = "\u{23F7}";
 
 /// How tall the logo is drawn at the top of the window, in points.
 const LOGO_HEIGHT: f32 = 48.0;
@@ -76,6 +82,8 @@ struct BitDinghyApp {
     confirming_remove: Option<DownloadId>,
     /// The downloads whose file list (with tick boxes) is open.
     showing_files: HashSet<DownloadId>,
+    /// The "downloads at the same time" number being edited in the settings.
+    max_active_choice: u32,
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
@@ -115,6 +123,7 @@ impl BitDinghyApp {
             }
             _ => None,
         };
+        let max_active_choice = profile.settings().max_active_downloads;
         let folder_text = profile
             .settings()
             .download_dir_or_default()
@@ -132,6 +141,7 @@ impl BitDinghyApp {
             control_message: None,
             confirming_remove: None,
             showing_files: HashSet::new(),
+            max_active_choice,
             channel_problem,
             fetching: None,
         }
@@ -258,6 +268,7 @@ impl BitDinghyApp {
                 Ok(None)
             }
             Control::Check(id) => self.runtime.block_on(engine.check(id)).map(|()| None),
+            Control::Move { id, to } => engine.move_download(id, to).map(|()| None),
             Control::UseExistingFiles(id) => engine.use_existing_files(id).map(|()| None),
             Control::ChooseFiles { id, chosen } => self
                 .runtime
@@ -308,6 +319,7 @@ impl BitDinghyApp {
         let mut save = false;
         let mut use_standard = false;
         let mut change_http = None;
+        let mut change_max_active = None;
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
             .default_open(self.engine.is_err())
@@ -347,6 +359,21 @@ impl BitDinghyApp {
                 {
                     change_http = Some(allow_http);
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Downloads at the same time:");
+                    let editing = ui.add(
+                        egui::DragValue::new(&mut self.max_active_choice)
+                            .range(0..=MAX_ACTIVE_DOWNLOADS_LIMIT),
+                    );
+                    ui.weak("(0 = no limit. The others wait in the queue; finished downloads that are sharing don't count.)");
+                    // Saved once the person has finished changing it (not at every step of a drag).
+                    if self.max_active_choice != self.profile.settings().max_active_downloads
+                        && !editing.dragged()
+                        && !editing.has_focus()
+                    {
+                        change_max_active = Some(self.max_active_choice);
+                    }
+                });
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
                         error_color(ui)
@@ -358,6 +385,25 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some(limit) = change_max_active {
+            self.settings_message = Some(match self.profile.set_max_active_downloads(limit) {
+                Ok(()) => {
+                    if let Ok(engine) = &self.engine {
+                        engine.set_max_active_downloads(limit as usize);
+                    }
+                    let now = match limit {
+                        0 => "Every download runs at once, from now on.".to_string(),
+                        1 => "One download runs at a time, from now on.".to_string(),
+                        _ => format!("{limit} downloads run at the same time, from now on."),
+                    };
+                    (now, false)
+                }
+                Err(error) => {
+                    self.max_active_choice = self.profile.settings().max_active_downloads;
+                    (error.to_string(), true)
+                }
+            });
         }
         if let Some(allow) = change_http {
             self.settings_message = Some(match self.profile.set_allow_http_links(allow) {
@@ -492,7 +538,9 @@ impl eframe::App for BitDinghyApp {
                     .showing_files
                     .contains(&download.id)
                     .then(|| engine.files(download.id).map_err(|error| error.to_string()));
-                clicked = draw_download(ui, download, confirming, files).or(clicked.take());
+                let movable = downloads.len() > 1;
+                clicked =
+                    draw_download(ui, download, confirming, files, movable).or(clicked.take());
                 ui.separator();
             }
         });
@@ -538,6 +586,11 @@ enum Control {
     Resume(DownloadId),
     /// "Check files": check its files on disk again.
     Check(DownloadId),
+    /// Up or down the list (the queue order).
+    Move {
+        id: DownloadId,
+        to: Move,
+    },
     /// "Use the files already there" (after a refusal because a file with the same name exists).
     UseExistingFiles(DownloadId),
     /// "Files" was pressed: show or hide its file list.
@@ -718,9 +771,33 @@ fn draw_download(
     download: &DownloadSnapshot,
     confirming: bool,
     files: Option<Result<Vec<FileChoice>, String>>,
+    movable: bool,
 ) -> Option<Control> {
     let mut clicked = None;
     ui.horizontal(|ui| {
+        // Up and down the list: the queue starts downloads in this order.
+        if movable {
+            if ui
+                .small_button(UP)
+                .on_hover_text("Move up the list (downloads start in list order)")
+                .clicked()
+            {
+                clicked = Some(Control::Move {
+                    id: download.id,
+                    to: Move::Up,
+                });
+            }
+            if ui
+                .small_button(DOWN)
+                .on_hover_text("Move down the list")
+                .clicked()
+            {
+                clicked = Some(Control::Move {
+                    id: download.id,
+                    to: Move::Down,
+                });
+            }
+        }
         // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes
         // dark navy (for text on the green button), so the name vanished on the navy background.
         let name_color = brand::palette(ui.ctx().theme()).text;
@@ -799,6 +876,12 @@ fn draw_download(
     }
 
     match download.status {
+        DownloadStatus::Queued => {
+            ui.colored_label(
+                info_color(ui),
+                "Queued: it starts when another download finishes (Settings: downloads at the                  same time).",
+            );
+        }
         DownloadStatus::GettingInfo => {
             ui.horizontal(|ui| {
                 spinner(ui);
@@ -945,6 +1028,19 @@ mod tests {
             files_chosen: 0,
             note: None,
             can_use_existing_files: false,
+        }
+    }
+
+    #[test]
+    fn the_up_and_down_symbols_can_be_drawn() {
+        let ctx = egui::Context::default();
+        let mut first = ctx.run_ui(Default::default(), |_| {});
+        first.textures_delta.clear();
+        for symbol in [UP, DOWN] {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyphs(&egui::FontId::default(), symbol)),
+                "{symbol}"
+            );
         }
     }
 

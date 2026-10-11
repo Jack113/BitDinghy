@@ -19,6 +19,12 @@
 //! The engine still creates unticked files on disk, so BitDinghy marks them hidden once the engine
 //! has set a download up, and again after every change (see `owned_files.rs`).
 //!
+//! **The queue** (M8): at most `max_active_downloads` downloads run at once (0: no limit). The
+//! others wait, in list order, as "queued": not started yet (`EntryState::Waiting`), or paused in
+//! librqbit by the queue (`Entry::held`). Downloads that only share (finished), are paused by the
+//! person, or failed don't take a place. [`Shared::rebalance`] decides, after every change and once
+//! a second (so a download that finishes lets the next one start).
+//!
 //! **Checking files** (M7): librqbit has no "check again" call, but it checks every piece already
 //! on disk whenever a torrent is added. So [`Engine::check`] takes the download out of librqbit
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
@@ -26,7 +32,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -74,6 +80,8 @@ pub struct EngineConfig {
     pub restore_saved: bool,
     /// Also open plain `http://` links to `.torrent` files (the setting; https always works).
     pub allow_http_links: bool,
+    /// How many downloads run at once; the others wait in the queue. 0: no limit (M8).
+    pub max_active_downloads: usize,
 }
 
 impl EngineConfig {
@@ -87,6 +95,7 @@ impl EngineConfig {
             saved_list_file: None,
             restore_saved: true,
             allow_http_links: false,
+            max_active_downloads: crate::settings::DEFAULT_MAX_ACTIVE_DOWNLOADS as usize,
         }
     }
 }
@@ -103,6 +112,8 @@ pub enum DownloadStatus {
     Finished,
     Paused,
     Failed,
+    /// Waiting in the queue for another download to finish (M8).
+    Queued,
 }
 
 /// A picture of one download at one moment. The window and the command line redraw from these.
@@ -167,6 +178,16 @@ impl AddOptions {
     }
 }
 
+/// Where to move a download in the list (the queue order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Move {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
 enum EntryState {
     /// Asking other people for the file list, since this moment.
     GettingInfo(Instant),
@@ -174,6 +195,8 @@ enum EntryState {
     /// Paused before it really started (its file list isn't known yet): nothing is running for
     /// it, and nobody is contacted. Resuming starts it.
     Stopped,
+    /// Waiting in the queue to start (nothing runs for it yet).
+    Waiting,
     Failed(String),
 }
 
@@ -194,6 +217,8 @@ struct Entry {
     known_torrent: Option<Vec<u8>>,
     /// Set when the person removes it, so a start that is still on its way doesn't go ahead.
     removed: AtomicBool,
+    /// Paused in librqbit by the queue (not by the person): it carries on when its turn comes.
+    held: AtomicBool,
     /// Its checked file list (a `.torrent` file) and the folder its files are in, once known.
     /// This is what "remove and delete files" uses.
     files: Mutex<Option<(Vec<u8>, PathBuf)>>,
@@ -309,6 +334,15 @@ struct Shared {
     saved: Mutex<Option<SavedList>>,
     /// Messages for the person, such as "your download list was damaged".
     notices: Mutex<Vec<String>>,
+    /// Every download, in list (queue) order.
+    entries: Mutex<Vec<Arc<Entry>>>,
+    runtime: tokio::runtime::Handle,
+    /// How many downloads may run at once (0: no limit).
+    max_active: AtomicUsize,
+    /// Only one queue decision at a time.
+    rebalancing: Mutex<()>,
+    /// Set by `shutdown`: background work stops.
+    stopped: AtomicBool,
 }
 
 impl Shared {
@@ -327,6 +361,157 @@ impl Shared {
         }
     }
 
+    fn spawn_start(self: &Arc<Self>, entry: Arc<Entry>, source: Source) {
+        let shared = self.clone();
+        self.runtime.spawn(async move {
+            match start_download(&shared, &entry, source).await {
+                // Removed while it was starting: take it straight back out of the engine.
+                Ok(handle) if entry.removed.load(Ordering::SeqCst) => {
+                    let _ = shared.session.delete(handle.id().into(), false).await;
+                }
+                Ok(handle) => {
+                    *lock(&entry.state) = EntryState::Active(handle.clone());
+                    // A pause or resume may have arrived while the download was starting. Reading
+                    // the wish only AFTER publishing the handle means that either this line sees
+                    // it, or `pause`/`resume` sees the handle: one of the two always acts on it.
+                    let wants_pause = entry.wants_pause.load(Ordering::SeqCst)
+                        || entry.held.load(Ordering::SeqCst);
+                    if wants_pause && !handle.is_paused() {
+                        let _ = shared.session.pause(&handle).await;
+                    } else if !wants_pause && handle.is_paused() {
+                        let _ = shared.session.unpause(&handle).await;
+                    }
+                    // The engine creates the files while it sets the download up: hide the
+                    // leftovers of unticked files once it has. A "check files" reports here too.
+                    if handle.wait_until_initialized().await.is_ok()
+                        && !entry.removed.load(Ordering::SeqCst)
+                    {
+                        if entry.check_requested.swap(false, Ordering::SeqCst) {
+                            let check_only = entry.check_only.load(Ordering::SeqCst);
+                            *lock(&entry.note) = Some(check_note(&handle, check_only));
+                        }
+                        let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
+                    }
+                }
+                Err(error) => {
+                    entry.check_requested.store(false, Ordering::SeqCst);
+                    entry
+                        .name_clash
+                        .store(matches!(error, Error::NameClash(_)), Ordering::SeqCst);
+                    let mut state = lock(&entry.state);
+                    // Paused in the meantime: the person doesn't want it running anyway, so it
+                    // simply waits to be resumed (which tries again).
+                    *state = if entry.wants_pause.load(Ordering::SeqCst) {
+                        EntryState::Stopped
+                    } else {
+                        EntryState::Failed(error.to_string())
+                    };
+                }
+            }
+        });
+    }
+
+    /// Starts a download that isn't running (stopped or failed) again: from the saved file list
+    /// if there is one, else from the `.torrent` it was added from, else from its magnet link.
+    fn start_again(self: &Arc<Self>, entry: Arc<Entry>) {
+        entry.name_clash.store(false, Ordering::SeqCst);
+        let source = self
+            .with_list(|list| list.get(&entry.info_hash))
+            .flatten()
+            .and_then(Source::saved)
+            .unwrap_or_else(|| match &entry.known_torrent {
+                Some(bytes) => Source::Torrent {
+                    bytes: bytes.clone(),
+                    folder: None,
+                },
+                None => Source::Magnet(entry.magnet.clone()),
+            });
+        self.spawn_start(entry, source);
+    }
+
+    /// The queue (see the module notes): decides which downloads may run, in list order, and
+    /// starts, holds back or lets go of them.
+    fn rebalance(self: &Arc<Self>) {
+        let _one_at_a_time = lock(&self.rebalancing);
+        let limit = self.max_active.load(Ordering::SeqCst);
+        let entries = lock(&self.entries).clone();
+        // Places already taken by downloads that can't be held back: fetching a file list, or
+        // checking files.
+        let mut running = 0;
+        let mut wanting = Vec::new();
+        for entry in entries {
+            if entry.removed.load(Ordering::SeqCst) || entry.wants_pause.load(Ordering::SeqCst) {
+                entry.held.store(false, Ordering::SeqCst);
+                continue;
+            }
+            let handle = match &*lock(&entry.state) {
+                EntryState::GettingInfo(_) => {
+                    running += 1;
+                    continue;
+                }
+                EntryState::Waiting => None,
+                EntryState::Active(handle) => Some(handle.clone()),
+                EntryState::Stopped | EntryState::Failed(_) => continue,
+            };
+            if let Some(handle) = &handle {
+                let stats = handle.stats();
+                match stats.state {
+                    TorrentStatsState::Initializing { .. } => {
+                        running += 1;
+                        continue;
+                    }
+                    TorrentStatsState::Error => continue,
+                    // Only sharing: it takes no place, and (not paused by the person) it shares.
+                    _ if stats.finished => {
+                        entry.held.store(false, Ordering::SeqCst);
+                        if handle.is_paused() {
+                            self.unpause_later(handle.clone());
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            wanting.push((entry, handle));
+        }
+
+        for (entry, handle) in wanting {
+            if limit == 0 || running < limit {
+                running += 1;
+                entry.held.store(false, Ordering::SeqCst);
+                match handle {
+                    None => {
+                        let mut state = lock(&entry.state);
+                        if matches!(*state, EntryState::Waiting) {
+                            *state = EntryState::GettingInfo(Instant::now());
+                            drop(state);
+                            self.start_again(entry);
+                        }
+                    }
+                    Some(handle) if handle.is_paused() => self.unpause_later(handle),
+                    Some(_) => {}
+                }
+            } else {
+                entry.held.store(true, Ordering::SeqCst);
+                if let Some(handle) = handle
+                    && !handle.is_paused()
+                {
+                    let shared = self.clone();
+                    self.runtime.spawn(async move {
+                        let _ = shared.session.pause(&handle).await;
+                    });
+                }
+            }
+        }
+    }
+
+    fn unpause_later(self: &Arc<Self>, handle: Arc<ManagedTorrent>) {
+        let shared = self.clone();
+        self.runtime.spawn(async move {
+            let _ = shared.session.unpause(&handle).await;
+        });
+    }
+
     fn notice(&self, message: String) {
         let mut notices = lock(&self.notices);
         if !notices.contains(&message) {
@@ -340,9 +525,7 @@ pub struct Engine {
     shared: Arc<Shared>,
     /// The "allow plain http links" setting; the window changes it while running.
     allow_http_links: AtomicBool,
-    runtime: tokio::runtime::Handle,
     download_dir: PathBuf,
-    entries: Mutex<Vec<Arc<Entry>>>,
     next_id: AtomicU64,
 }
 
@@ -408,23 +591,77 @@ impl Engine {
             .await
             .map_err(|e| Error::EngineStart(format!("{e:#}")))?;
 
+        let shared = Arc::new(Shared {
+            session,
+            session_dir: download_dir.clone(),
+            saved: Mutex::new(saved),
+            notices: Mutex::new(notices),
+            entries: Mutex::new(Vec::new()),
+            runtime: tokio::runtime::Handle::current(),
+            max_active: AtomicUsize::new(config.max_active_downloads),
+            rebalancing: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+        });
+        // Once a second, let the queue move on (a download that finished frees its place).
+        let weak = Arc::downgrade(&shared);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                ticker.tick().await;
+                let Some(shared) = weak.upgrade() else {
+                    break;
+                };
+                if shared.stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                shared.rebalance();
+            }
+        });
         let engine = Engine {
             allow_http_links: AtomicBool::new(config.allow_http_links),
-            shared: Arc::new(Shared {
-                session,
-                session_dir: download_dir.clone(),
-                saved: Mutex::new(saved),
-                notices: Mutex::new(notices),
-            }),
-            runtime: tokio::runtime::Handle::current(),
+            shared,
             download_dir,
-            entries: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
         };
         if config.restore_saved {
             engine.restore_saved();
         }
         Ok(engine)
+    }
+
+    /// Changes how many downloads run at once (0: no limit). Applies straight away.
+    pub fn set_max_active_downloads(&self, limit: usize) {
+        self.shared.max_active.store(limit, Ordering::SeqCst);
+        self.shared.rebalance();
+    }
+
+    /// Moves a download in the list, which is also the queue's order, and remembers the order.
+    pub fn move_download(&self, id: DownloadId, to: Move) -> Result<()> {
+        let order = {
+            let mut entries = lock(&self.shared.entries);
+            let from = entries
+                .iter()
+                .position(|entry| entry.id == id)
+                .ok_or_else(|| {
+                    Error::Control("That download isn't in the list any more.".to_string())
+                })?;
+            let last = entries.len() - 1;
+            let place = match to {
+                Move::Up => from.saturating_sub(1),
+                Move::Down => (from + 1).min(last),
+                Move::Top => 0,
+                Move::Bottom => last,
+            };
+            let entry = entries.remove(from);
+            entries.insert(place, entry);
+            entries
+                .iter()
+                .map(|entry| entry.info_hash.clone())
+                .collect::<Vec<_>>()
+        };
+        self.shared.with_list(|list| list.set_order(&order));
+        self.shared.rebalance();
+        Ok(())
     }
 
     /// The folder new downloads are saved in (always an absolute path).
@@ -435,7 +672,7 @@ impl Engine {
     /// The download folder a particular download belongs to. A remembered download keeps the
     /// folder it was started in, even if the setting has changed since.
     pub fn download_dir_of(&self, id: DownloadId) -> Option<PathBuf> {
-        lock(&self.entries)
+        lock(&self.shared.entries)
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.download_dir.clone())
@@ -572,7 +809,7 @@ impl Engine {
         first_source: Source,
         options: AddOptions,
     ) -> Result<DownloadId> {
-        let mut entries = lock(&self.entries);
+        let mut entries = lock(&self.shared.entries);
         if let Some(existing) = entries.iter().find(|e| e.info_hash == info_hash).cloned() {
             drop(entries);
             // Adding the same torrent twice just shows the same download (asking to use the files
@@ -596,17 +833,16 @@ impl Engine {
             .as_ref()
             .map(|saved| saved.skipped_files.clone())
             .unwrap_or_default();
-        let (label, download_dir, source) = match remembered {
+        // Where it starts from is worked out when its turn in the queue comes (`start_again`): its
+        // saved file list, or `first_source` (a `.torrent` is kept as `known_torrent`).
+        let (label, download_dir) = match remembered {
             Some(saved) => {
                 // Asking for a download again means "carry on", even if it was paused.
                 if saved.paused {
                     self.shared
                         .with_list(|list| list.set_paused(info_hash, false));
                 }
-                let name = saved.name.clone();
-                let download_dir = saved.download_dir.clone();
-                let source = Source::saved(saved).unwrap_or(first_source);
-                (name, download_dir, source)
+                (saved.name.clone(), saved.download_dir.clone())
             }
             None => {
                 let label = name
@@ -620,7 +856,7 @@ impl Engine {
                         &self.download_dir,
                     ))
                 });
-                (label, self.download_dir.clone(), first_source)
+                (label, self.download_dir.clone())
             }
         };
 
@@ -635,24 +871,26 @@ impl Engine {
             skipped,
             use_existing: options.use_existing_files,
         });
+        *lock(&entry.state) = EntryState::Waiting;
         let id = entry.id;
-        entries.push(entry.clone());
+        entries.push(entry);
         drop(entries);
 
-        self.spawn_start(entry, source);
+        self.shared.rebalance();
         Ok(id)
     }
 
     /// A picture of every download right now. Cheap to call, so redraw from it a few times a
     /// second.
     pub fn snapshot(&self) -> Vec<DownloadSnapshot> {
-        let entries = lock(&self.entries).clone();
+        let entries = lock(&self.shared.entries).clone();
         entries.iter().map(|entry| snapshot_of(entry)).collect()
     }
 
     /// Stops sharing, closes connections and closes the saved list (so the next BitDinghy can open
     /// it). Files already on disk are left as they are, so the downloads continue next time.
     pub async fn shutdown(&self) {
+        self.shared.stopped.store(true, Ordering::SeqCst);
         self.shared.session.stop().await;
         lock(&self.shared.saved).take();
     }
@@ -689,15 +927,18 @@ impl Engine {
                 skipped,
                 use_existing: false,
             });
-            lock(&self.entries).push(entry.clone());
+            lock(&self.shared.entries).push(entry.clone());
             match source {
                 // Paused, and its file list was never fetched: contact nobody until resumed.
                 Source::Magnet(_) if paused => *lock(&entry.state) = EntryState::Stopped,
                 // A known file list is added paused: its files are checked so the progress shows,
-                // but nobody is contacted.
-                _ => self.spawn_start(entry, source),
+                // but nobody is contacted (and it takes no place in the queue).
+                _ if paused => self.shared.spawn_start(entry, source),
+                // The others start when the queue says so.
+                _ => *lock(&entry.state) = EntryState::Waiting,
             }
         }
+        self.shared.rebalance();
     }
 
     fn new_entry(&self, start: NewEntry) -> Arc<Entry> {
@@ -711,6 +952,7 @@ impl Engine {
             peers: start.peers,
             known_torrent: start.known_torrent,
             removed: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             files: Mutex::new(None),
             file_list: Mutex::new(None),
             skipped: Mutex::new(start.skipped),
@@ -722,55 +964,6 @@ impl Engine {
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
-    }
-
-    fn spawn_start(&self, entry: Arc<Entry>, source: Source) {
-        let shared = self.shared.clone();
-        self.runtime.spawn(async move {
-            match start_download(&shared, &entry, source).await {
-                // Removed while it was starting: take it straight back out of the engine.
-                Ok(handle) if entry.removed.load(Ordering::SeqCst) => {
-                    let _ = shared.session.delete(handle.id().into(), false).await;
-                }
-                Ok(handle) => {
-                    *lock(&entry.state) = EntryState::Active(handle.clone());
-                    // A pause or resume may have arrived while the download was starting. Reading
-                    // the wish only AFTER publishing the handle means that either this line sees
-                    // it, or `pause`/`resume` sees the handle: one of the two always acts on it.
-                    let wants_pause = entry.wants_pause.load(Ordering::SeqCst);
-                    if wants_pause && !handle.is_paused() {
-                        let _ = shared.session.pause(&handle).await;
-                    } else if !wants_pause && handle.is_paused() {
-                        let _ = shared.session.unpause(&handle).await;
-                    }
-                    // The engine creates the files while it sets the download up: hide the
-                    // leftovers of unticked files once it has. A "check files" reports here too.
-                    if handle.wait_until_initialized().await.is_ok()
-                        && !entry.removed.load(Ordering::SeqCst)
-                    {
-                        if entry.check_requested.swap(false, Ordering::SeqCst) {
-                            let check_only = entry.check_only.load(Ordering::SeqCst);
-                            *lock(&entry.note) = Some(check_note(&handle, check_only));
-                        }
-                        let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
-                    }
-                }
-                Err(error) => {
-                    entry.check_requested.store(false, Ordering::SeqCst);
-                    entry
-                        .name_clash
-                        .store(matches!(error, Error::NameClash(_)), Ordering::SeqCst);
-                    let mut state = lock(&entry.state);
-                    // Paused in the meantime: the person doesn't want it running anyway, so it
-                    // simply waits to be resumed (which tries again).
-                    *state = if entry.wants_pause.load(Ordering::SeqCst) {
-                        EntryState::Stopped
-                    } else {
-                        EntryState::Failed(error.to_string())
-                    };
-                }
-            }
-        });
     }
 
     /// Removes a download: it stops, leaves the window and the saved list, and is forgotten.
@@ -789,8 +982,10 @@ impl Engine {
             None
         };
         entry.removed.store(true, Ordering::SeqCst);
-        lock(&self.entries).retain(|other| other.id != id);
+        lock(&self.shared.entries).retain(|other| other.id != id);
         self.shared.with_list(|list| list.remove(&entry.info_hash));
+        // Its place in the queue is free for the next one.
+        self.shared.rebalance();
 
         // Stop it in the engine first: on Windows a file can't be deleted while it is open.
         let handle = match &*lock(&entry.state) {
@@ -881,7 +1076,7 @@ impl Engine {
             // Between finding its file list and starting, the choice could be missed: say so.
             EntryState::GettingInfo(_) => return Err(still_starting(&entry.label)),
             // Not running: the choice is used when it starts.
-            EntryState::Stopped | EntryState::Failed(_) => None,
+            EntryState::Stopped | EntryState::Failed(_) | EntryState::Waiting => None,
         };
         if let Some(handle) = handle {
             // The engine can't change the choice while it checks the files already on disk.
@@ -947,7 +1142,7 @@ impl Engine {
     }
 
     fn entry(&self, id: DownloadId) -> Result<Arc<Entry>> {
-        lock(&self.entries)
+        lock(&self.shared.entries)
             .iter()
             .find(|entry| entry.id == id)
             .cloned()
@@ -965,14 +1160,16 @@ impl Engine {
             let mut state = lock(&entry.state);
             match &*state {
                 EntryState::Active(handle) => Some(handle.clone()),
-                // Pausing a failed download means "leave it alone for now".
-                EntryState::Failed(_) => {
+                // Pausing a failed download means "leave it alone for now"; a queued one that
+                // never started just stays put.
+                EntryState::Failed(_) | EntryState::Waiting => {
                     *state = EntryState::Stopped;
                     None
                 }
                 EntryState::GettingInfo(_) | EntryState::Stopped => None,
             }
         };
+        entry.held.store(false, Ordering::SeqCst);
         if let Some(handle) = handle
             && !handle.is_paused()
             && let Err(error) = self.shared.session.pause(&handle).await
@@ -983,6 +1180,8 @@ impl Engine {
                 entry.label
             )));
         }
+        // Its place in the queue is free for the next one.
+        self.shared.rebalance();
         Ok(())
     }
 
@@ -994,54 +1193,17 @@ impl Engine {
         self.shared
             .with_list(|list| list.set_paused(&entry.info_hash, false));
 
-        // Decide what to do while holding the lock, then act after letting go of it.
-        let handle = {
+        // A download that isn't running joins the queue; the queue then starts it, or lets a
+        // paused one carry on, if there is a place for it (otherwise it shows as queued).
+        {
             let mut state = lock(&entry.state);
-            match &*state {
-                EntryState::Active(handle) => Some(handle.clone()),
-                // It starts unpaused as soon as its file list arrives.
-                EntryState::GettingInfo(_) => return Ok(()),
-                EntryState::Stopped | EntryState::Failed(_) => {
-                    *state = EntryState::GettingInfo(Instant::now());
-                    None
-                }
+            if matches!(*state, EntryState::Stopped | EntryState::Failed(_)) {
+                entry.name_clash.store(false, Ordering::SeqCst);
+                *state = EntryState::Waiting;
             }
-        };
-
-        match handle {
-            Some(handle) => {
-                if handle.is_paused()
-                    && let Err(error) = self.shared.session.unpause(&handle).await
-                    && handle.is_paused()
-                {
-                    return Err(Error::Control(format!(
-                        "Couldn't resume \"{}\": {error:#}",
-                        entry.label
-                    )));
-                }
-            }
-            None => self.start_again(entry),
         }
+        self.shared.rebalance();
         Ok(())
-    }
-
-    /// Starts a download that isn't running (stopped or failed) again: from the saved file list
-    /// if there is one, else from the `.torrent` it was added from, else from its magnet link.
-    fn start_again(&self, entry: Arc<Entry>) {
-        entry.name_clash.store(false, Ordering::SeqCst);
-        let source = self
-            .shared
-            .with_list(|list| list.get(&entry.info_hash))
-            .flatten()
-            .and_then(Source::saved)
-            .unwrap_or_else(|| match &entry.known_torrent {
-                Some(bytes) => Source::Torrent {
-                    bytes: bytes.clone(),
-                    folder: None,
-                },
-                None => Source::Magnet(entry.magnet.clone()),
-            });
-        self.spawn_start(entry, source);
     }
 
     /// For a download refused because a file with the same name was already there: use that file
@@ -1057,13 +1219,14 @@ impl Engine {
                     entry.label
                 )));
             }
-            *state = EntryState::GettingInfo(Instant::now());
+            *state = EntryState::Waiting;
         }
         entry.use_existing.store(true, Ordering::SeqCst);
+        entry.name_clash.store(false, Ordering::SeqCst);
         entry.wants_pause.store(false, Ordering::SeqCst);
         self.shared
             .with_list(|list| list.set_paused(&entry.info_hash, false));
-        self.start_again(entry);
+        self.shared.rebalance();
         Ok(())
     }
 
@@ -1091,7 +1254,7 @@ impl Engine {
                     Some(handle.clone())
                 }
                 EntryState::GettingInfo(_) => return Err(still_starting(&entry.label)),
-                EntryState::Stopped | EntryState::Failed(_) => None,
+                EntryState::Stopped | EntryState::Failed(_) | EntryState::Waiting => None,
             };
             *state = EntryState::GettingInfo(Instant::now());
             handle
@@ -1109,7 +1272,7 @@ impl Engine {
                 )));
             }
         }
-        self.spawn_start(
+        self.shared.spawn_start(
             entry,
             Source::Torrent {
                 bytes,
@@ -1152,8 +1315,8 @@ impl Engine {
         entry.check_requested.store(true, Ordering::SeqCst);
         entry.check_only.store(true, Ordering::SeqCst);
         let id = entry.id;
-        lock(&self.entries).push(entry.clone());
-        self.spawn_start(entry, source);
+        lock(&self.shared.entries).push(entry.clone());
+        self.shared.spawn_start(entry, source);
         Ok(id)
     }
 }
@@ -1428,6 +1591,9 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         EntryState::Stopped => {
             snapshot.status = DownloadStatus::Paused;
         }
+        EntryState::Waiting => {
+            snapshot.status = DownloadStatus::Queued;
+        }
         EntryState::Failed(message) => {
             snapshot.status = DownloadStatus::Failed;
             snapshot.error = Some(message.clone());
@@ -1454,6 +1620,13 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
                 TorrentStatsState::Initializing { .. } => DownloadStatus::Checking,
                 TorrentStatsState::Live if stats.finished => DownloadStatus::Finished,
                 TorrentStatsState::Live => DownloadStatus::Downloading,
+                // Paused by the queue, not by the person.
+                TorrentStatsState::Paused
+                    if entry.held.load(Ordering::SeqCst)
+                        && !entry.wants_pause.load(Ordering::SeqCst) =>
+                {
+                    DownloadStatus::Queued
+                }
                 TorrentStatsState::Paused => DownloadStatus::Paused,
                 TorrentStatsState::Error => DownloadStatus::Failed,
             };

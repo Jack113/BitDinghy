@@ -47,10 +47,24 @@ pub struct Settings {
     /// different torrent could be swapped in without anyone noticing.
     #[serde(skip_serializing_if = "is_false")]
     pub allow_http_links: bool,
+    /// How many downloads run at the same time; the others wait in the queue (added in M8). 0
+    /// means no limit. Downloads that are only sharing don't count.
+    #[serde(skip_serializing_if = "is_default_max_active")]
+    pub max_active_downloads: u32,
 }
+
+/// The standard number of downloads that run at the same time.
+pub const DEFAULT_MAX_ACTIVE_DOWNLOADS: u32 = 3;
+
+/// The highest number that can be chosen (0 means no limit at all).
+pub const MAX_ACTIVE_DOWNLOADS_LIMIT: u32 = 100;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_default_max_active(value: &u32) -> bool {
+    *value == DEFAULT_MAX_ACTIVE_DOWNLOADS
 }
 
 impl Default for Settings {
@@ -59,6 +73,7 @@ impl Default for Settings {
             version: CURRENT_VERSION,
             download_dir: None,
             allow_http_links: false,
+            max_active_downloads: DEFAULT_MAX_ACTIVE_DOWNLOADS,
         }
     }
 }
@@ -379,6 +394,25 @@ mod tests {
                 problem: None
             }
         );
+    }
+
+    #[test]
+    fn the_number_of_downloads_at_once_is_remembered_and_3_by_default() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        assert_eq!(store.load().settings.max_active_downloads, 3);
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(work.path().join(FILE_NAME)).unwrap();
+        assert!(
+            !text.contains("max_active_downloads"),
+            "the standard isn't written: {text}"
+        );
+        let settings = Settings {
+            max_active_downloads: 0,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        assert_eq!(store.load().settings.max_active_downloads, 0);
     }
 
     #[test]

@@ -26,7 +26,9 @@ pub mod torrent_file;
 pub mod web_link;
 
 pub use data_dir::{DataDir, DataKind};
-pub use engine::{AddOptions, DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
+pub use engine::{
+    AddOptions, DownloadId, DownloadSnapshot, DownloadStatus, Engine, EngineConfig, Move,
+};
 pub use error::{Error, Result};
 pub use file_choice::FileChoice;
 pub use profile::Profile;

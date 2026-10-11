@@ -35,8 +35,10 @@ project is built **one feature at a time**.
   written-address gaps are closed: IPv4-mapped IPv6, `localhost.`, dotless names, 100.64/10.) Closing it needs a custom DNS
   resolver in `reqwest` that refuses private addresses (`reqwest::dns::Resolve`). Do it with the
   tracker gap.
-- `dinghy settings set allow-http-links` while the window is open only reaches the window at its
-  next start (the window's own Settings checkbox applies at once). The channel could pass it on.
+- Done in M8: `dinghy settings set` reaches an open window straight away (allow-http-links and
+  max-active-downloads; the download folder still applies at the next start).
+- The window's Settings section shows its own copy of the settings: a change made with `dinghy`
+  while the window is open applies, but the window's boxes show the old value until it restarts.
 - Opening `.torrent` files / magnet links from Explorer or a browser is M16 (default app).
 - `dinghy get` following a download in the open window shows a paused download as
   `76.6% ... 0 B/s  ETA unknown  peers 0`, which looks stuck (found in the M5 guided test). Say

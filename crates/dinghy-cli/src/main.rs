@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
-    AddOptions, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, SavedDownload,
+    AddOptions, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, SavedDownload,
     SavedList, file_choice, owned_files, remote, torrent_file, web_link,
 };
 
@@ -39,6 +39,8 @@ enum Command {
     Files(FilesArgs),
     /// Check a download's files on disk again (with the window closed, nothing is downloaded)
     Check(NumberArg),
+    /// Move a download up or down the list, which is the order the queue starts them in
+    Move(MoveArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -47,6 +49,33 @@ enum Command {
 struct NumberArg {
     /// The download's number, as shown by `dinghy list`
     number: usize,
+}
+
+#[derive(Args)]
+struct MoveArgs {
+    /// The download's number, as shown by `dinghy list`
+    number: usize,
+    /// Where to: up, down, top or bottom
+    to: Direction,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Direction {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+impl Direction {
+    fn to_move(self) -> Move {
+        match self {
+            Direction::Up => Move::Up,
+            Direction::Down => Move::Down,
+            Direction::Top => Move::Top,
+            Direction::Bottom => Move::Bottom,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -97,6 +126,8 @@ enum SettingKey {
     DownloadDir,
     /// Also open plain http:// links to .torrent files: "on" or "off" (https always works)
     AllowHttpLinks,
+    /// How many downloads run at the same time (the others wait in the queue); 0 = no limit
+    MaxActiveDownloads,
 }
 
 #[derive(Args)]
@@ -141,7 +172,8 @@ async fn main() -> ExitCode {
         Some(Command::Remove(args)) => remove(args).await,
         Some(Command::Files(args)) => files(args).await,
         Some(Command::Check(which)) => check(which.number).await,
-        Some(Command::Settings(args)) => settings(args),
+        Some(Command::Move(args)) => move_download(args).await,
+        Some(Command::Settings(args)) => settings(args).await,
         None => {
             println!("{}", dinghy_core::about());
             println!("Try: dinghy get \"<magnet link>\"     (or dinghy --help)");
@@ -189,6 +221,13 @@ fn show_settings(profile: &Profile) {
             "off  (only secure https:// links)"
         }
     );
+    println!(
+        "max-active-downloads:  {}",
+        match profile.settings().max_active_downloads {
+            0 => "0  (no limit: every download runs at once)".to_string(),
+            limit => format!("{limit}  (the others wait in the queue)"),
+        }
+    );
 }
 
 /// "on"/"off" (and the usual other ways of saying yes or no).
@@ -200,8 +239,9 @@ fn on_or_off(value: &str) -> Option<bool> {
     }
 }
 
-/// `dinghy settings` and `dinghy settings set <key> <value>`.
-fn settings(args: SettingsArgs) -> ExitCode {
+/// `dinghy settings` and `dinghy settings set <key> <value>`. A change also reaches the open
+/// window straight away, if there is one.
+async fn settings(args: SettingsArgs) -> ExitCode {
     let mut profile = Profile::load();
     print_notices(&profile);
 
@@ -222,10 +262,36 @@ fn settings(args: SettingsArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        SettingKey::MaxActiveDownloads => match value.trim().parse::<u32>() {
+            Ok(limit) => profile.set_max_active_downloads(limit),
+            Err(_) => {
+                eprintln!("max-active-downloads is a number, such as 3 (0 means no limit).");
+                return ExitCode::FAILURE;
+            }
+        },
     };
     match result {
         Ok(()) => {
-            println!("Saved. It will be used from now on, in the window too.");
+            // The open window gets the change straight away (the download folder only applies
+            // at its next start, as before).
+            let live = match key {
+                SettingKey::DownloadDir => None,
+                SettingKey::AllowHttpLinks => Some(remote::Command::SetAllowHttpLinks {
+                    allow: profile.settings().allow_http_links,
+                }),
+                SettingKey::MaxActiveDownloads => Some(remote::Command::SetMaxActiveDownloads {
+                    limit: profile.settings().max_active_downloads as usize,
+                }),
+            };
+            let told_window = match (live, window_client(&profile).await) {
+                (Some(command), Ok(Some(mut window))) => window.ask(command).await.is_ok(),
+                _ => false,
+            };
+            if told_window {
+                println!("Saved. BitDinghy's open window uses it straight away.");
+            } else {
+                println!("Saved. It will be used from now on, in the window too.");
+            }
             show_settings(&profile);
             ExitCode::SUCCESS
         }
@@ -719,6 +785,70 @@ fn report_chosen(name: &str, choices: &[FileChoice]) {
         if choices.len() == 1 { "" } else { "s" },
         format_bytes(chosen.iter().map(|choice| choice.size).sum())
     );
+}
+
+/// `dinghy move <n> up|down|top|bottom`: changes the list's order, which is the order the queue
+/// starts downloads in. Through the open window, or with the window closed, in the saved list.
+async fn move_download(args: MoveArgs) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    let to = args.to.to_move();
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => {
+            return match window
+                .ask(remote::Command::Move {
+                    target: remote::Target::Number(args.number),
+                    to,
+                })
+                .await
+            {
+                Ok(remote::Reply::Changed { name }) => {
+                    println!("Moved: {name} (in BitDinghy's open window).");
+                    ExitCode::SUCCESS
+                }
+                other => explain_unexpected(other),
+            };
+        }
+        Ok(None) => {}
+    }
+    let (list, download) = match open_for_change(&profile, args.number, "move") {
+        Ok(found) => found,
+        Err(code) => return code,
+    };
+    let mut order: Vec<String> = match list.all() {
+        Ok(saved) => saved.into_iter().map(|d| d.info_hash).collect(),
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let from = args.number - 1;
+    let place = new_place(from, order.len(), to);
+    let moved = order.remove(from);
+    order.insert(place, moved);
+    if let Err(error) = list.set_order(&order) {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "Moved: {} is now number {} of {}.",
+        download.name,
+        place + 1,
+        order.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Where a download at `from` (counting from 0) ends up in a list of `count`.
+fn new_place(from: usize, count: usize, to: Move) -> usize {
+    let last = count.saturating_sub(1);
+    match to {
+        Move::Up => from.saturating_sub(1),
+        Move::Down => (from + 1).min(last),
+        Move::Top => 0,
+        Move::Bottom => last,
+    }
 }
 
 /// A problem reported by the window (or an answer that doesn't fit the question).
@@ -1234,6 +1364,7 @@ fn live_state(download: &DownloadSnapshot) -> String {
             format_speed(download.download_bytes_per_second),
             format_eta(download.eta)
         ),
+        DownloadStatus::Queued => "queued: starts when another download finishes".to_string(),
         DownloadStatus::Paused if download.total_bytes == 0 => "paused".to_string(),
         DownloadStatus::Paused => format!("paused at {percent:.1}%"),
         DownloadStatus::Finished => format!(
@@ -1268,6 +1399,10 @@ fn progress_line(s: &DownloadSnapshot) -> String {
                 fraction(s.progress_bytes, s.total_bytes) * 100.0
             )
         }
+        DownloadStatus::Queued => format!(
+            "{}: waiting in the queue (it starts when another download finishes)...",
+            shorten(&s.name, 40)
+        ),
         _ => format!(
             "{}  {:5.1}%  {} / {}  {}  ETA {}  peers {}",
             shorten(&s.name, 28),
@@ -1428,6 +1563,23 @@ mod tests {
         assert_eq!(example_pick(3), "1,3");
         assert_eq!(example_pick(4), "1,3-4");
         assert_eq!(example_pick(400), "1,3-5");
+    }
+
+    #[test]
+    fn moving_lands_in_the_right_place() {
+        assert_eq!(new_place(2, 5, Move::Up), 1);
+        assert_eq!(new_place(0, 5, Move::Up), 0, "already at the top");
+        assert_eq!(new_place(2, 5, Move::Down), 3);
+        assert_eq!(new_place(4, 5, Move::Down), 4, "already at the bottom");
+        assert_eq!(new_place(3, 5, Move::Top), 0);
+        assert_eq!(new_place(1, 5, Move::Bottom), 4);
+    }
+
+    #[test]
+    fn a_queued_download_says_so() {
+        let line = progress_line(&snapshot(DownloadStatus::Queued));
+        assert!(line.contains("waiting in the queue"), "{line}");
+        assert!(live_state(&snapshot(DownloadStatus::Queued)).starts_with("queued"));
     }
 
     #[test]

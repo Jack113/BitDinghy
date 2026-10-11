@@ -10,6 +10,14 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **A queue.** Only so many downloads run at the same time (3 unless you change it in Settings,
+  or with `dinghy settings set max-active-downloads <n>`; 0 means no limit). The others show
+  **Queued** and start, in list order, when a place frees up. Finished downloads that are only
+  sharing don't count. Move downloads with the new up and down buttons, or `dinghy move <n>
+  up|down|top|bottom`. The order is remembered: the saved download list moves to **version 3**,
+  and older lists are upgraded the first time BitDinghy opens them.
+- A setting changed with `dinghy settings set` while the window is open now applies in the
+  window straight away.
 - **Check files.** A **Check files** button on each download (and `dinghy check <n>`) reads its
   files on disk again and compares them with the torrent. It says whether everything is complete
   and correct, or how much was missing or damaged; that part is downloaded again. With the window

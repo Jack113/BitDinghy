@@ -1509,3 +1509,194 @@ async fn a_link_in_the_download_folder_is_never_written_through() {
     );
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The queue (M8).
+// ---------------------------------------------------------------------------------------------
+
+/// Writes a small `.torrent` file that nobody shares (its pieces are made up), so a download of it
+/// starts, creates its files, and then simply waits at 0%. `name` makes each one different.
+fn unshared_torrent(dir: &Path, name: &str) -> PathBuf {
+    // One file, named after the torrent (librqbit saves a one-file torrent straight into the
+    // download folder, so each needs its own file name).
+    let file = format!("{name}.bin");
+    let bytes = format!(
+        "d4:infod5:filesld6:lengthi5e4:pathl{}:{file}eee4:name{}:{name}12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee",
+        file.len(),
+        name.len()
+    );
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(format!("{name}.torrent"));
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// The statuses of all downloads, in list order, by name.
+fn statuses(engine: &Engine) -> Vec<(String, DownloadStatus)> {
+    engine
+        .snapshot()
+        .into_iter()
+        .map(|s| (s.name, s.status))
+        .collect()
+}
+
+async fn wait_for_statuses(engine: &Engine, wanted: &[(&str, DownloadStatus)]) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let now = statuses(engine);
+        let matches = now.len() == wanted.len()
+            && now
+                .iter()
+                .zip(wanted)
+                .all(|((name, status), (want_name, want_status))| {
+                    name == want_name && status == want_status
+                });
+        if matches {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out; wanted {wanted:?}, have {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_queue_runs_only_so_many_downloads_in_list_order() {
+    use DownloadStatus::{Downloading, Paused, Queued};
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let torrents = work.path().join("torrents");
+
+    let mut config = offline_config(&download_dir);
+    config.saved_list_file = Some(list.clone());
+    config.max_active_downloads = 1;
+    let engine = Engine::start(config.clone()).await.unwrap();
+    let first = engine
+        .add(
+            &unshared_torrent(&torrents, "first").display().to_string(),
+            vec![],
+        )
+        .unwrap();
+    let second = engine
+        .add(
+            &unshared_torrent(&torrents, "second").display().to_string(),
+            vec![],
+        )
+        .unwrap();
+    // One at a time: the second waits.
+    wait_for_statuses(&engine, &[("first", Downloading), ("second", Queued)]).await;
+
+    // Moving the second to the top swaps them.
+    engine
+        .move_download(second, dinghy_core::engine::Move::Top)
+        .unwrap();
+    wait_for_statuses(&engine, &[("second", Downloading), ("first", Queued)]).await;
+
+    // Pausing the running one lets the next one run.
+    engine.pause(second).await.unwrap();
+    wait_for_statuses(&engine, &[("second", Paused), ("first", Downloading)]).await;
+    // Resumed, it is first in the list again, so it takes the place back.
+    engine.resume(second).await.unwrap();
+    wait_for_statuses(&engine, &[("second", Downloading), ("first", Queued)]).await;
+
+    // Two at a time: both run.
+    engine.set_max_active_downloads(2);
+    wait_for_statuses(&engine, &[("second", Downloading), ("first", Downloading)]).await;
+    engine.set_max_active_downloads(1);
+    wait_for_statuses(&engine, &[("second", Downloading), ("first", Queued)]).await;
+
+    // Removing the running one lets the next one run.
+    engine.remove(second, true).await.unwrap();
+    wait_for_statuses(&engine, &[("first", Downloading)]).await;
+    let _ = first;
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_order_of_the_list_is_kept_after_a_restart() {
+    use DownloadStatus::{Downloading, Queued};
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let torrents = work.path().join("torrents");
+    let mut config = offline_config(&download_dir);
+    config.saved_list_file = Some(list.clone());
+    config.max_active_downloads = 1;
+
+    let first_run = Engine::start(config.clone()).await.unwrap();
+    for name in ["one", "two", "three"] {
+        first_run
+            .add(
+                &unshared_torrent(&torrents, name).display().to_string(),
+                vec![],
+            )
+            .unwrap();
+    }
+    let three = first_run.snapshot()[2].id;
+    first_run
+        .move_download(three, dinghy_core::engine::Move::Top)
+        .unwrap();
+    let one = first_run.snapshot()[1].id;
+    first_run
+        .move_download(one, dinghy_core::engine::Move::Bottom)
+        .unwrap();
+    wait_for_statuses(
+        &first_run,
+        &[("three", Downloading), ("two", Queued), ("one", Queued)],
+    )
+    .await;
+    first_run.shutdown().await;
+    drop(first_run);
+
+    let second_run = Engine::start(config).await.unwrap();
+    wait_for_statuses(
+        &second_run,
+        &[("three", Downloading), ("two", Queued), ("one", Queued)],
+    )
+    .await;
+    let saved: Vec<String> = dinghy_core::SavedList::read(&list)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(saved, ["three", "two", "one"]);
+    second_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_finished_download_frees_its_place_in_the_queue() {
+    use DownloadStatus::{Downloading, Finished, Queued};
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let mut config = offline_config(&download_dir);
+    config.max_active_downloads = 1;
+    let engine = Engine::start(config).await.unwrap();
+    // A download nobody shares takes the only place first...
+    let waiting = engine
+        .add(
+            &unshared_torrent(&work.path().join("torrents"), "stuck")
+                .display()
+                .to_string(),
+            vec![],
+        )
+        .unwrap();
+    engine
+        .add_magnet(
+            &format!("{}&dn=testdata", seeder.magnet()),
+            vec![seeder.address],
+        )
+        .unwrap();
+    wait_for_statuses(&engine, &[("stuck", Downloading), ("testdata", Queued)]).await;
+    // ...so moving the shared one up lets it run and finish; finished, it takes no place.
+    let shared_one = engine.snapshot()[1].id;
+    engine
+        .move_download(shared_one, dinghy_core::engine::Move::Up)
+        .unwrap();
+    wait_for_statuses(&engine, &[("testdata", Finished), ("stuck", Downloading)]).await;
+    let _ = waiting;
+    engine.shutdown().await;
+}

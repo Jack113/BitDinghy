@@ -8,7 +8,9 @@ use crate::data_dir::DataDir;
 use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
 use crate::saved_list;
-use crate::settings::{Loaded, Settings, SettingsStore, validate_download_dir};
+use crate::settings::{
+    Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, Settings, SettingsStore, validate_download_dir,
+};
 
 /// The name of the file where the DHT keeps its saved contacts, inside the data folder.
 pub const DHT_STATE_FILE: &str = "dht.json";
@@ -82,6 +84,7 @@ impl Profile {
             .map(|data_dir| data_dir.file(DHT_STATE_FILE));
         config.saved_list_file = self.saved_list_path();
         config.allow_http_links = self.settings.allow_http_links;
+        config.max_active_downloads = self.settings.max_active_downloads as usize;
         config
     }
 
@@ -107,6 +110,16 @@ impl Profile {
         self.change(|settings| settings.allow_http_links = allow)
     }
 
+    /// Remembers how many downloads run at the same time (0: no limit).
+    pub fn set_max_active_downloads(&mut self, limit: u32) -> Result<()> {
+        if limit > MAX_ACTIVE_DOWNLOADS_LIMIT {
+            return Err(Error::Settings(format!(
+                "At most {MAX_ACTIVE_DOWNLOADS_LIMIT} downloads can run at the same time (0 means                  no limit)."
+            )));
+        }
+        self.change(|settings| settings.max_active_downloads = limit)
+    }
+
     /// Changes the settings and saves them; the change is only kept if it was saved.
     fn change(&mut self, edit: impl FnOnce(&mut Settings)) -> Result<()> {
         let Some(store) = &self.store else {
@@ -115,7 +128,13 @@ impl Profile {
                     .to_string(),
             ));
         };
-        let mut updated = self.settings.clone();
+        // Start from the file as it is NOW: the window and `dinghy` both change settings, and one
+        // must not undo the other's change with an old copy.
+        let fresh = store.load();
+        let mut updated = match fresh.problem {
+            None => fresh.settings,
+            Some(_) => self.settings.clone(),
+        };
         edit(&mut updated);
         store.save(&updated)?;
         self.settings = updated;
@@ -156,6 +175,31 @@ mod tests {
             Some(chosen.as_path())
         );
         assert_eq!(second_run.engine_config().download_dir, chosen);
+    }
+
+    #[test]
+    fn two_programs_changing_settings_keep_each_others_changes() {
+        let work = tempfile::tempdir().unwrap();
+        let mut window = profile_in(work.path());
+        let mut command_line = profile_in(work.path());
+        command_line.set_allow_http_links(true).unwrap();
+        // The window still has its old copy in memory; its change must not undo the other one.
+        window.set_max_active_downloads(7).unwrap();
+        let later = profile_in(work.path());
+        assert!(later.settings().allow_http_links);
+        assert_eq!(later.settings().max_active_downloads, 7);
+    }
+
+    #[test]
+    fn the_number_of_downloads_at_once_reaches_the_engine() {
+        let work = tempfile::tempdir().unwrap();
+        let mut first_run = profile_in(work.path());
+        assert_eq!(first_run.engine_config().max_active_downloads, 3);
+        first_run.set_max_active_downloads(5).unwrap();
+        let error = first_run.set_max_active_downloads(101).unwrap_err();
+        assert!(error.to_string().contains("At most 100"), "{error}");
+        let second_run = profile_in(work.path());
+        assert_eq!(second_run.engine_config().max_active_downloads, 5);
     }
 
     #[test]

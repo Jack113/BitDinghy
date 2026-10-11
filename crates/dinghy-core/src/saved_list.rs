@@ -30,7 +30,7 @@ use crate::file_choice;
 pub const FILE_NAME: &str = "downloads.db";
 
 /// The list format this version of BitDinghy writes.
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 /// Marks the file as BitDinghy's (the letters "BDdy"), so another program's SQLite file is never
 /// mistaken for our list.
@@ -55,7 +55,7 @@ CREATE TABLE downloads (
 /// `tests/fixtures/` (like `downloads-v1.sql` and `downloads-v2.sql`) with a test that loads it.
 /// **Never change a step that has shipped**: lists out there have already been upgraded by it.
 type Migration = fn(&rusqlite::Transaction) -> rusqlite::Result<()>;
-const MIGRATIONS: &[Migration] = &[v1_to_v2];
+const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3];
 
 /// Version 2 (M6, choosing files): remembers the files the person unticked, as the torrent's file
 /// indexes ("2,5"). Empty means every file, which is what every download from version 1 wants.
@@ -63,6 +63,23 @@ fn v1_to_v2(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
     transaction
         .execute_batch("ALTER TABLE downloads ADD COLUMN skipped_files TEXT NOT NULL DEFAULT ''")
 }
+
+/// Version 3 (M8, the queue): each download's place in the list (`position`; smaller comes first).
+/// Existing downloads keep the order they had (oldest first).
+fn v2_to_v3(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE downloads ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+         UPDATE downloads SET position = (
+             SELECT COUNT(*) FROM downloads AS earlier
+             WHERE earlier.added_at < downloads.added_at
+                OR (earlier.added_at = downloads.added_at AND earlier.rowid < downloads.rowid)
+         );",
+    )
+}
+
+/// The order of the list since version 3, and before it.
+const ORDER: &str = "position, added_at, rowid";
+const ORDER_BEFORE_V3: &str = "added_at, rowid";
 
 /// The columns, in the order [`row_to_download`] reads them.
 const COLUMNS: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
@@ -276,7 +293,8 @@ impl SavedList {
             // opens it for changes does).
             Ok(Some(version)) => {
                 let columns = if version == 1 { COLUMNS_V1 } else { COLUMNS };
-                rows_with(&connection, columns).map_err(|e| problem(e.to_string()))
+                let order = if version < 3 { ORDER_BEFORE_V3 } else { ORDER };
+                rows_with(&connection, columns, order).map_err(|e| problem(e.to_string()))
             }
             Ok(None) => Ok(Vec::new()), // An empty file: nothing saved yet.
             Err(Failure::Newer(found)) => {
@@ -327,9 +345,11 @@ impl SavedList {
         };
         let added = connection
             .execute(
+                // A new download goes to the end of the list.
                 &format!(
-                    "INSERT OR IGNORE INTO downloads ({COLUMNS}) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                    "INSERT OR IGNORE INTO downloads ({COLUMNS}, position) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+                     (SELECT COALESCE(MAX(position), 0) + 1 FROM downloads))"
                 ),
                 params![
                     download.info_hash,
@@ -400,6 +420,31 @@ impl SavedList {
             )
             .map_err(|e| self.error("save", e))?;
         Ok(changed == 1)
+    }
+
+    /// Remembers the order of the list (the queue): `info_hashes` from first to last. Downloads not
+    /// named keep their place after these.
+    pub fn set_order(&self, info_hashes: &[String]) -> Result<()> {
+        let Some(connection) = &self.connection else {
+            return Ok(());
+        };
+        let save = || -> rusqlite::Result<()> {
+            // All or nothing: a crash halfway leaves the old order.
+            let transaction = connection.unchecked_transaction()?;
+            let count = i64::try_from(info_hashes.len()).unwrap_or(i64::MAX);
+            transaction.execute(
+                "UPDATE downloads SET position = position + ?1",
+                params![count],
+            )?;
+            for (place, info_hash) in info_hashes.iter().enumerate() {
+                transaction.execute(
+                    "UPDATE downloads SET position = ?2 WHERE info_hash = ?1",
+                    params![info_hash, i64::try_from(place).unwrap_or(i64::MAX)],
+                )?;
+            }
+            transaction.commit()
+        };
+        save().map_err(|e| self.error("save", e))
     }
 
     /// Forgets a download. Returns whether it was in the list. (Its files are not touched here.)
@@ -556,14 +601,17 @@ fn set_aside(path: &Path) -> Option<PathBuf> {
 }
 
 fn all_rows(connection: &Connection) -> rusqlite::Result<Vec<SavedDownload>> {
-    rows_with(connection, COLUMNS)
+    rows_with(connection, COLUMNS, ORDER)
 }
 
-/// Every row, oldest first, read through `columns` (which must match [`row_to_download`]).
-fn rows_with(connection: &Connection, columns: &str) -> rusqlite::Result<Vec<SavedDownload>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {columns} FROM downloads ORDER BY added_at, rowid"
-    ))?;
+/// Every row in list order, read through `columns` (which must match [`row_to_download`]).
+fn rows_with(
+    connection: &Connection,
+    columns: &str,
+    order: &str,
+) -> rusqlite::Result<Vec<SavedDownload>> {
+    let mut statement =
+        connection.prepare(&format!("SELECT {columns} FROM downloads ORDER BY {order}"))?;
     let rows = statement.query_map([], row_to_download)?;
     rows.collect()
 }
@@ -947,8 +995,81 @@ mod tests {
     }
 
     #[test]
+    fn the_version_2_fixture_keeps_its_order_when_upgraded() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v2.sql"))
+            .unwrap();
+        let list = open(&path).list;
+        let names: Vec<String> = list.all().unwrap().into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["Some Linux", "testdata"], "oldest first, as before");
+        // A new one goes to the end.
+        list.add(&sample(HASH)).unwrap();
+        assert_eq!(list.all().unwrap()[2].info_hash, HASH);
+    }
+
+    #[test]
+    fn the_version_3_fixture_still_loads() {
+        // This fixture was written with list version 3 and must load in EVERY later version.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v3.sql"))
+            .unwrap();
+        let read: Vec<String> = SavedList::read(&path)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(read, ["testdata", "Some Linux"], "list order, not age");
+
+        let opened = open(&path);
+        assert!(opened.problem.is_none(), "{:?}", opened.problem);
+        let saved = opened.list.all().unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].name, "testdata");
+        assert_eq!(saved[0].skipped_files, BTreeSet::from([1, 3]));
+        assert!(saved[0].paused);
+        assert_eq!(saved[1].name, "Some Linux");
+        assert_eq!(saved[1].torrent, None);
+    }
+
+    #[test]
+    fn the_order_of_the_list_is_remembered() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        let third = "fedcba9876543210fedcba9876543210fedcba98";
+        {
+            let list = open(&path).list;
+            for hash in [HASH, OTHER_HASH, third] {
+                list.add(&sample(hash)).unwrap();
+            }
+            // Move the last one to the top; the other two keep their order.
+            list.set_order(&[third.to_string(), HASH.to_string(), OTHER_HASH.to_string()])
+                .unwrap();
+        }
+        let order: Vec<String> = open(&path)
+            .list
+            .all()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.info_hash)
+            .collect();
+        assert_eq!(order, [third, HASH, OTHER_HASH]);
+        let read: Vec<String> = SavedList::read(&path)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.info_hash)
+            .collect();
+        assert_eq!(read, [third, HASH, OTHER_HASH]);
+    }
+
+    #[test]
     fn upgrades_run_in_order_and_are_remembered() {
-        // A pretend version 3 that adds a column, to prove the upgrade machinery keeps working
+        // A pretend next version that adds a column, to prove the upgrade machinery keeps working
         // for the next real upgrade.
         fn add_rating(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
             transaction.execute_batch("ALTER TABLE downloads ADD COLUMN rating INTEGER")
@@ -960,7 +1081,7 @@ mod tests {
             .execute_batch(include_str!("../tests/fixtures/downloads-v1.sql"))
             .unwrap();
 
-        let upgraded = SavedList::open_with(&path, &[v1_to_v2, add_rating]).unwrap();
+        let upgraded = SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, add_rating]).unwrap();
         assert!(upgraded.problem.is_none());
         assert_eq!(upgraded.list.all().unwrap().len(), 2);
         drop(upgraded);
@@ -968,10 +1089,10 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3, "both steps ran, from version 1");
+        assert_eq!(version, 4, "every step ran, from version 1");
         connection
-            .prepare("SELECT skipped_files, rating FROM downloads")
-            .expect("both new columns exist");
+            .prepare("SELECT skipped_files, position, rating FROM downloads")
+            .expect("the new columns exist");
     }
 
     #[test]

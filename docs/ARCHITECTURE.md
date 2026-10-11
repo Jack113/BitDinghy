@@ -316,6 +316,25 @@ finishes, and the torrent is taken straight back out.
   would write outside the download folder. Cloud placeholders (OneDrive) are not links. The
   download folder itself may be a link: it is the person's own choice.
 
+## The queue (M8)
+
+- At most **"downloads at the same time"** downloads run at once (setting `max_active_downloads`,
+  standard 3, 0 = no limit). The others wait as **Queued**, in list order. Finished downloads that
+  are only sharing, downloads the person paused, and failed ones take no place.
+- The engine's list order IS the queue order. **Up/Down** in the window and `dinghy move <n>
+  up|down|top|bottom` change it; it is saved (saved list **version 3** adds a `position` column;
+  older lists keep their oldest-first order when upgraded).
+- `Shared::rebalance` decides, after every change (add, remove, pause, resume, move, a new limit)
+  and once a second (so a finished download lets the next one start). A queued download either
+  hasn't started at all (`EntryState::Waiting`: nobody is contacted) or is paused inside librqbit
+  by the queue (`Entry::held`, shown as Queued, not Paused). Downloads that are fetching their file
+  list or checking files can't be held back, so they keep their place.
+- To make this possible the download list moved into `Shared` (with the runtime handle), so the
+  once-a-second task can reach it; `spawn_start`, `start_again` and `rebalance` live there.
+- Settings changed with `dinghy settings set` reach an open window straight away (new channel
+  requests `SetMaxActiveDownloads`, `SetAllowHttpLinks`), and saving a setting starts from the
+  file as it is now, so the window and `dinghy` can't undo each other's changes.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -326,5 +345,6 @@ finishes, and the torrent is taken straight back out.
 | M5 | .torrent files and web links to them |
 | M6 | Choosing files |
 | M7 | Checking files, using files already there |
-| M8-M10 | Queue and limits |
+| M8 | The queue |
+| M9-M10 | Limits |
 | M14 | History and charts |
