@@ -3,6 +3,23 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M17: encryption (a note, until the engine supports it)
+
+Data-free.
+
+**Test 1: the note**
+- Do: `.\dinghy.exe settings`, then open the window's **Settings**.
+- You should see: in `dinghy settings`, "encryption:  not available yet" and the note "Connections
+  to other people aren't encrypted yet: the engine BitDinghy is built on doesn't support it. Your
+  internet provider can see BitTorrent traffic, including which torrents. Encryption comes when
+  the engine supports it."; in the window the same note, small, under the Connections settings.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The note | |
+
 ## M16: opening magnet links and .torrent files from other programs
 
 Data-free. This changes your Windows settings for `.torrent` and magnet links (only for your

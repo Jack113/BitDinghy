@@ -847,6 +847,7 @@ impl BitDinghyApp {
                     change_connections = Some(self.connections_choice);
                 }
                 ui.small(listening_text(listening_now.flatten()));
+                ui.small(dinghy_core::ENCRYPTION_NOTE);
                 ui.small(
                     "The first time BitDinghy accepts connections, Windows Firewall may ask \
                      whether to allow it. At home, allowing it on private networks is enough.",

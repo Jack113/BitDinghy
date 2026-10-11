@@ -41,6 +41,10 @@ pub use profile::Profile;
 pub use saved_list::{DayTotal, HistoryEntry, SavedDownload, SavedList, Sharing};
 pub use settings::Settings;
 
+/// What BitDinghy says about encryption (M17). librqbit has no BitTorrent encryption yet (its
+/// pull request ikatson/rqbit#633 isn't merged), so connections are plain, and the person is told.
+pub const ENCRYPTION_NOTE: &str = "Connections to other people aren't encrypted yet: the engine BitDinghy is built on doesn't support it. Your internet provider can see BitTorrent traffic, including which torrents. Encryption comes when the engine supports it.";
+
 /// The program's display name.
 pub const APP_NAME: &str = "BitDinghy";
 

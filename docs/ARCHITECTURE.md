@@ -472,6 +472,13 @@ finishes, and the torrent is taken straight back out.
 - `dinghy default-app on|off|status` does the same from the command line (it registers the
   BitDinghy.exe next to dinghy.exe).
 
+## Encryption (M17): not yet
+
+librqbit has no BitTorrent encryption (Message Stream Encryption) yet: its pull request
+ikatson/rqbit#633 was still open on 2026-10-11, and 9.0.1 is the newest release. So M17 only adds
+an honest note (`dinghy_core::ENCRYPTION_NOTE`) in the window's Settings and in `dinghy settings`.
+`TODO.md` says what to do once upstream has it.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -491,3 +498,4 @@ finishes, and the torrent is taken straight back out.
 | M14 | History and charts |
 | M15 | Recommended settings |
 | M16 | Opening links and files from other programs |
+| M17 | Encryption: an honest note until librqbit has it |

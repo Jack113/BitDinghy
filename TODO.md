@@ -99,6 +99,13 @@ project is built **one feature at a time**.
 - "Check for updates" button that looks at the website.
 - "Only download while my VPN is connected".
 
+## Encryption (M17, waiting for upstream)
+- librqbit 9.0.1 (the newest, checked 2026-10-11) has no Message Stream Encryption; the pull
+  request ikatson/rqbit#633 is still open (last updated 2026-09-18). Settings and `dinghy settings`
+  say connections aren't encrypted. When it is merged and released: upgrade librqbit (a
+  deliberate step: re-run every test and the security review), add an "Encryption: prefer /
+  require / off" setting, and update the note and the website.
+
 ## Features noted during planning
 - Let the window attach to an engine already running in the command line (v1 just says so).
 - Done in M12: the FAT32 4 GB limit is checked before a download starts.

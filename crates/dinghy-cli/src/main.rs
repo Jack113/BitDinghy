@@ -342,6 +342,8 @@ fn show_settings(profile: &Profile) {
             "off  (the router is left alone)"
         }
     );
+    println!("encryption:  not available yet");
+    println!("  {}", dinghy_core::ENCRYPTION_NOTE);
     println!(
         "max-active-downloads:  {}",
         match profile.settings().max_active_downloads {

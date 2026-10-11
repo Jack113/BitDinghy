@@ -10,6 +10,8 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- Settings and `dinghy settings` say plainly that connections aren't encrypted yet (the engine
+  BitDinghy is built on doesn't support BitTorrent encryption; it comes when the engine does).
 - **Open magnet links and .torrent files with BitDinghy.** Settings has **Make BitDinghy the
   default...**: it registers BitDinghy (for your Windows user only) and opens Windows' Default
   apps, where you choose it (Windows doesn't let programs choose themselves). **Undo** removes the
