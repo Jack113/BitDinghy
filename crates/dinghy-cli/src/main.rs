@@ -1113,15 +1113,32 @@ async fn get(mut args: GetArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut clean_link = None;
     if let Input::TorrentFile(path) = &input {
-        if let Err(error) = torrent_file::read(path) {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
+        match torrent_file::read(path) {
+            Ok(torrent) => clean_link = Some(torrent.magnet),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
         }
         // The window (or the engine) may run in another folder: give it the full path.
         if let Ok(full) = std::path::absolute(path) {
             args.link = full.display().to_string();
         }
+    }
+    if let Input::Magnet(parsed) = &input {
+        clean_link = Some(parsed.clean_link.clone());
+    }
+    // Without the DHT, only the link's trackers or --peer can find anyone. Say so now instead of
+    // waiting forever. (A web link's trackers aren't known before it is fetched.)
+    if args.no_dht && args.peers.is_empty() && clean_link.is_some_and(|link| !link.contains("tr="))
+    {
+        eprintln!(
+            "With --no-dht, BitDinghy can only find people through trackers in the link or with \
+             --peer, and this link has no trackers. Leave out --no-dht (or add --peer IP:PORT)."
+        );
+        return ExitCode::FAILURE;
     }
 
     let profile = Profile::load();
@@ -1227,6 +1244,14 @@ fn show_progress(
     snapshot: &DownloadSnapshot,
     folder: &Path,
 ) -> Option<ExitCode> {
+    // A warning (such as "the drive may be too full") is said once, above the progress line.
+    if let Some(warning) = &snapshot.warning
+        && printer.warned.as_ref() != Some(warning)
+    {
+        printer.finish();
+        eprintln!("Note: {warning}");
+        printer.warned = Some(warning.clone());
+    }
     printer.show(snapshot);
     match snapshot.status {
         DownloadStatus::Finished => {
@@ -1546,6 +1571,9 @@ async fn list_from_window(window: &mut remote::Client) -> ExitCode {
         if let Some(folder) = &download.save_folder {
             println!("     {}", folder.display());
         }
+        if let Some(warning) = &download.warning {
+            println!("     Note: {warning}");
+        }
     }
     ExitCode::SUCCESS
 }
@@ -1603,6 +1631,13 @@ fn progress_line(s: &DownloadSnapshot) -> String {
                 fraction(s.progress_bytes, s.total_bytes) * 100.0
             )
         }
+        DownloadStatus::Paused => format!(
+            "{}: paused at {:.1}% ({} of {}). Resume it in the window or with dinghy resume.",
+            shorten(&s.name, 40),
+            fraction(s.progress_bytes, s.total_bytes) * 100.0,
+            format_bytes(s.progress_bytes),
+            format_bytes(s.total_bytes)
+        ),
         DownloadStatus::Queued => format!(
             "{}: waiting in the queue (it starts when another download finishes)...",
             shorten(&s.name, 40)
@@ -1626,6 +1661,8 @@ struct ProgressPrinter {
     is_terminal: bool,
     last_width: usize,
     last_print: Option<Instant>,
+    /// The last warning said, so it isn't repeated at every update.
+    warned: Option<String>,
 }
 
 impl ProgressPrinter {
@@ -1634,6 +1671,7 @@ impl ProgressPrinter {
             is_terminal: std::io::stdout().is_terminal(),
             last_width: 0,
             last_print: None,
+            warned: None,
         }
     }
 
@@ -1692,7 +1730,18 @@ mod tests {
             can_use_existing_files: false,
             shared_seconds: 0,
             sharing_stopped: false,
+            warning: None,
         }
+    }
+
+    #[test]
+    fn a_paused_download_says_so_instead_of_looking_stuck() {
+        let line = progress_line(&snapshot(DownloadStatus::Paused));
+        assert!(
+            line.contains("paused at 25.0% (512.0 MiB of 2.0 GiB)"),
+            "{line}"
+        );
+        assert!(!line.contains("ETA"), "{line}");
     }
 
     #[test]

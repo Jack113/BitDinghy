@@ -394,6 +394,8 @@ fn get_is_refused_while_another_bitdinghy_is_running() {
             "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
             "--no-dht",
             "--no-listen",
+            "--peer",
+            "127.0.0.1:9",
         ]);
         c
     });
@@ -928,4 +930,24 @@ fn links_to_this_computer_are_refused() {
         let stderr = text(&output.stderr);
         assert!(stderr.contains("local network"), "{link}: {stderr}");
     }
+}
+
+#[test]
+fn get_without_the_dht_and_without_trackers_says_at_once_it_can_find_nobody() {
+    let data = tempfile::tempdir().unwrap();
+    let output = run({
+        let mut c = dinghy(data.path());
+        c.args([
+            "get",
+            "magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c",
+            "--no-dht",
+            "--no-listen",
+        ]);
+        c
+    });
+    assert!(!output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("this link has no trackers"), "{stderr}");
+    // Nothing was started, so nothing was remembered either.
+    assert!(!data.path().join("downloads.db").exists());
 }

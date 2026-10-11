@@ -384,6 +384,23 @@ finishes, and the torrent is taken straight back out.
 - `dinghy get` now follows the "accept connections" setting (`--no-listen` still turns it off
   for one run).
 
+## Plain-language problems (M12)
+
+- **`plain.rs`** turns the engine's technical problems into a plain sentence with what to do,
+  keeping the technical text after "Details:" (useful when asking for help). It recognises a
+  full disk, a file too big for the drive, no permission to write, a file another program holds,
+  and a drive that went away, by the system's error number ("os error 112"; Windows and Linux
+  numbers are kept apart because they differ) or its words. Unknown problems pass unchanged. It
+  is applied to errors when a download starts and to errors librqbit reports later.
+- **`drive.rs`** asks Windows what drive the download folder is on (its format) and how much
+  room is free. Before a download starts, a file of 4 GB or more on a **FAT32** drive is refused
+  with a message naming the drive, the file and its size (nothing is written); a **new**
+  download bigger than the free room gets a warning (`DownloadSnapshot::warning`), shown under
+  the download, by `dinghy list` and once by `dinghy get`. Other systems skip these checks.
+- `dinghy get --no-dht` with no trackers in the link and no `--peer` says at once that it can't
+  find anyone, instead of waiting forever. A paused download that `dinghy get` follows says
+  "paused at N%" instead of looking stuck.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -398,4 +415,5 @@ finishes, and the torrent is taken straight back out.
 | M9 | Speed limits |
 | M10 | Sharing limits |
 | M11 | Port and UPnP |
+| M12 | Plain-language problems, drive checks |
 | M14 | History and charts |

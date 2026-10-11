@@ -1,5 +1,6 @@
 //! Makes small test torrents for trying BitDinghy out by hand (`docs/TESTING.md`): one with several
-//! files ("choose files", M6, and "check files", M7) and three little ones for the queue (M8).
+//! files ("choose files", M6, and "check files", M7), three little ones for the queue (M8), and
+//! one that claims a 5 GiB file, for the FAT32 check (M12).
 //! Developer tool only: it is not part of BitDinghy.exe or dinghy.exe.
 //!
 //!     cargo run -p dinghy-core --example make_test_torrent
@@ -92,5 +93,24 @@ async fn main() {
     println!(
         "Queue test torrents: queue-1.torrent, queue-2.torrent and queue-3.torrent in {}",
         place.display()
+    );
+
+    // One file of 5 GiB, written by hand (its piece fingerprints are made up, so it can never
+    // download anything): for the FAT32 check, which refuses it before writing a byte (M12).
+    let size: u64 = 5 * 1024 * 1024 * 1024;
+    let piece: u64 = 64 * 1024 * 1024;
+    let pieces = vec![0x5Au8; (size.div_ceil(piece) * 20) as usize];
+    let mut big = format!(
+        "d4:infod6:lengthi{size}e4:name7:big.iso12:piece lengthi{piece}e6:pieces{}:",
+        pieces.len()
+    )
+    .into_bytes();
+    big.extend_from_slice(&pieces);
+    big.extend_from_slice(b"ee");
+    let big_file = place.join("big-file-test.torrent");
+    std::fs::write(&big_file, big).expect("can't write the .torrent file");
+    println!(
+        "Big-file test torrent (one 5 GiB file, nothing to download): {}",
+        big_file.display()
     );
 }

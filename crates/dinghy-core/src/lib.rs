@@ -11,12 +11,14 @@ use std::path::PathBuf;
 
 pub mod data_dir;
 pub mod display;
+pub mod drive;
 pub mod engine;
 pub mod error;
 pub mod file_choice;
 pub mod input;
 pub mod magnet;
 pub mod owned_files;
+pub mod plain;
 pub mod profile;
 pub mod remote;
 pub mod safety;

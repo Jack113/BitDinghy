@@ -70,6 +70,19 @@ pub enum Error {
     #[error("{0}")]
     Remote(String),
 
+    /// The download folder's drive can't hold one of the download's files (FAT32: 4 GB at most).
+    #[error(
+        "BitDinghy didn't start this download because the drive {drive} uses {format}, which \
+         can't hold files of 4 GB or more, and \"{file}\" is {size}. Choose a download folder on \
+         a drive formatted as NTFS in Settings (most internal drives are), or untick that file."
+    )]
+    DriveTooSmallForFile {
+        drive: String,
+        format: String,
+        file: String,
+        size: String,
+    },
+
     /// A folder or file on the way to a download's files is a link to another place.
     #[error(
         "BitDinghy didn't start this download because {} is a link to another place (a \

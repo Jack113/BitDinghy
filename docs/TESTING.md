@@ -3,6 +3,62 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M12: problems in plain words
+
+Data-free. Test 2 uses your FAT32 USB stick (the one the repo is on); skip it if you have none.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, and make the test torrents
+   (`cargo run -p dinghy-core --example make_test_torrent`): its last line is "Big-file test
+   torrent (one 5 GiB file, nothing to download): ...\big-file-test.torrent".
+2. Terminal in `C:\cargo-target\debug`.
+
+**Test 1: no way to find anyone, said at once**
+- Do: `.\dinghy.exe get "magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c" --no-dht`
+- You should see, straight away: "With --no-dht, BitDinghy can only find people through
+  trackers in the link or with --peer, and this link has no trackers. Leave out --no-dht (or add
+  --peer IP:PORT)."
+
+**Test 2: a 5 GB file on a FAT32 drive**
+- Do: make an empty folder on the USB stick, for example `D:\fat-test` (your stick's letter),
+  then `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\big-file-test.torrent" --dir D:\fat-test --no-dht --no-listen --peer 127.0.0.1:9`
+- You should see: "BitDinghy didn't start this download because the drive D:\ uses FAT32, which
+  can't hold files of 4 GB or more, and "big.iso" is 5.0 GiB. Choose a download folder on a drive
+  formatted as NTFS in Settings (most internal drives are), or untick that file." The folder
+  stays empty.
+- Then: `.\dinghy.exe list` shows big.iso; remove it with `.\dinghy.exe remove <n>`, and delete
+  the empty folder.
+
+**Test 3: a file another program holds**
+- Do: copy `%TEMP%\bitdinghy-m6-test\BitDinghy M6 test` into `Downloads\BitDinghy`. In a second
+  PowerShell, hold one file open:
+  `$f=[IO.File]::Open("$HOME\Downloads\BitDinghy\BitDinghy M6 test\Episode 2.bin",'Open','ReadWrite','None')`
+  Then open the window and add `bitdinghy-m6-test.torrent` (Open .torrent file...), and press
+  **Use the files already there**.
+- You should see: a red message starting "Couldn't start this download: Another program has one
+  of this download's files open (a video player or a virus scanner, for example). Close it, then
+  try again. Details: error opening ...Episode 2.bin... (os error 32)".
+- Then: in the second PowerShell `$f.Close()`, and press **Try again**: it checks the files and
+  says Finished.
+
+**Test 4: a paused download followed from the command line**
+- Do: press **Pause** on BitDinghy M6 test. Run
+  `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent"`.
+- You should see: "BitDinghy's window is open, so the download was added there.", then
+  "BitDinghy M6 test: paused at 100.0% (6.2 MiB of 6.2 MiB). Resume it in the window or with
+  dinghy resume." (not a line with "0 B/s ETA unknown"). Press Ctrl+C.
+
+**Tidy up:** remove BitDinghy M6 test (**Delete the files too**).
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. No way to find anyone, said at once | |
+| 2. A 5 GB file on a FAT32 drive | |
+| 3. A file another program holds | |
+| 4. A paused download followed from the command line | |
+
 ## M11: port and UPnP
 
 Data-free. The window accepts connections as before; this only changes how.

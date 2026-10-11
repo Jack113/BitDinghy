@@ -1193,6 +1193,10 @@ fn draw_download(
             }
         }
     }
+    // Something to know that isn't a failure (for example: the drive may be too full).
+    if let Some(warning) = &download.warning {
+        ui.colored_label(warning_color(ui), warning);
+    }
     // What the last "Check files" found.
     if let Some(note) = &download.note
         && download.status != DownloadStatus::Checking
@@ -1270,6 +1274,7 @@ mod tests {
             can_use_existing_files: false,
             shared_seconds: 0,
             sharing_stopped: false,
+            warning: None,
         }
     }
 

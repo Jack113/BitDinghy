@@ -31,7 +31,9 @@ project is built **one feature at a time**.
 - Linux has no "hidden" mark; the leftovers stay visible there. Decide with the Linux port (the
   parts file above would solve it everywhere).
 - FAT32 and exFAT drives can't hold "sparse" files, so a big unticked file next to a ticked one
-  takes its full size on such a drive. Say so in plain language with the drive warnings (M12).
+  takes its full size on such a drive. (M12 refuses 4 GB files on FAT32 and warns when a new
+  download won't fit; it doesn't yet count unticked neighbours.)
+- The drive checks (`drive.rs`) only work on Windows; add Linux (`statvfs`) with the port.
 - The Files list adds up file sizes (4.3 MiB) while the progress total counts whole pieces
   (4.4 MiB), because a piece can spill into an unticked neighbour. Explain it if people ask.
 - A big torrent's file list could use a folder tree, a filter box, and "tick this folder".
@@ -47,9 +49,7 @@ project is built **one feature at a time**.
 - The window's Settings section shows its own copy of the settings: a change made with `dinghy`
   while the window is open applies, but the window's boxes show the old value until it restarts.
 - Opening `.torrent` files / magnet links from Explorer or a browser is M16 (default app).
-- `dinghy get` following a download in the open window shows a paused download as
-  `76.6% ... 0 B/s  ETA unknown  peers 0`, which looks stuck (found in the M5 guided test). Say
-  "paused at 76.6%" like `dinghy list` does (`progress_line` in the CLI). Fits M12.
+- Done in M12: `dinghy get` following a paused download says "paused at N%".
 
 ## Noticed while building M4
 - Another user on the same PC could create a pipe with BitDinghy's channel name before the window
@@ -74,9 +74,7 @@ project is built **one feature at a time**.
   answers both the re-add after "Remove, keep the files" and `dinghy get` without a data folder.
 - Removing with "delete the files" can hold the window for up to two seconds when Windows keeps
   a file busy. Fine for now; revisit if it ever shows.
-- `dinghy get --no-dht` on a link with no trackers and no `--peer` waits forever ("Looking for
-  people...") although it has no way to find anyone. Say so straight away (plain-language errors,
-  M12).
+- Done in M12: `dinghy get --no-dht` on a link with no trackers and no `--peer` says at once.
 - `rusqlite` with `bundled` compiles SQLite into both programs. Re-measure the exe sizes against
   the M0b baseline at the first release.
 
@@ -103,8 +101,7 @@ project is built **one feature at a time**.
 
 ## Features noted during planning
 - Let the window attach to an engine already running in the command line (v1 just says so).
-- Warn in plain language when the download drive can't hold the file (FAT32 has a 4 GB file
-  limit; the dev USB stick is FAT32). Belongs with the plain-language errors milestone (M12).
+- Done in M12: the FAT32 4 GB limit is checked before a download starts.
 - Encryption (MSE) once upstream librqbit merges it (rqbit PR #633). v1 ships without, and
   Settings says so honestly.
 - "Auto" speed becomes "Recommended settings", learned from real downloads. No speed-test server,
@@ -138,8 +135,7 @@ project is built **one feature at a time**.
   every torrent its own folder.
 - "Open folder" button on finished downloads.
 - Done in M11: Settings explain the Windows Firewall prompt.
-- librqbit reserves each file's full size on disk at the start. On FAT32, or when the disk is
-  nearly full, that fails; give a plain-language message (M12).
+- Done in M12: a full disk and FAT32 give plain messages (and a warning before starting).
 
 ## Engineering
 - Decide on accessibility (`accesskit` feature of eframe) before the first release.

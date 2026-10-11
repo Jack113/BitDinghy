@@ -53,11 +53,13 @@ use librqbit::{
 use serde::{Deserialize, Serialize};
 
 use crate::display::format_bytes;
+use crate::drive;
 use crate::error::{Error, Result};
 use crate::file_choice::{self, FileChoice, TorrentFile};
 use crate::input::{self, Input};
 use crate::magnet;
 use crate::owned_files::{self, Deleted};
+use crate::plain;
 use crate::safety::{self, Platform};
 use crate::saved_list::{SavedDownload, SavedList, Sharing};
 use crate::torrent_file::{self, CheckedTorrent};
@@ -192,6 +194,9 @@ pub struct DownloadSnapshot {
     /// use that file instead ([`Engine::use_existing_files`]).
     #[serde(default)]
     pub can_use_existing_files: bool,
+    /// Something to know that isn't a failure, such as "the drive may be too full" (M12).
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 /// Choices for adding a download.
@@ -272,6 +277,8 @@ struct Entry {
     check_only: AtomicBool,
     /// What the last check found.
     note: Mutex<Option<String>>,
+    /// Something to know that isn't a failure (see [`DownloadSnapshot::warning`]).
+    warning: Mutex<Option<String>>,
     /// Uploads and sharing time, over all runs (see [`Shared::account`]).
     counts: Mutex<Counts>,
     state: Mutex<EntryState>,
@@ -1212,6 +1219,7 @@ impl Engine {
             check_requested: AtomicBool::new(false),
             check_only: AtomicBool::new(false),
             note: Mutex::new(None),
+            warning: Mutex::new(None),
             counts: Mutex::new(start.counts),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
@@ -1585,6 +1593,54 @@ impl Engine {
     }
 }
 
+/// Refuses a download with a file the download folder's drive can't hold (FAT32: under 4 GB),
+/// and, for a new download, warns when the drive has less free room than the chosen files need.
+fn check_drive(
+    download_dir: &Path,
+    chosen: &[TorrentFile],
+    continuing: bool,
+) -> Result<Option<String>> {
+    drive_problem(
+        drive::drive_of(download_dir),
+        drive::free_space(download_dir),
+        chosen,
+        continuing,
+    )
+}
+
+/// The decision of [`check_drive`], given what Windows said about the drive.
+fn drive_problem(
+    drive: Option<drive::Drive>,
+    free_space: Option<u64>,
+    chosen: &[TorrentFile],
+    continuing: bool,
+) -> Result<Option<String>> {
+    if let Some(drive) = &drive
+        && drive.has_4gb_limit()
+        && let Some(big) = chosen
+            .iter()
+            .find(|file| file.size > drive::FAT32_MAX_FILE_BYTES)
+    {
+        return Err(Error::DriveTooSmallForFile {
+            drive: drive.root.clone(),
+            format: drive.format.clone(),
+            file: big.path.display().to_string(),
+            size: format_bytes(big.size),
+        });
+    }
+    let needed: u64 = chosen.iter().map(|file| file.size).sum();
+    match free_space {
+        Some(free) if !continuing && free < needed => Ok(Some(format!(
+            "The drive{} has {} free, but this download needs {}. It stops when the drive is \
+             full: free some space, or choose a download folder on another drive in Settings.",
+            drive.map(|d| format!(" {}", d.root)).unwrap_or_default(),
+            format_bytes(free),
+            format_bytes(needed)
+        ))),
+        _ => Ok(None),
+    }
+}
+
 /// Whether a finished download has shared enough: its uploads reached `ratio_percent` of its size
 /// (100 = as much as its size), or it shared for `minutes`. 0 turns a limit off.
 fn sharing_limit_reached(counts: &Counts, size: u64, ratio_percent: u64, minutes: u64) -> bool {
@@ -1670,8 +1726,9 @@ async fn start_download(
     source: Source,
 ) -> Result<Arc<ManagedTorrent>> {
     let initial_peers = (!entry.peers.is_empty()).then(|| entry.peers.clone());
-    // The engine reports problems as general-purpose errors; `{:#}` prints the whole cause chain.
-    let engine_error = |e| Error::Add(format!("{e:#}"));
+    // The engine reports problems as general-purpose errors; `{:#}` prints the whole cause chain,
+    // and `plain::explain` puts the common ones in plain words first.
+    let engine_error = |e| Error::Add(plain::explain(&format!("{e:#}")));
 
     // Step 1: just the file list. Nothing is created on disk.
     let (add, saved_folder) = match source {
@@ -1727,11 +1784,18 @@ async fn start_download(
     *lock(&entry.files) = Some((listing.torrent_bytes.to_vec(), output_folder.clone()));
     // The files the person chose (a saved choice is checked against the real list first).
     let files = file_choice::files_in(&listing.info);
-    let only_files = {
+    let (only_files, chosen) = {
         let mut skipped = lock(&entry.skipped);
         *skipped = file_choice::clean_skipped(&files, &skipped);
-        file_choice::only_files(&files, &skipped)
+        let chosen: Vec<TorrentFile> = files
+            .iter()
+            .filter(|file| !skipped.contains(&file.index))
+            .cloned()
+            .collect();
+        (file_choice::only_files(&files, &skipped), chosen)
     };
+    // Say what the drive can't do now, not halfway through (M12).
+    *lock(&entry.warning) = check_drive(&entry.download_dir, &chosen, continuing)?;
     *lock(&entry.file_list) = Some(Arc::new(files));
     if entry.removed.load(Ordering::SeqCst) {
         return Err(Error::Control("removed".to_string()));
@@ -1864,6 +1928,7 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         files_chosen,
         note: lock(&entry.note).clone(),
         can_use_existing_files: false,
+        warning: lock(&entry.warning).clone(),
     };
 
     let state = lock(&entry.state);
@@ -1930,11 +1995,10 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
                 TorrentStatsState::Error => DownloadStatus::Failed,
             };
             if snapshot.status == DownloadStatus::Failed {
-                snapshot.error = Some(
-                    stats
-                        .error
-                        .unwrap_or_else(|| "the download stopped with an error".to_string()),
-                );
+                snapshot.error = Some(match stats.error {
+                    Some(technical) => plain::explain(&technical),
+                    None => "The download stopped with an error.".to_string(),
+                });
             }
             // Time left = what's still missing divided by the current speed.
             let remaining = stats.total_bytes.saturating_sub(stats.progress_bytes);
@@ -1953,6 +2017,54 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fat32_drive_refuses_a_file_of_4gb_and_a_full_drive_warns() {
+        let files = |sizes: &[u64]| -> Vec<TorrentFile> {
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| TorrentFile {
+                    index,
+                    path: PathBuf::from(format!("file{index}.iso")),
+                    size: *size,
+                })
+                .collect()
+        };
+        let drive = |format: &str| {
+            Some(drive::Drive {
+                root: "E:\\".to_string(),
+                format: format.to_string(),
+            })
+        };
+        let gib = 1024 * 1024 * 1024;
+        // A 5 GiB file can't go on FAT32...
+        let error = drive_problem(drive("FAT32"), None, &files(&[100, 5 * gib]), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("uses FAT32"), "{error}");
+        assert!(error.contains("file1.iso"), "{error}");
+        assert!(error.contains("5.0 GiB"), "{error}");
+        // ...but a 3 GiB one can, and NTFS takes anything.
+        assert!(drive_problem(drive("FAT32"), None, &files(&[3 * gib]), false).is_ok());
+        assert!(drive_problem(drive("NTFS"), None, &files(&[50 * gib]), false).is_ok());
+
+        // Not enough room for a new download: a warning, not a refusal.
+        let warning = drive_problem(drive("NTFS"), Some(gib), &files(&[2 * gib]), false)
+            .unwrap()
+            .unwrap();
+        assert!(warning.contains("has 1.0 GiB free"), "{warning}");
+        assert!(warning.contains("needs 2.0 GiB"), "{warning}");
+        // Enough room, or a download carrying on (part of it is already there): nothing to say.
+        assert_eq!(
+            drive_problem(drive("NTFS"), Some(3 * gib), &files(&[2 * gib]), false).unwrap(),
+            None
+        );
+        assert_eq!(
+            drive_problem(drive("NTFS"), Some(gib), &files(&[2 * gib]), true).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn a_sharing_limit_is_reached_by_ratio_or_by_time() {
