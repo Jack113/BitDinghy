@@ -9,8 +9,8 @@ use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
 use crate::saved_list;
 use crate::settings::{
-    Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB, MIN_SPEED_LIMIT_KIB, Settings,
-    SettingsStore, validate_download_dir,
+    Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SHARING_MINUTES, MAX_SHARING_RATIO_PERCENT,
+    MAX_SPEED_LIMIT_KIB, MIN_SPEED_LIMIT_KIB, Settings, SettingsStore, validate_download_dir,
 };
 
 /// A speed limit must be 0 (no limit) or between the lowest and highest that work.
@@ -100,6 +100,8 @@ impl Profile {
         config.max_active_downloads = self.settings.max_active_downloads as usize;
         config.download_limit_kib = self.settings.download_limit_kib;
         config.upload_limit_kib = self.settings.upload_limit_kib;
+        config.stop_sharing_ratio_percent = self.settings.stop_sharing_ratio_percent;
+        config.stop_sharing_after_minutes = self.settings.stop_sharing_after_minutes;
         config
     }
 
@@ -144,6 +146,26 @@ impl Profile {
         self.change(|settings| {
             settings.download_limit_kib = download_kib;
             settings.upload_limit_kib = upload_kib;
+        })
+    }
+
+    /// Remembers when finished downloads stop sharing: at a ratio (in percent, 100 = 1.0) and/or
+    /// after so many minutes of sharing. 0 means no such limit.
+    pub fn set_sharing_limits(&mut self, ratio_percent: u32, minutes: u32) -> Result<()> {
+        if ratio_percent > MAX_SHARING_RATIO_PERCENT {
+            return Err(Error::Settings(format!(
+                "The sharing ratio can be at most {}.",
+                MAX_SHARING_RATIO_PERCENT / 100
+            )));
+        }
+        if minutes > MAX_SHARING_MINUTES {
+            return Err(Error::Settings(format!(
+                "The sharing time can be at most {MAX_SHARING_MINUTES} minutes (a year)."
+            )));
+        }
+        self.change(|settings| {
+            settings.stop_sharing_ratio_percent = ratio_percent;
+            settings.stop_sharing_after_minutes = minutes;
         })
     }
 

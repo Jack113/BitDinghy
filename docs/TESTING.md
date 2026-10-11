@@ -3,6 +3,67 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M10: sharing limits
+
+Data-free: the M6 test torrent, finished at once from its own made-up files (nobody else is
+involved, so nothing is uploaded; the time limit still counts).
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, terminal in
+   `C:\cargo-target\debug`. Make the test torrents if needed (`cargo run -p dinghy-core --example
+   make_test_torrent`, from the repo folder).
+2. Copy `%TEMP%\bitdinghy-m6-test\BitDinghy M6 test` into `Downloads\BitDinghy` (if it isn't
+   there), and make sure BitDinghy M6 test is not in the list.
+3. `.\dinghy.exe settings` shows `stop-sharing-at-ratio:  none  (finished downloads share while
+   BitDinghy runs)` and `stop-sharing-after:  none`.
+
+**Test 1: what a finished download says about sharing**
+- Do: `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --use-existing-files --no-dht --no-listen`
+  (it says "Done: ..."), then open the window.
+- You should see: BitDinghy M6 test, green "Finished: 6.2 MiB saved in ...", and under it
+  "Sharing back to 0 people (0 B uploaded, ratio 0.00, for 3s). Closing BitDinghy stops sharing."
+  with the time going up.
+
+**Test 2: a time limit**
+- Do: in **Settings**, set "Stop sharing a finished download at ratio 0.00 or after [1] minutes"
+  (click the minutes number, type 1, Enter).
+- You should see: "A finished download stops sharing after 1 minute of sharing, from now on."
+  Within a minute the line under the download changes to "Stopped sharing: it reached the sharing
+  limit (0 B uploaded, ratio 0.00, for 1m 0s). Resume shares it again." (or "1m 1s") and its
+  button says
+  **Share again**.
+
+**Test 3: it stays stopped after a restart**
+- Do: close the window, run `.\dinghy.exe list`, open the window again.
+- You should see: `[active]` in `dinghy list` (the window is closed), and in the window the same
+  "Stopped sharing..." line and the **Share again** button. With the window open, `.\dinghy.exe
+  list` says `finished, stopped sharing at ratio 0.00 (0 B uploaded)`.
+
+**Test 4: share again**
+- Do: press **Share again**.
+- You should see: "Sharing back to 0 people (...)" again, and it keeps sharing after a minute:
+  the limit no longer applies to this download.
+
+**Test 5: the command line**
+- Do: `.\dinghy.exe settings set stop-sharing-at-ratio 1.5`, then
+  `.\dinghy.exe settings set stop-sharing-after none`.
+- You should see: "Saved. BitDinghy's open window uses it straight away." each time, and the
+  settings lines `stop-sharing-at-ratio:  1.5  (a finished download stops sharing once it has
+  shared that many times its size)` and `stop-sharing-after:  none`.
+
+**Tidy up:** `.\dinghy.exe settings set stop-sharing-at-ratio none`; in the window remove
+BitDinghy M6 test (**Delete the files too**).
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. What a finished download says about sharing | |
+| 2. A time limit | |
+| 3. It stays stopped after a restart | |
+| 4. Share again | |
+| 5. The command line | |
+
 ## M9: speed limits
 
 **This test uses about 10 to 15 MB of download data** (the official Arch Linux torrent, held to a

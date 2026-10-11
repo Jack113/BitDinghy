@@ -350,6 +350,25 @@ finishes, and the torrent is taken straight back out.
 - A test of the source itself (`tests/source_text.rs`) fails when a message has a long gap of
   spaces, the sign of a lost `\` line join.
 
+## Sharing limits (M10)
+
+- Two settings: a finished download stops sharing at a **ratio** (`stop_sharing_ratio_percent`,
+  100 = it has uploaded as much as its size) and/or after **minutes of sharing**
+  (`stop_sharing_after_minutes`); 0 turns either off, and both are off unless chosen.
+- librqbit forgets its upload counter at every start (and a "check files" re-adds the torrent,
+  which starts the counter again), so the engine counts itself: once a second `Shared::account`
+  adds what librqbit's counter grew by (per torrent id) to each download's total, adds sharing
+  time while a finished download is live, and notes when it finished. The saved list
+  (**version 4**) keeps `uploaded_bytes`, `shared_seconds`, `finished_at` and `sharing`; the
+  engine saves changes every 15 seconds, at once when the sharing state changes, and when it
+  shuts down.
+- When a limit is reached the download is paused in librqbit and marked `StoppedByLimit`: the
+  queue doesn't wake it, it starts paused after a restart, and it shows as Finished with
+  "Stopped sharing: it reached the sharing limit (...)". **Resume** ("Share again" in the window)
+  marks it `KeepSharing`: limits no longer apply to it. If the limits are raised or turned off,
+  downloads they stopped share again within a second.
+- These totals are the start of the history in M14.
+
 ## Where each piece appears
 
 | Milestone | What lands |

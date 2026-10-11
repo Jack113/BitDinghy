@@ -15,6 +15,13 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Noticed while building M10
+- In a test, a leecher that connected while BitDinghy was still downloading never learned about
+  the pieces BitDinghy got afterwards (it stayed at 0%). Connected when BitDinghy already had
+  everything, it downloaded normally. Check whether librqbit announces new pieces ("have"
+  messages) to peers connected earlier; if not, report it upstream.
+- A per-download sharing limit (different from the setting for all) could come later.
+
 ## Noticed while building M6
 - The proper home for the leftovers of unticked files: a hidden "parts" file of BitDinghy's own
   (like qBittorrent), so unticked files never appear in the folder at all. Needs our own storage

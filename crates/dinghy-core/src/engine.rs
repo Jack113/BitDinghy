@@ -25,6 +25,13 @@
 //! person, or failed don't take a place. [`Shared::rebalance`] decides, after every change and once
 //! a second (so a download that finishes lets the next one start).
 //!
+//! **Sharing limits** (M10): librqbit forgets how much a torrent uploaded at every start, so the
+//! engine counts uploads and sharing time itself, once a second ([`Shared::account`]), adds them to
+//! what the saved list remembers, and saves them every so often and when it shuts down. A finished
+//! download whose ratio or sharing time reaches the limit in the settings is paused in librqbit
+//! and marked "stopped by a limit" (it stays stopped after a restart); "Resume" shares it again,
+//! and limits then no longer apply to it.
+//!
 //! **Checking files** (M7): librqbit has no "check again" call, but it checks every piece already
 //! on disk whenever a torrent is added. So [`Engine::check`] takes the download out of librqbit
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
@@ -33,7 +40,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -52,7 +59,7 @@ use crate::input::{self, Input};
 use crate::magnet;
 use crate::owned_files::{self, Deleted};
 use crate::safety::{self, Platform};
-use crate::saved_list::{SavedDownload, SavedList};
+use crate::saved_list::{SavedDownload, SavedList, Sharing};
 use crate::torrent_file::{self, CheckedTorrent};
 use crate::web_link;
 
@@ -87,6 +94,10 @@ pub struct EngineConfig {
     /// The most all downloads together may download and upload, in KiB/s. 0: no limit (M9).
     pub download_limit_kib: u32,
     pub upload_limit_kib: u32,
+    /// A finished download stops sharing at this ratio, in percent (100 = 1.0), or after sharing
+    /// this many minutes. 0: no such limit (M10).
+    pub stop_sharing_ratio_percent: u32,
+    pub stop_sharing_after_minutes: u32,
 }
 
 impl EngineConfig {
@@ -103,6 +114,8 @@ impl EngineConfig {
             max_active_downloads: crate::settings::DEFAULT_MAX_ACTIVE_DOWNLOADS as usize,
             download_limit_kib: 0,
             upload_limit_kib: 0,
+            stop_sharing_ratio_percent: 0,
+            stop_sharing_after_minutes: 0,
         }
     }
 }
@@ -142,8 +155,14 @@ pub struct DownloadSnapshot {
     pub peers_connected: u32,
     /// People we know about (connected or not).
     pub peers_known: u32,
-    /// Bytes shared with others so far.
+    /// Bytes shared with others, over all runs.
     pub uploaded_bytes: u64,
+    /// How long it has shared after finishing, over all runs, in seconds (M10).
+    #[serde(default)]
+    pub shared_seconds: u64,
+    /// It finished and a sharing limit was reached, so it no longer shares (M10).
+    #[serde(default)]
+    pub sharing_stopped: bool,
     /// How long we have been waiting for the file list (only while `GettingInfo`).
     pub waiting_for: Option<Duration>,
     /// The folder the files are saved in, once known.
@@ -243,9 +262,39 @@ struct Entry {
     check_only: AtomicBool,
     /// What the last check found.
     note: Mutex<Option<String>>,
+    /// Uploads and sharing time, over all runs (see [`Shared::account`]).
+    counts: Mutex<Counts>,
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
+}
+
+/// What a download has shared, kept up to date once a second and saved every so often.
+#[derive(Debug, Clone, Default)]
+struct Counts {
+    uploaded_bytes: u64,
+    /// In milliseconds, so the once-a-second ticks add up exactly.
+    shared_millis: u64,
+    finished_at: Option<u64>,
+    sharing: Sharing,
+    /// librqbit's upload counter as last seen, and which torrent it belonged to (a check adds the
+    /// torrent again, and the new one counts from zero).
+    last_seen: Option<(usize, u64)>,
+    /// Changed since it was last saved.
+    unsaved: bool,
+}
+
+impl Counts {
+    fn from_saved(saved: &SavedDownload) -> Self {
+        Self {
+            uploaded_bytes: saved.uploaded_bytes,
+            shared_millis: saved.shared_seconds.saturating_mul(1000),
+            finished_at: saved.finished_at,
+            sharing: saved.sharing,
+            last_seen: None,
+            unsaved: false,
+        }
+    }
 }
 
 /// What a new download starts with (see the fields of [`Entry`]).
@@ -259,6 +308,7 @@ struct NewEntry {
     known_torrent: Option<Vec<u8>>,
     skipped: BTreeSet<usize>,
     use_existing: bool,
+    counts: Counts,
 }
 
 /// Where a download's file list comes from.
@@ -350,6 +400,9 @@ struct Shared {
     rebalancing: Mutex<()>,
     /// Set by `shutdown`: background work stops.
     stopped: AtomicBool,
+    /// The sharing limits (M10): ratio in percent, and minutes. 0: no such limit.
+    sharing_ratio_percent: AtomicU32,
+    sharing_minutes: AtomicU32,
 }
 
 impl Shared {
@@ -382,7 +435,8 @@ impl Shared {
                     // the wish only AFTER publishing the handle means that either this line sees
                     // it, or `pause`/`resume` sees the handle: one of the two always acts on it.
                     let wants_pause = entry.wants_pause.load(Ordering::SeqCst)
-                        || entry.held.load(Ordering::SeqCst);
+                        || entry.held.load(Ordering::SeqCst)
+                        || lock(&entry.counts).sharing == Sharing::StoppedByLimit;
                     if wants_pause && !handle.is_paused() {
                         let _ = shared.session.pause(&handle).await;
                     } else if !wants_pause && handle.is_paused() {
@@ -468,10 +522,12 @@ impl Shared {
                         continue;
                     }
                     TorrentStatsState::Error => continue,
-                    // Only sharing: it takes no place, and (not paused by the person) it shares.
+                    // Only sharing: it takes no place, and (not paused by the person, nor stopped by
+                    // a sharing limit) it shares.
                     _ if stats.finished => {
                         entry.held.store(false, Ordering::SeqCst);
-                        if handle.is_paused() {
+                        let stopped = lock(&entry.counts).sharing == Sharing::StoppedByLimit;
+                        if handle.is_paused() && !stopped {
                             self.unpause_later(handle.clone());
                         }
                         continue;
@@ -516,6 +572,101 @@ impl Shared {
         let shared = self.clone();
         self.runtime.spawn(async move {
             let _ = shared.session.unpause(&handle).await;
+        });
+    }
+
+    /// Counts uploads and sharing time (once a second, `elapsed` since the last time), and applies
+    /// the sharing limits (see the module notes).
+    fn account(self: &Arc<Self>, elapsed: Duration) {
+        let ratio_percent = u64::from(self.sharing_ratio_percent.load(Ordering::SeqCst));
+        let minutes = u64::from(self.sharing_minutes.load(Ordering::SeqCst));
+        let entries = lock(&self.entries).clone();
+        for entry in entries {
+            let handle = match &*lock(&entry.state) {
+                EntryState::Active(handle) => handle.clone(),
+                _ => continue,
+            };
+            let stats = handle.stats();
+            let mut counts = lock(&entry.counts);
+
+            // Uploads: what librqbit counted since we last looked.
+            let torrent = handle.id();
+            let added = match counts.last_seen {
+                Some((seen, before)) if seen == torrent && stats.uploaded_bytes >= before => {
+                    stats.uploaded_bytes - before
+                }
+                // A new torrent (first look, or added again by a check) counts from zero.
+                _ => stats.uploaded_bytes,
+            };
+            counts.last_seen = Some((torrent, stats.uploaded_bytes));
+            if added > 0 {
+                counts.uploaded_bytes = counts.uploaded_bytes.saturating_add(added);
+                counts.unsaved = true;
+            }
+
+            if !stats.finished || matches!(stats.state, TorrentStatsState::Initializing { .. }) {
+                continue;
+            }
+            if counts.finished_at.is_none() {
+                counts.finished_at = Some(now_seconds());
+                counts.unsaved = true;
+            }
+            let sharing_now = matches!(stats.state, TorrentStatsState::Live);
+            if sharing_now {
+                counts.shared_millis = counts
+                    .shared_millis
+                    .saturating_add(elapsed.as_millis() as u64);
+                counts.unsaved = true;
+            }
+
+            let reached = sharing_limit_reached(&counts, stats.total_bytes, ratio_percent, minutes);
+            match counts.sharing {
+                Sharing::AsUsual if reached && sharing_now => {
+                    counts.sharing = Sharing::StoppedByLimit;
+                    counts.unsaved = true;
+                    drop(counts);
+                    self.save_entry_counts(&entry);
+                    let shared = self.clone();
+                    self.runtime.spawn(async move {
+                        let _ = shared.session.pause(&handle).await;
+                    });
+                }
+                // The limits changed (or were turned off): it may share again.
+                Sharing::StoppedByLimit if !reached => {
+                    counts.sharing = Sharing::AsUsual;
+                    counts.unsaved = true;
+                    drop(counts);
+                    self.save_entry_counts(&entry);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Saves the counts that changed since they were last saved.
+    fn save_counts(&self) {
+        let entries = lock(&self.entries).clone();
+        for entry in entries {
+            if lock(&entry.counts).unsaved {
+                self.save_entry_counts(&entry);
+            }
+        }
+    }
+
+    fn save_entry_counts(&self, entry: &Entry) {
+        let counts = {
+            let mut counts = lock(&entry.counts);
+            counts.unsaved = false;
+            counts.clone()
+        };
+        self.with_list(|list| {
+            list.record_sharing(
+                &entry.info_hash,
+                counts.uploaded_bytes,
+                counts.shared_millis / 1000,
+                counts.finished_at,
+                counts.sharing,
+            )
         });
     }
 
@@ -612,11 +763,15 @@ impl Engine {
             max_active: AtomicUsize::new(config.max_active_downloads),
             rebalancing: Mutex::new(()),
             stopped: AtomicBool::new(false),
+            sharing_ratio_percent: AtomicU32::new(config.stop_sharing_ratio_percent),
+            sharing_minutes: AtomicU32::new(config.stop_sharing_after_minutes),
         });
         // Once a second, let the queue move on (a download that finished frees its place).
         let weak = Arc::downgrade(&shared);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            let mut last = Instant::now();
+            let mut ticks: u64 = 0;
             loop {
                 ticker.tick().await;
                 let Some(shared) = weak.upgrade() else {
@@ -624,6 +779,15 @@ impl Engine {
                 };
                 if shared.stopped.load(Ordering::SeqCst) {
                     break;
+                }
+                let now = Instant::now();
+                shared.account(now.saturating_duration_since(last));
+                last = now;
+                ticks += 1;
+                // The counts are saved every 15 seconds (and at once when a download's sharing
+                // state changes, and when the engine shuts down).
+                if ticks.is_multiple_of(15) {
+                    shared.save_counts();
                 }
                 shared.rebalance();
             }
@@ -653,6 +817,16 @@ impl Engine {
         let limits = &self.shared.session.ratelimits;
         let kib = |bps: Option<NonZeroU32>| bps.map_or(0, |bps| bps.get() / 1024);
         (kib(limits.get_download_bps()), kib(limits.get_upload_bps()))
+    }
+
+    /// Changes the sharing limits: a ratio in percent (100 = 1.0) and minutes of sharing; 0 means no
+    /// such limit. Applies within a second, also to downloads a limit stopped earlier (they share
+    /// again if the new limits allow it).
+    pub fn set_sharing_limits(&self, ratio_percent: u32, minutes: u32) {
+        self.shared
+            .sharing_ratio_percent
+            .store(ratio_percent, Ordering::SeqCst);
+        self.shared.sharing_minutes.store(minutes, Ordering::SeqCst);
     }
 
     /// Changes how many downloads run at once (0: no limit). Applies straight away.
@@ -859,6 +1033,10 @@ impl Engine {
             .as_ref()
             .map(|saved| saved.skipped_files.clone())
             .unwrap_or_default();
+        let counts = remembered
+            .as_ref()
+            .map(Counts::from_saved)
+            .unwrap_or_default();
         // Where it starts from is worked out when its turn in the queue comes (`start_again`): its
         // saved file list, or `first_source` (a `.torrent` is kept as `known_torrent`).
         let (label, download_dir) = match remembered {
@@ -896,6 +1074,7 @@ impl Engine {
             known_torrent,
             skipped,
             use_existing: options.use_existing_files,
+            counts,
         });
         *lock(&entry.state) = EntryState::Waiting;
         let id = entry.id;
@@ -917,6 +1096,9 @@ impl Engine {
     /// it). Files already on disk are left as they are, so the downloads continue next time.
     pub async fn shutdown(&self) {
         self.shared.stopped.store(true, Ordering::SeqCst);
+        // What was shared since the last count, then everything unsaved, before the list closes.
+        self.shared.account(Duration::ZERO);
+        self.shared.save_counts();
         self.shared.session.stop().await;
         lock(&self.shared.saved).take();
     }
@@ -932,6 +1114,7 @@ impl Engine {
             let (info_hash, name) = (download.info_hash.clone(), download.name.clone());
             let (download_dir, paused) = (download.download_dir.clone(), download.paused);
             let skipped = download.skipped_files.clone();
+            let counts = Counts::from_saved(&download);
             let source = match Source::saved(download) {
                 Some(source) => source,
                 None if !magnet.is_empty() => Source::Magnet(magnet.clone()),
@@ -952,6 +1135,7 @@ impl Engine {
                 known_torrent: None,
                 skipped,
                 use_existing: false,
+                counts,
             });
             lock(&self.shared.entries).push(entry.clone());
             match source {
@@ -987,6 +1171,7 @@ impl Engine {
             check_requested: AtomicBool::new(false),
             check_only: AtomicBool::new(false),
             note: Mutex::new(None),
+            counts: Mutex::new(start.counts),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
@@ -1219,6 +1404,16 @@ impl Engine {
         self.shared
             .with_list(|list| list.set_paused(&entry.info_hash, false));
 
+        // Stopped by a sharing limit: the person wants it to share again, limits or not.
+        {
+            let mut counts = lock(&entry.counts);
+            if counts.sharing == Sharing::StoppedByLimit {
+                counts.sharing = Sharing::KeepSharing;
+                counts.unsaved = true;
+                drop(counts);
+                self.shared.save_entry_counts(&entry);
+            }
+        }
         // A download that isn't running joins the queue; the queue then starts it, or lets a
         // paused one carry on, if there is a place for it (otherwise it shows as queued).
         {
@@ -1322,6 +1517,7 @@ impl Engine {
         let (label, download_dir) = (saved.name.clone(), saved.download_dir.clone());
         let skipped = saved.skipped_files.clone();
         let magnet = saved.magnet.clone();
+        let counts = Counts::from_saved(&saved);
         let Some(source) = Source::saved(saved) else {
             return Err(Error::Control(format!(
                 "\"{label}\" can't be checked yet: BitDinghy doesn't know its files yet."
@@ -1337,6 +1533,7 @@ impl Engine {
             known_torrent: None,
             skipped,
             use_existing: false,
+            counts,
         });
         entry.check_requested.store(true, Ordering::SeqCst);
         entry.check_only.store(true, Ordering::SeqCst);
@@ -1345,6 +1542,23 @@ impl Engine {
         self.shared.spawn_start(entry, source);
         Ok(id)
     }
+}
+
+/// Whether a finished download has shared enough: its uploads reached `ratio_percent` of its size
+/// (100 = as much as its size), or it shared for `minutes`. 0 turns a limit off.
+fn sharing_limit_reached(counts: &Counts, size: u64, ratio_percent: u64, minutes: u64) -> bool {
+    let by_ratio = ratio_percent > 0
+        && counts.uploaded_bytes.saturating_mul(100) >= ratio_percent.saturating_mul(size);
+    let by_time = minutes > 0 && counts.shared_millis >= minutes.saturating_mul(60_000);
+    by_ratio || by_time
+}
+
+/// The current time in seconds since 1970.
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// A limit in KiB/s as librqbit wants it: bytes per second, `None` for no limit.
@@ -1515,7 +1729,8 @@ async fn start_download(
             Some(AddTorrentOptions {
                 overwrite: true,
                 output_folder: Some(folder_text),
-                paused: entry.wants_pause.load(Ordering::SeqCst),
+                paused: entry.wants_pause.load(Ordering::SeqCst)
+                    || lock(&entry.counts).sharing == Sharing::StoppedByLimit,
                 initial_peers,
                 only_files,
                 ..Default::default()
@@ -1585,6 +1800,7 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         }
         None => (0, 0),
     };
+    let counts = lock(&entry.counts).clone();
     let mut snapshot = DownloadSnapshot {
         id: entry.id,
         info_hash: entry.info_hash.clone(),
@@ -1597,7 +1813,9 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         eta: None,
         peers_connected: 0,
         peers_known: 0,
-        uploaded_bytes: 0,
+        uploaded_bytes: counts.uploaded_bytes,
+        shared_seconds: counts.shared_millis / 1000,
+        sharing_stopped: counts.sharing == Sharing::StoppedByLimit,
         waiting_for: None,
         save_folder: None,
         error: None,
@@ -1638,7 +1856,7 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
             }
             snapshot.progress_bytes = stats.progress_bytes;
             snapshot.total_bytes = stats.total_bytes;
-            snapshot.uploaded_bytes = stats.uploaded_bytes;
+
             snapshot.save_folder = Some(handle.output_folder().to_path_buf());
             if let Some(live) = &stats.live {
                 let raw_speed = live.download_speed.as_bytes() as f64;
@@ -1658,6 +1876,14 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
                         && !entry.wants_pause.load(Ordering::SeqCst) =>
                 {
                     DownloadStatus::Queued
+                }
+                // Finished, and stopped sharing because of a limit (not paused by the person).
+                TorrentStatsState::Paused
+                    if stats.finished
+                        && snapshot.sharing_stopped
+                        && !entry.wants_pause.load(Ordering::SeqCst) =>
+                {
+                    DownloadStatus::Finished
                 }
                 TorrentStatsState::Paused => DownloadStatus::Paused,
                 TorrentStatsState::Error => DownloadStatus::Failed,
@@ -1686,6 +1912,25 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sharing_limit_is_reached_by_ratio_or_by_time() {
+        let counts = |uploaded_bytes, minutes: u64| Counts {
+            uploaded_bytes,
+            shared_millis: minutes * 60_000,
+            ..Counts::default()
+        };
+        // No limits: never.
+        assert!(!sharing_limit_reached(&counts(u64::MAX, 9_999), 100, 0, 0));
+        // Ratio 1.5 of a 1000-byte download: reached at 1500 bytes.
+        assert!(!sharing_limit_reached(&counts(1499, 0), 1000, 150, 0));
+        assert!(sharing_limit_reached(&counts(1500, 0), 1000, 150, 0));
+        // 90 minutes.
+        assert!(!sharing_limit_reached(&counts(0, 89), 1000, 0, 90));
+        assert!(sharing_limit_reached(&counts(0, 90), 1000, 0, 90));
+        // Either one is enough.
+        assert!(sharing_limit_reached(&counts(0, 90), 1000, 150, 90));
+    }
 
     #[test]
     fn the_first_reading_is_taken_as_is() {

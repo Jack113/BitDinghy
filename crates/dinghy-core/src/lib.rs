@@ -32,7 +32,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use file_choice::FileChoice;
 pub use profile::Profile;
-pub use saved_list::{SavedDownload, SavedList};
+pub use saved_list::{SavedDownload, SavedList, Sharing};
 pub use settings::Settings;
 
 /// The program's display name.

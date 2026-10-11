@@ -1752,3 +1752,123 @@ async fn the_download_limit_slows_downloads_and_can_be_lifted_at_once() {
     );
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sharing limits (M10).
+// ---------------------------------------------------------------------------------------------
+
+/// A pretend person who wants a torrent and gets it from whoever connects to them: listens on
+/// this computer, keeps what it downloads in memory, and knows nobody to ask.
+async fn leecher(scratch: &Path, torrent: &[u8]) -> (Arc<Session>, SocketAddr) {
+    let session = start_session(scratch, true).await;
+    session
+        .add_torrent(
+            AddTorrent::from_bytes(torrent.to_vec()),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("the leecher adds the torrent");
+    let address = session.listen_addr().expect("the leecher listens");
+    (session, address)
+}
+
+/// Downloads `seeder`'s torrent completely (remembered in `list`), then hands it to a NEW engine
+/// with `config` that also knows a leecher, the way `dinghy get` carries on a saved download. Data
+/// on disk from the start means the leecher sees everything at once and downloads from it.
+async fn finished_then_sharing(
+    work: &Path,
+    seeder: &Seeder,
+    config: &EngineConfig,
+) -> (Engine, Arc<Session>) {
+    let first = Engine::start(config.clone()).await.unwrap();
+    first
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first, &[DownloadStatus::Finished]).await;
+    first.shutdown().await;
+    drop(first);
+
+    let (leecher, leecher_address) = leecher(&work.join("leecher"), &seeder.torrent).await;
+    let mut sharing_config = config.clone();
+    sharing_config.restore_saved = false;
+    let engine = Engine::start(sharing_config).await.unwrap();
+    engine
+        .add_magnet(&seeder.magnet(), vec![leecher_address])
+        .unwrap();
+    (engine, leecher)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_stops_at_the_ratio_limit_stays_stopped_and_can_share_again() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 1_000_000).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let mut config = offline_config(&download_dir);
+    config.saved_list_file = Some(list.clone());
+    config.stop_sharing_ratio_percent = 50;
+
+    let (sharing_run, _leecher) = finished_then_sharing(work.path(), &seeder, &config).await;
+    let stopped = wait_until(&sharing_run, "sharing stopped by the limit", |s| {
+        s.sharing_stopped
+    })
+    .await;
+    assert_eq!(stopped.status, DownloadStatus::Finished, "{stopped:?}");
+    assert!(
+        stopped.uploaded_bytes >= 500_000,
+        "it shared at least half its size: {stopped:?}"
+    );
+    let saved = dinghy_core::SavedList::read(&list).unwrap();
+    assert_eq!(saved[0].sharing, dinghy_core::Sharing::StoppedByLimit);
+    assert!(saved[0].finished_at.is_some());
+    sharing_run.shutdown().await;
+    drop(sharing_run);
+    let uploaded_before = dinghy_core::SavedList::read(&list).unwrap()[0].uploaded_bytes;
+    assert!(uploaded_before >= 500_000, "the total is remembered");
+
+    // After a restart it still doesn't share, and the total is still there.
+    let next_run = Engine::start(config).await.unwrap();
+    let back = wait_until(&next_run, "back, finished", |s| {
+        s.status == DownloadStatus::Finished && s.save_folder.is_some()
+    })
+    .await;
+    assert!(back.sharing_stopped, "{back:?}");
+    assert_eq!(back.uploaded_bytes, uploaded_before);
+
+    // Resume: it shares again, and the limit no longer applies to it.
+    next_run.resume(back.id).await.unwrap();
+    wait_until(&next_run, "sharing again", |s| {
+        s.status == DownloadStatus::Finished && !s.sharing_stopped
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let later = next_run.snapshot()[0].clone();
+    assert!(!later.sharing_stopped, "{later:?}");
+    assert_eq!(
+        dinghy_core::SavedList::read(&list).unwrap()[0].sharing,
+        dinghy_core::Sharing::KeepSharing
+    );
+    next_run.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_the_limit_off_lets_a_stopped_download_share_again() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 600_000).await;
+    let mut config = offline_config(&work.path().join("downloads"));
+    config.saved_list_file = Some(work.path().join("downloads.db"));
+    config.stop_sharing_ratio_percent = 10;
+    let (engine, _leecher) = finished_then_sharing(work.path(), &seeder, &config).await;
+    wait_until(&engine, "sharing stopped", |s| s.sharing_stopped).await;
+
+    engine.set_sharing_limits(0, 0);
+    let sharing = wait_until(&engine, "sharing again", |s| {
+        !s.sharing_stopped && s.status == DownloadStatus::Finished
+    })
+    .await;
+    assert!(sharing.save_folder.is_some());
+    engine.shutdown().await;
+}

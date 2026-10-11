@@ -30,7 +30,7 @@ use crate::file_choice;
 pub const FILE_NAME: &str = "downloads.db";
 
 /// The list format this version of BitDinghy writes.
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 /// Marks the file as BitDinghy's (the letters "BDdy"), so another program's SQLite file is never
 /// mistaken for our list.
@@ -55,7 +55,7 @@ CREATE TABLE downloads (
 /// `tests/fixtures/` (like `downloads-v1.sql` and `downloads-v2.sql`) with a test that loads it.
 /// **Never change a step that has shipped**: lists out there have already been upgraded by it.
 type Migration = fn(&rusqlite::Transaction) -> rusqlite::Result<()>;
-const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3];
+const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4];
 
 /// Version 2 (M6, choosing files): remembers the files the person unticked, as the torrent's file
 /// indexes ("2,5"). Empty means every file, which is what every download from version 1 wants.
@@ -77,18 +77,66 @@ fn v2_to_v3(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
     )
 }
 
+/// Version 4 (M10, sharing limits): how much each download has uploaded in total and how long it
+/// has shared (librqbit forgets both at every start), when it finished, and whether sharing was
+/// stopped by a limit (see [`Sharing`]).
+fn v3_to_v4(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE downloads ADD COLUMN uploaded_bytes INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE downloads ADD COLUMN shared_seconds INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE downloads ADD COLUMN finished_at INTEGER;
+         ALTER TABLE downloads ADD COLUMN sharing INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 /// The order of the list since version 3, and before it.
 const ORDER: &str = "position, added_at, rowid";
 const ORDER_BEFORE_V3: &str = "added_at, rowid";
 
 /// The columns, in the order [`row_to_download`] reads them.
 const COLUMNS: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
-                       added_at, skipped_files";
+                       added_at, skipped_files, uploaded_bytes, shared_seconds, finished_at, \
+                       sharing";
 
 /// The same columns for a version 1 list (read without upgrading it, by `dinghy list`): every
 /// file was wanted then.
 const COLUMNS_V1: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
-                          added_at, '' AS skipped_files";
+                          added_at, '' AS skipped_files, 0, 0, NULL, 0";
+
+/// The same for a version 2 or 3 list: nothing was counted yet.
+const COLUMNS_V2: &str = "info_hash, name, magnet, torrent, download_dir, output_folder, paused, \
+                          added_at, skipped_files, 0, 0, NULL, 0";
+
+/// Whether a finished download goes on sharing (M10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Sharing {
+    /// It shares until a sharing limit (if any) is reached.
+    #[default]
+    AsUsual,
+    /// A sharing limit was reached: it no longer shares, also after a restart.
+    StoppedByLimit,
+    /// The person chose to share it again after a limit: limits no longer apply to it.
+    KeepSharing,
+}
+
+impl Sharing {
+    fn to_number(self) -> i64 {
+        match self {
+            Sharing::AsUsual => 0,
+            Sharing::StoppedByLimit => 1,
+            Sharing::KeepSharing => 2,
+        }
+    }
+
+    /// Anything unknown (a newer BitDinghy, a damaged value) means "as usual".
+    fn from_number(number: i64) -> Self {
+        match number {
+            1 => Sharing::StoppedByLimit,
+            2 => Sharing::KeepSharing,
+            _ => Sharing::AsUsual,
+        }
+    }
+}
 
 /// One remembered download.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +161,13 @@ pub struct SavedDownload {
     /// The files the person unticked, as the torrent's own file indexes (see `file_choice.rs`).
     /// Empty means every file.
     pub skipped_files: BTreeSet<usize>,
+    /// Everything it has uploaded (shared), over all runs, in bytes.
+    pub uploaded_bytes: u64,
+    /// How long it has shared after finishing, over all runs, in seconds.
+    pub shared_seconds: u64,
+    /// When it finished, in seconds since 1970.
+    pub finished_at: Option<u64>,
+    pub sharing: Sharing,
 }
 
 impl SavedDownload {
@@ -128,6 +183,10 @@ impl SavedDownload {
             paused: false,
             added_at: now_seconds(),
             skipped_files: BTreeSet::new(),
+            uploaded_bytes: 0,
+            shared_seconds: 0,
+            finished_at: None,
+            sharing: Sharing::AsUsual,
         }
     }
 }
@@ -292,7 +351,11 @@ impl SavedList {
             // An older list is read as it is (reading never upgrades it; the next BitDinghy that
             // opens it for changes does).
             Ok(Some(version)) => {
-                let columns = if version == 1 { COLUMNS_V1 } else { COLUMNS };
+                let columns = match version {
+                    1 => COLUMNS_V1,
+                    2 | 3 => COLUMNS_V2,
+                    _ => COLUMNS,
+                };
                 let order = if version < 3 { ORDER_BEFORE_V3 } else { ORDER };
                 rows_with(&connection, columns, order).map_err(|e| problem(e.to_string()))
             }
@@ -348,7 +411,7 @@ impl SavedList {
                 // A new download goes to the end of the list.
                 &format!(
                     "INSERT OR IGNORE INTO downloads ({COLUMNS}, position) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                      (SELECT COALESCE(MAX(position), 0) + 1 FROM downloads))"
                 ),
                 params![
@@ -365,6 +428,12 @@ impl SavedList {
                     download.paused,
                     i64::try_from(download.added_at).unwrap_or(i64::MAX),
                     file_choice::skipped_to_text(&download.skipped_files),
+                    i64::try_from(download.uploaded_bytes).unwrap_or(i64::MAX),
+                    i64::try_from(download.shared_seconds).unwrap_or(i64::MAX),
+                    download
+                        .finished_at
+                        .map(|at| i64::try_from(at).unwrap_or(i64::MAX)),
+                    download.sharing.to_number(),
                 ],
             )
             .map_err(|e| self.error("save", e))?;
@@ -402,6 +471,34 @@ impl SavedList {
             .execute(
                 "UPDATE downloads SET paused = ?2 WHERE info_hash = ?1",
                 params![info_hash, paused],
+            )
+            .map_err(|e| self.error("save", e))?;
+        Ok(changed == 1)
+    }
+
+    /// Remembers how much a download has shared, when it finished, and whether it still shares.
+    pub fn record_sharing(
+        &self,
+        info_hash: &str,
+        uploaded_bytes: u64,
+        shared_seconds: u64,
+        finished_at: Option<u64>,
+        sharing: Sharing,
+    ) -> Result<bool> {
+        let Some(connection) = &self.connection else {
+            return Ok(false);
+        };
+        let changed = connection
+            .execute(
+                "UPDATE downloads SET uploaded_bytes = ?2, shared_seconds = ?3, finished_at = ?4, \
+                 sharing = ?5 WHERE info_hash = ?1",
+                params![
+                    info_hash,
+                    i64::try_from(uploaded_bytes).unwrap_or(i64::MAX),
+                    i64::try_from(shared_seconds).unwrap_or(i64::MAX),
+                    finished_at.map(|at| i64::try_from(at).unwrap_or(i64::MAX)),
+                    sharing.to_number(),
+                ],
             )
             .map_err(|e| self.error("save", e))?;
         Ok(changed == 1)
@@ -627,6 +724,12 @@ fn row_to_download(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedDownload> {
         paused: row.get(6)?,
         added_at: u64::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
         skipped_files: file_choice::skipped_from_text(&row.get::<_, String>(8)?),
+        uploaded_bytes: u64::try_from(row.get::<_, i64>(9)?).unwrap_or(0),
+        shared_seconds: u64::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
+        finished_at: row
+            .get::<_, Option<i64>>(11)?
+            .and_then(|at| u64::try_from(at).ok()),
+        sharing: Sharing::from_number(row.get(12)?),
     })
 }
 
@@ -1038,6 +1141,72 @@ mod tests {
     }
 
     #[test]
+    fn the_version_4_fixture_still_loads() {
+        // This fixture was written with list version 4 and must load in EVERY later version.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v4.sql"))
+            .unwrap();
+        assert_eq!(SavedList::read(&path).unwrap().len(), 2);
+        let opened = open(&path);
+        assert!(opened.problem.is_none(), "{:?}", opened.problem);
+        let saved = opened.list.all().unwrap();
+        assert_eq!(saved[0].name, "testdata");
+        assert_eq!(saved[0].uploaded_bytes, 5_000_000);
+        assert_eq!(saved[0].shared_seconds, 3_600);
+        assert_eq!(saved[0].finished_at, Some(1_791_700_500));
+        assert_eq!(saved[0].sharing, Sharing::StoppedByLimit);
+        assert_eq!(saved[1].name, "Some Linux");
+        assert_eq!(saved[1].uploaded_bytes, 0);
+        assert_eq!(saved[1].finished_at, None);
+        assert_eq!(saved[1].sharing, Sharing::AsUsual);
+    }
+
+    #[test]
+    fn older_lists_start_with_nothing_shared() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v3.sql"))
+            .unwrap();
+        // Read as it is (version 3)...
+        let read = SavedList::read(&path).unwrap();
+        assert!(
+            read.iter()
+                .all(|d| d.uploaded_bytes == 0 && d.finished_at.is_none())
+        );
+        // ...and upgraded.
+        let saved = open(&path).list.all().unwrap();
+        assert!(
+            saved
+                .iter()
+                .all(|d| d.sharing == Sharing::AsUsual && d.shared_seconds == 0)
+        );
+    }
+
+    #[test]
+    fn sharing_is_remembered_after_a_restart() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        {
+            let list = open(&path).list;
+            list.add(&sample(HASH)).unwrap();
+            assert!(
+                list.record_sharing(HASH, 123_456, 90, Some(1_791_700_000), Sharing::KeepSharing)
+                    .unwrap()
+            );
+        }
+        let saved = open(&path).list.get(HASH).unwrap().unwrap();
+        assert_eq!(saved.uploaded_bytes, 123_456);
+        assert_eq!(saved.shared_seconds, 90);
+        assert_eq!(saved.finished_at, Some(1_791_700_000));
+        assert_eq!(saved.sharing, Sharing::KeepSharing);
+    }
+
+    #[test]
     fn the_order_of_the_list_is_remembered() {
         let work = tempfile::tempdir().unwrap();
         let path = work.path().join(FILE_NAME);
@@ -1081,7 +1250,8 @@ mod tests {
             .execute_batch(include_str!("../tests/fixtures/downloads-v1.sql"))
             .unwrap();
 
-        let upgraded = SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, add_rating]).unwrap();
+        let upgraded =
+            SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, v3_to_v4, add_rating]).unwrap();
         assert!(upgraded.problem.is_none());
         assert_eq!(upgraded.list.all().unwrap().len(), 2);
         drop(upgraded);
@@ -1089,9 +1259,11 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "every step ran, from version 1");
+        assert_eq!(version, 5, "every step ran, from version 1");
         connection
-            .prepare("SELECT skipped_files, position, rating FROM downloads")
+            .prepare(
+                "SELECT skipped_files, position, uploaded_bytes, sharing, rating FROM downloads",
+            )
             .expect("the new columns exist");
     }
 

@@ -69,6 +69,34 @@ pub fn waiting_text(waited: Duration) -> String {
 }
 
 /// How far along something is, as a number from 0.0 to 1.0. An unknown total (0) counts as 0.
+/// A sharing ratio: how many times its size a download has uploaded, like "0.42".
+pub fn ratio_text(uploaded: u64, size: u64) -> String {
+    if size == 0 {
+        return "0.00".to_string();
+    }
+    format!("{:.2}", uploaded as f64 / size as f64)
+}
+
+/// What a finished download is doing about sharing, in one sentence (window and `dinghy`).
+pub fn sharing_text(download: &crate::DownloadSnapshot) -> String {
+    let shared = format!(
+        "{} uploaded, ratio {}, for {}",
+        format_bytes(download.uploaded_bytes),
+        ratio_text(download.uploaded_bytes, download.total_bytes),
+        format_eta(Some(std::time::Duration::from_secs(
+            download.shared_seconds
+        )))
+    );
+    if download.sharing_stopped {
+        format!("Stopped sharing: it reached the sharing limit ({shared}). Resume shares it again.")
+    } else {
+        format!(
+            "Sharing back to {} people ({shared}). Closing BitDinghy stops sharing.",
+            download.peers_connected
+        )
+    }
+}
+
 pub fn fraction(done: u64, total: u64) -> f32 {
     if total == 0 {
         return 0.0;
@@ -79,6 +107,13 @@ pub fn fraction(done: u64, total: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ratios_have_two_decimals() {
+        assert_eq!(ratio_text(0, 0), "0.00");
+        assert_eq!(ratio_text(500, 1000), "0.50");
+        assert_eq!(ratio_text(1500, 1000), "1.50");
+    }
 
     #[test]
     fn small_sizes_are_plain_bytes() {

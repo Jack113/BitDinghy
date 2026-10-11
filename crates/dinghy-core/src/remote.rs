@@ -103,6 +103,11 @@ pub enum Command {
     SetAllowHttpLinks {
         allow: bool,
     },
+    /// Change the sharing limits (ratio in percent, minutes; 0: none), for this run.
+    SetSharingLimits {
+        ratio_percent: u32,
+        minutes: u32,
+    },
     /// Change the speed limits, in KiB/s (0: no limit), for this run (the CLI saves them).
     SetSpeedLimits {
         download_kib: u32,
@@ -401,6 +406,15 @@ async fn answer_or_problem(
         }
         Command::SetMaxActiveDownloads { limit } => {
             engine.set_max_active_downloads(limit);
+            Reply::Changed {
+                name: String::new(),
+            }
+        }
+        Command::SetSharingLimits {
+            ratio_percent,
+            minutes,
+        } => {
+            engine.set_sharing_limits(ratio_percent, minutes);
             Reply::Changed {
                 name: String::new(),
             }

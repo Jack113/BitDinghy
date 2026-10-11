@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
+use dinghy_core::display::{
+    format_bytes, format_eta, format_speed, fraction, sharing_text, waiting_text,
+};
 use dinghy_core::input::{self, Input};
 use dinghy_core::settings::{MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB};
 use dinghy_core::{
@@ -55,6 +57,33 @@ fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
             .speed(16.0),
     );
     !editing.dragged() && !editing.has_focus()
+}
+
+/// What the sharing limits mean, after a change.
+fn sharing_limits_text(ratio_percent: u32, minutes: u32) -> String {
+    let ratio = (ratio_percent > 0).then(|| {
+        format!(
+            "once it has shared {:.2} times its size",
+            f64::from(ratio_percent) / 100.0
+        )
+    });
+    let time = (minutes > 0).then(|| {
+        format!(
+            "after {minutes} minute{} of sharing",
+            if minutes == 1 { "" } else { "s" }
+        )
+    });
+    match (ratio, time) {
+        (None, None) => {
+            "Finished downloads share for as long as BitDinghy runs, from now on.".to_string()
+        }
+        (Some(one), None) | (None, Some(one)) => {
+            format!("A finished download stops sharing {one}, from now on.")
+        }
+        (Some(ratio), Some(time)) => {
+            format!("A finished download stops sharing {ratio} or {time}, from now on.")
+        }
+    }
 }
 
 /// A limit in words: "none", or "500 KiB/s".
@@ -122,6 +151,8 @@ struct BitDinghyApp {
     max_active_choice: u32,
     /// The speed limits being edited in the settings (KiB/s, 0: no limit): download, upload.
     limits_choice: (u32, u32),
+    /// The sharing limits being edited in the settings: ratio (1.5) and minutes (0: none).
+    sharing_choice: (f64, u32),
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
@@ -162,6 +193,10 @@ impl BitDinghyApp {
             _ => None,
         };
         let max_active_choice = profile.settings().max_active_downloads;
+        let sharing_choice = (
+            f64::from(profile.settings().stop_sharing_ratio_percent) / 100.0,
+            profile.settings().stop_sharing_after_minutes,
+        );
         let limits_choice = (
             profile.settings().download_limit_kib,
             profile.settings().upload_limit_kib,
@@ -185,6 +220,7 @@ impl BitDinghyApp {
             showing_files: HashSet::new(),
             max_active_choice,
             limits_choice,
+            sharing_choice,
             channel_problem,
             fetching: None,
         }
@@ -364,6 +400,7 @@ impl BitDinghyApp {
         let mut change_http = None;
         let mut change_max_active = None;
         let mut change_limits = None;
+        let mut change_sharing = None;
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
             .default_open(self.engine.is_err())
@@ -433,6 +470,36 @@ impl BitDinghyApp {
                 if settled && self.limits_choice != saved_limits {
                     change_limits = Some(self.limits_choice);
                 }
+                let saved_sharing = (
+                    self.profile.settings().stop_sharing_ratio_percent,
+                    self.profile.settings().stop_sharing_after_minutes,
+                );
+                let mut settled = true;
+                ui.horizontal(|ui| {
+                    ui.label("Stop sharing a finished download at ratio");
+                    let ratio = ui.add(
+                        egui::DragValue::new(&mut self.sharing_choice.0)
+                            .range(0.0..=1000.0)
+                            .speed(0.05)
+                            .fixed_decimals(2),
+                    );
+                    settled &= !ratio.dragged() && !ratio.has_focus();
+                    ui.label("or after");
+                    let minutes = ui.add(
+                        egui::DragValue::new(&mut self.sharing_choice.1)
+                            .range(0..=dinghy_core::settings::MAX_SHARING_MINUTES),
+                    );
+                    settled &= !minutes.dragged() && !minutes.has_focus();
+                    ui.label("minutes");
+                    ui.weak("(0 = never. Ratio 1 = it has shared as much as its size.)");
+                });
+                let chosen_sharing = (
+                    (self.sharing_choice.0 * 100.0).round() as u32,
+                    self.sharing_choice.1,
+                );
+                if settled && chosen_sharing != saved_sharing {
+                    change_sharing = Some(chosen_sharing);
+                }
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
                         error_color(ui)
@@ -444,6 +511,25 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some((ratio_percent, minutes)) = change_sharing {
+            self.settings_message = Some(
+                match self.profile.set_sharing_limits(ratio_percent, minutes) {
+                    Ok(()) => {
+                        if let Ok(engine) = &self.engine {
+                            engine.set_sharing_limits(ratio_percent, minutes);
+                        }
+                        (sharing_limits_text(ratio_percent, minutes), false)
+                    }
+                    Err(error) => {
+                        self.sharing_choice = (
+                            f64::from(self.profile.settings().stop_sharing_ratio_percent) / 100.0,
+                            self.profile.settings().stop_sharing_after_minutes,
+                        );
+                        (error.to_string(), true)
+                    }
+                },
+            );
         }
         if let Some((download, upload)) = change_limits {
             self.settings_message = Some(match self.profile.set_speed_limits(download, upload) {
@@ -725,6 +811,9 @@ fn removed_message(
 fn control_for(download: &DownloadSnapshot) -> (&'static str, Control) {
     match download.status {
         DownloadStatus::Paused => ("Resume", Control::Resume(download.id)),
+        DownloadStatus::Finished if download.sharing_stopped => {
+            ("Share again", Control::Resume(download.id))
+        }
         DownloadStatus::Failed => ("Try again", Control::Resume(download.id)),
         _ => ("Pause", Control::Pause(download.id)),
     }
@@ -1021,11 +1110,7 @@ fn draw_download(
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
                 ui.colored_label(success_color(ui), finished_text(download, &folder));
-                ui.label(format!(
-                    "Sharing back to {} people ({} uploaded so far). Closing BitDinghy stops sharing.",
-                    download.peers_connected,
-                    format_bytes(download.uploaded_bytes)
-                ));
+                ui.label(sharing_text(download));
             } else {
                 ui.label(format!(
                     "{} of {}   |   {}   |   {} left   |   {} people connected ({} known)",
@@ -1114,7 +1199,31 @@ mod tests {
             files_chosen: 0,
             note: None,
             can_use_existing_files: false,
+            shared_seconds: 0,
+            sharing_stopped: false,
         }
+    }
+
+    #[test]
+    fn a_download_stopped_by_a_sharing_limit_offers_share_again() {
+        let mut download = snapshot(DownloadStatus::Finished, 100, 100);
+        assert_eq!(control_for(&download).0, "Pause");
+        download.sharing_stopped = true;
+        assert_eq!(
+            control_for(&download),
+            ("Share again", Control::Resume(download.id))
+        );
+        assert!(sharing_text(&download).starts_with("Stopped sharing"));
+    }
+
+    #[test]
+    fn the_sharing_limits_are_said_in_words() {
+        assert!(sharing_limits_text(0, 0).contains("for as long as BitDinghy runs"));
+        assert_eq!(
+            sharing_limits_text(150, 0),
+            "A finished download stops sharing once it has shared 1.50 times its size, from now on."
+        );
+        assert!(sharing_limits_text(100, 60).contains("or after 60 minutes of sharing"));
     }
 
     #[test]

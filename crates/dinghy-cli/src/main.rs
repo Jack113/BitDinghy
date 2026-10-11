@@ -8,7 +8,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
+use dinghy_core::display::{
+    format_bytes, format_eta, format_speed, fraction, ratio_text, waiting_text,
+};
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
     AddOptions, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, SavedDownload,
@@ -132,6 +134,10 @@ enum SettingKey {
     DownloadLimit,
     /// The most all downloads together may upload (share), in KiB/s (at least 32); 0 = no limit
     UploadLimit,
+    /// A finished download stops sharing at this ratio, like 1.5 (shared 1.5 times its size); none = never
+    StopSharingAtRatio,
+    /// A finished download stops sharing after this many minutes of sharing; none = never
+    StopSharingAfter,
 }
 
 #[derive(Args)]
@@ -233,6 +239,26 @@ fn show_settings(profile: &Profile) {
         "upload-limit:  {}",
         limit_text(profile.settings().upload_limit_kib)
     );
+    let ratio = profile.settings().stop_sharing_ratio_percent;
+    println!(
+        "stop-sharing-at-ratio:  {}",
+        if ratio == 0 {
+            "none  (finished downloads share while BitDinghy runs)".to_string()
+        } else {
+            format!(
+                "{}  (a finished download stops sharing once it has shared that many times its size)",
+                ratio_from_percent(ratio)
+            )
+        }
+    );
+    println!(
+        "stop-sharing-after:  {}",
+        match profile.settings().stop_sharing_after_minutes {
+            0 => "none".to_string(),
+            1 => "1 minute of sharing".to_string(),
+            minutes => format!("{minutes} minutes of sharing"),
+        }
+    );
     println!(
         "max-active-downloads:  {}",
         match profile.settings().max_active_downloads {
@@ -248,6 +274,22 @@ fn limit_text(kib: u32) -> String {
         0 => "0  (no limit)".to_string(),
         kib => format!("{kib}  KiB/s ({})", format_speed(u64::from(kib) * 1024)),
     }
+}
+
+/// A ratio typed on the command line ("1.5", or "none"/"off"/"0"), in percent (150).
+fn parse_ratio(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if ["none", "off", "no"].contains(&value.to_ascii_lowercase().as_str()) {
+        return Some(0);
+    }
+    let ratio: f64 = value.parse().ok()?;
+    (ratio.is_finite() && (0.0..=1000.0).contains(&ratio)).then(|| (ratio * 100.0).round() as u32)
+}
+
+/// A ratio in percent (150) as people write it ("1.5").
+fn ratio_from_percent(percent: u32) -> String {
+    let text = format!("{:.2}", f64::from(percent) / 100.0);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// A speed limit typed on the command line: a number of KiB/s, or "none"/"off" for no limit.
@@ -298,6 +340,24 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        SettingKey::StopSharingAtRatio => match parse_ratio(&value) {
+            Some(percent) => {
+                profile.set_sharing_limits(percent, profile.settings().stop_sharing_after_minutes)
+            }
+            None => {
+                eprintln!("stop-sharing-at-ratio is a number such as 1.5 (up to 1000), or none.");
+                return ExitCode::FAILURE;
+            }
+        },
+        SettingKey::StopSharingAfter => match parse_limit(&value) {
+            Some(minutes) => {
+                profile.set_sharing_limits(profile.settings().stop_sharing_ratio_percent, minutes)
+            }
+            None => {
+                eprintln!("stop-sharing-after is a number of minutes, such as 120, or none.");
+                return ExitCode::FAILURE;
+            }
+        },
         SettingKey::DownloadLimit | SettingKey::UploadLimit => match parse_limit(&value) {
             Some(kib) => {
                 let (mut download, mut upload) = (
@@ -332,6 +392,12 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 SettingKey::MaxActiveDownloads => Some(remote::Command::SetMaxActiveDownloads {
                     limit: profile.settings().max_active_downloads as usize,
                 }),
+                SettingKey::StopSharingAtRatio | SettingKey::StopSharingAfter => {
+                    Some(remote::Command::SetSharingLimits {
+                        ratio_percent: profile.settings().stop_sharing_ratio_percent,
+                        minutes: profile.settings().stop_sharing_after_minutes,
+                    })
+                }
                 SettingKey::DownloadLimit | SettingKey::UploadLimit => {
                     Some(remote::Command::SetSpeedLimits {
                         download_kib: profile.settings().download_limit_kib,
@@ -1423,9 +1489,15 @@ fn live_state(download: &DownloadSnapshot) -> String {
         DownloadStatus::Queued => "queued: starts when another download finishes".to_string(),
         DownloadStatus::Paused if download.total_bytes == 0 => "paused".to_string(),
         DownloadStatus::Paused => format!("paused at {percent:.1}%"),
-        DownloadStatus::Finished => format!(
-            "finished, sharing ({} uploaded)",
+        DownloadStatus::Finished if download.sharing_stopped => format!(
+            "finished, stopped sharing at ratio {} ({} uploaded)",
+            ratio_text(download.uploaded_bytes, download.total_bytes),
             format_bytes(download.uploaded_bytes)
+        ),
+        DownloadStatus::Finished => format!(
+            "finished, sharing ({} uploaded, ratio {})",
+            format_bytes(download.uploaded_bytes),
+            ratio_text(download.uploaded_bytes, download.total_bytes)
         ),
         DownloadStatus::Failed => format!(
             "failed: {}",
@@ -1542,6 +1614,8 @@ mod tests {
             files_chosen: 3,
             note: None,
             can_use_existing_files: false,
+            shared_seconds: 0,
+            sharing_stopped: false,
         }
     }
 
@@ -1619,6 +1693,19 @@ mod tests {
         assert_eq!(example_pick(3), "1,3");
         assert_eq!(example_pick(4), "1,3-4");
         assert_eq!(example_pick(400), "1,3-5");
+    }
+
+    #[test]
+    fn ratios_are_typed_like_people_write_them() {
+        assert_eq!(parse_ratio("1.5"), Some(150));
+        assert_eq!(parse_ratio("2"), Some(200));
+        assert_eq!(parse_ratio("none"), Some(0));
+        assert_eq!(parse_ratio("-1"), None);
+        assert_eq!(parse_ratio("5000"), None);
+        assert_eq!(parse_ratio("lots"), None);
+        assert_eq!(ratio_from_percent(150), "1.5");
+        assert_eq!(ratio_from_percent(200), "2");
+        assert_eq!(ratio_from_percent(125), "1.25");
     }
 
     #[test]

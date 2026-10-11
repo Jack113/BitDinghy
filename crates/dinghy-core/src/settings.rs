@@ -58,7 +58,21 @@ pub struct Settings {
     /// The most all downloads together may upload (share), in KiB per second. 0 means no limit.
     #[serde(skip_serializing_if = "is_zero")]
     pub upload_limit_kib: u32,
+    /// A finished download stops sharing once it has uploaded this share of its size, in percent
+    /// (100 = "ratio 1.0": as much as it downloaded). 0 means no such limit (added in M10).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stop_sharing_ratio_percent: u32,
+    /// A finished download stops sharing after sharing this many minutes in total. 0 means no
+    /// such limit (added in M10).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stop_sharing_after_minutes: u32,
 }
+
+/// The highest sharing ratio that can be set, in percent (a ratio of 1000).
+pub const MAX_SHARING_RATIO_PERCENT: u32 = 100_000;
+
+/// The longest sharing time that can be set, in minutes (a year).
+pub const MAX_SHARING_MINUTES: u32 = 525_600;
 
 /// The lowest speed limit, in KiB per second. librqbit asks for data in blocks of 16 KiB and can't
 /// wait for a block bigger than the limit, so anything lower would stop downloads altogether.
@@ -94,6 +108,8 @@ impl Default for Settings {
             max_active_downloads: DEFAULT_MAX_ACTIVE_DOWNLOADS,
             download_limit_kib: 0,
             upload_limit_kib: 0,
+            stop_sharing_ratio_percent: 0,
+            stop_sharing_after_minutes: 0,
         }
     }
 }
@@ -433,6 +449,27 @@ mod tests {
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().settings.max_active_downloads, 0);
+    }
+
+    #[test]
+    fn sharing_limits_are_remembered_and_off_by_default() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        let loaded = store.load().settings;
+        assert_eq!(
+            (
+                loaded.stop_sharing_ratio_percent,
+                loaded.stop_sharing_after_minutes
+            ),
+            (0, 0)
+        );
+        let settings = Settings {
+            stop_sharing_ratio_percent: 150,
+            stop_sharing_after_minutes: 90,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        assert_eq!(store.load().settings, settings);
     }
 
     #[test]

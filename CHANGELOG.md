@@ -9,6 +9,15 @@ format is called out here.
 
 ## [Unreleased]
 
+### Added
+- **Sharing limits.** In Settings (or `dinghy settings set stop-sharing-at-ratio 1.5` /
+  `stop-sharing-after 120`), a finished download can stop sharing once it has shared a number of
+  times its size, or after so many minutes of sharing. Off unless you choose. A download that
+  stopped this way stays stopped after a restart; **Share again** (or `dinghy resume <n>`) shares
+  it again. The window and `dinghy list` now show how much each finished download has uploaded
+  in total (over all runs), its ratio and how long it has shared. The saved download list moves
+  to **version 4**; older lists are upgraded the first time BitDinghy opens them.
+
 ### Fixed
 - Five messages had a long gap of spaces in the middle (a broken line join); a test now checks
   every message for this.
