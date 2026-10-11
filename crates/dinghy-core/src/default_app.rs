@@ -17,6 +17,10 @@
 //!
 //! The portable copy can be moved, so [`status`] says which BitDinghy.exe is registered.
 
+// Only Windows registers file types this way; elsewhere these parts are unused (Linux will use
+// a .desktop file with the port, see TODO.md).
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
