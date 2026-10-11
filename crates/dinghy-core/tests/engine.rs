@@ -1999,3 +1999,62 @@ async fn pausing_while_files_are_checked_pauses_and_resume_checks_again() {
     assert_eq!(done.progress_bytes, 80_000_005);
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// History (M14).
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn todays_totals_and_the_history_remember_what_happened() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 1_000_000).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let mut config = offline_config(&download_dir);
+    config.saved_list_file = Some(list.clone());
+
+    let first_run = Engine::start(config.clone()).await.unwrap();
+    let id = first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    // Counted within a second or two.
+    let deadline = Instant::now() + TIMEOUT;
+    let today = loop {
+        let totals = first_run.daily_totals(1);
+        if let Some(today) = totals.last()
+            && today.downloaded_bytes >= 1_000_000
+        {
+            break *today;
+        }
+        assert!(Instant::now() < deadline, "not counted: {totals:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(today.day, dinghy_core::days::today());
+    assert!(!first_run.speed_history().is_empty(), "speeds are kept");
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Saved when the engine stopped: still there after a restart.
+    let next_run = Engine::start(config).await.unwrap();
+    let saved = next_run.daily_totals(1);
+    assert!(
+        saved
+            .last()
+            .is_some_and(|day| day.downloaded_bytes >= 1_000_000),
+        "{saved:?}"
+    );
+    assert!(next_run.history(10).is_empty());
+
+    // Removing it puts it in the history, with its size and where it was.
+    let back = wait_for_status(&next_run, &[DownloadStatus::Finished]).await;
+    next_run.remove(back.id, false).await.unwrap();
+    let history = next_run.history(10);
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0].name, "big");
+    assert_eq!(history[0].size_bytes, 1_000_000);
+    assert!(history[0].finished_at.is_some());
+    assert_eq!(history[0].folder, download_dir);
+    let _ = id;
+    next_run.shutdown().await;
+}

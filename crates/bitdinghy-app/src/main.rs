@@ -12,12 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dinghy_core::display::{
-    format_bytes, format_eta, format_speed, fraction, sharing_text, waiting_text,
+    format_bytes, format_eta, format_speed, fraction, history_line, sharing_text, waiting_text,
 };
 use dinghy_core::input::{self, Input};
 use dinghy_core::settings::{MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB};
 use dinghy_core::{
-    DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, remote,
+    DayTotal, DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile,
+    days, remote,
 };
 use eframe::egui;
 
@@ -57,6 +58,116 @@ fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
             .speed(16.0),
     );
     !editing.dragged() && !editing.has_focus()
+}
+
+/// The history (M14): speeds of the last ten minutes, the last 30 days' totals, and downloads
+/// that were removed. Folded away until opened.
+fn draw_history(ui: &mut egui::Ui, engine: &Engine) {
+    egui::CollapsingHeader::new("History")
+        .default_open(false)
+        .show(ui, |ui| {
+            let palette = brand::palette(ui.ctx().theme());
+            let (down_color, up_color) = (palette.accent, palette.info);
+
+            ui.label("Speed in the last 10 minutes (MiB/s):");
+            let speeds = engine.speed_history();
+            let count = speeds.len();
+            let line = |pick: fn(&(u64, u64)) -> u64| -> Vec<[f64; 2]> {
+                speeds
+                    .iter()
+                    .enumerate()
+                    .map(|(at, sample)| {
+                        let seconds_ago = at as f64 - count as f64 + 1.0;
+                        [seconds_ago, pick(sample) as f64 / MIB]
+                    })
+                    .collect()
+            };
+            egui_plot::Plot::new("speeds")
+                .height(110.0)
+                .allow_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .include_y(0.0)
+                .x_axis_label("seconds ago")
+                .legend(egui_plot::Legend::default())
+                .show(ui, |plot| {
+                    plot.line(
+                        egui_plot::Line::new("Downloading", line(|sample| sample.0))
+                            .color(down_color),
+                    );
+                    plot.line(
+                        egui_plot::Line::new("Uploading", line(|sample| sample.1)).color(up_color),
+                    );
+                });
+
+            let totals = engine.daily_totals(30);
+            ui.label(day_totals_text(&totals, days::today()));
+            let today = days::today();
+            let bars = |pick: fn(&DayTotal) -> u64, offset: f64| -> Vec<egui_plot::Bar> {
+                totals
+                    .iter()
+                    .map(|total| {
+                        egui_plot::Bar::new(
+                            (total.day - today) as f64 + offset,
+                            pick(total) as f64 / MIB,
+                        )
+                        .width(0.4)
+                    })
+                    .collect()
+            };
+            egui_plot::Plot::new("days")
+                .height(110.0)
+                .allow_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .include_x(-29.5)
+                .include_x(0.5)
+                .include_y(0.0)
+                .x_axis_label("days ago (MiB per day)")
+                .legend(egui_plot::Legend::default())
+                .show(ui, |plot| {
+                    plot.bar_chart(
+                        egui_plot::BarChart::new("Downloaded", bars(|t| t.downloaded_bytes, -0.2))
+                            .color(down_color),
+                    );
+                    plot.bar_chart(
+                        egui_plot::BarChart::new("Uploaded", bars(|t| t.uploaded_bytes, 0.2))
+                            .color(up_color),
+                    );
+                });
+
+            ui.add_space(4.0);
+            let removed = engine.history(20);
+            if removed.is_empty() {
+                ui.weak("Downloads you remove are listed here.");
+            } else {
+                ui.label("Removed downloads:");
+                for entry in &removed {
+                    ui.label(history_line(entry));
+                }
+            }
+        });
+}
+
+/// Bytes in a MiB (the charts' unit).
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// "Today: downloaded X, uploaded Y. Last 30 days: downloaded X, uploaded Y."
+fn day_totals_text(totals: &[DayTotal], today: i64) -> String {
+    let sum = |days: &mut dyn Iterator<Item = &DayTotal>| {
+        days.fold((0u64, 0u64), |(down, up), day| {
+            (down + day.downloaded_bytes, up + day.uploaded_bytes)
+        })
+    };
+    let (today_down, today_up) = sum(&mut totals.iter().filter(|day| day.day == today));
+    let (all_down, all_up) = sum(&mut totals.iter());
+    format!(
+        "Today: downloaded {}, uploaded {}. Last 30 days: downloaded {}, uploaded {}.",
+        format_bytes(today_down),
+        format_bytes(today_up),
+        format_bytes(all_down),
+        format_bytes(all_up)
+    )
 }
 
 /// What the window says after a crash.
@@ -812,6 +923,7 @@ impl eframe::App for BitDinghyApp {
             };
             ui.colored_label(color, message);
         }
+        draw_history(ui, &engine);
         let downloads = engine.snapshot();
         if downloads.is_empty() {
             ui.add_space(8.0);
@@ -1330,6 +1442,35 @@ mod tests {
             sharing_stopped: false,
             warning: None,
         }
+    }
+
+    #[test]
+    fn the_history_says_today_and_the_last_30_days() {
+        let day = |day, down, up| DayTotal {
+            day,
+            downloaded_bytes: down,
+            uploaded_bytes: up,
+        };
+        let totals = [day(99, 1024, 0), day(100, 2048, 512)];
+        assert_eq!(
+            day_totals_text(&totals, 100),
+            "Today: downloaded 2.0 KiB, uploaded 512 B. Last 30 days: downloaded 3.0 KiB, uploaded 512 B."
+        );
+        let entry = dinghy_core::HistoryEntry {
+            info_hash: "ab".repeat(20),
+            name: "Some Linux".into(),
+            size_bytes: 1024 * 1024,
+            added_at: 0,
+            finished_at: None,
+            removed_at: 20_737 * 86_400 + 43_200,
+            uploaded_bytes: 0,
+            folder: "C:\\D".into(),
+        };
+        let line = history_line(&entry);
+        assert!(
+            line.starts_with("Some Linux (1.0 MiB), not finished, removed 2026-10-1"),
+            "{line}"
+        );
     }
 
     #[test]

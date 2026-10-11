@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 pub mod crash;
 pub mod data_dir;
+pub mod days;
 pub mod display;
 pub mod drive;
 pub mod engine;
@@ -35,7 +36,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use file_choice::FileChoice;
 pub use profile::Profile;
-pub use saved_list::{SavedDownload, SavedList, Sharing};
+pub use saved_list::{DayTotal, HistoryEntry, SavedDownload, SavedList, Sharing};
 pub use settings::Settings;
 
 /// The program's display name.

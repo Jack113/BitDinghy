@@ -69,6 +69,21 @@ pub fn waiting_text(waited: Duration) -> String {
 }
 
 /// How far along something is, as a number from 0.0 to 1.0. An unknown total (0) counts as 0.
+/// One removed download: "Name (1.4 GiB), finished 2026-10-10, removed 2026-10-11, 200 MiB uploaded".
+pub fn history_line(entry: &crate::HistoryEntry) -> String {
+    let finished = entry
+        .finished_at
+        .map(|at| format!("finished {}", crate::days::date_of(at)))
+        .unwrap_or_else(|| "not finished".to_string());
+    format!(
+        "{} ({}), {finished}, removed {}, {} uploaded",
+        entry.name,
+        format_bytes(entry.size_bytes),
+        crate::days::date_of(entry.removed_at),
+        format_bytes(entry.uploaded_bytes)
+    )
+}
+
 /// A sharing ratio: how many times its size a download has uploaded, like "0.42".
 pub fn ratio_text(uploaded: u64, size: u64) -> String {
     if size == 0 {

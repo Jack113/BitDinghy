@@ -30,7 +30,7 @@ use crate::file_choice;
 pub const FILE_NAME: &str = "downloads.db";
 
 /// The list format this version of BitDinghy writes.
-pub const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 5;
 
 /// Marks the file as BitDinghy's (the letters "BDdy"), so another program's SQLite file is never
 /// mistaken for our list.
@@ -55,7 +55,7 @@ CREATE TABLE downloads (
 /// `tests/fixtures/` (like `downloads-v1.sql` and `downloads-v2.sql`) with a test that loads it.
 /// **Never change a step that has shipped**: lists out there have already been upgraded by it.
 type Migration = fn(&rusqlite::Transaction) -> rusqlite::Result<()>;
-const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4];
+const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5];
 
 /// Version 2 (M6, choosing files): remembers the files the person unticked, as the torrent's file
 /// indexes ("2,5"). Empty means every file, which is what every download from version 1 wants.
@@ -87,6 +87,58 @@ fn v3_to_v4(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
          ALTER TABLE downloads ADD COLUMN finished_at INTEGER;
          ALTER TABLE downloads ADD COLUMN sharing INTEGER NOT NULL DEFAULT 0;",
     )
+}
+
+/// Version 5 (M14, history): downloads that were removed (`history`), and how much was downloaded
+/// and uploaded each day (`daily_totals`, by day number since 1970 in local time).
+fn v4_to_v5(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE history (
+             info_hash      TEXT NOT NULL,
+             name           TEXT NOT NULL,
+             size_bytes     INTEGER NOT NULL,
+             added_at       INTEGER NOT NULL,
+             finished_at    INTEGER,
+             removed_at     INTEGER NOT NULL,
+             uploaded_bytes INTEGER NOT NULL,
+             folder         TEXT NOT NULL
+         );
+         CREATE TABLE daily_totals (
+             day              INTEGER PRIMARY KEY NOT NULL,
+             downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+             uploaded_bytes   INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+}
+
+/// How many removed downloads the history keeps (the oldest go first).
+pub const HISTORY_KEEP: usize = 1000;
+
+/// How many days of totals are kept.
+pub const DAYS_KEEP: i64 = 400;
+
+/// A download that was removed, as the history remembers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub info_hash: String,
+    pub name: String,
+    /// The size of the files that were chosen, in bytes.
+    pub size_bytes: u64,
+    pub added_at: u64,
+    pub finished_at: Option<u64>,
+    pub removed_at: u64,
+    pub uploaded_bytes: u64,
+    /// Where its files were (or still are, if they were kept).
+    pub folder: PathBuf,
+}
+
+/// How much was downloaded and uploaded on one day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayTotal {
+    /// Days since 1 January 1970, in local time.
+    pub day: i64,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
 }
 
 /// The order of the list since version 3, and before it.
@@ -544,8 +596,73 @@ impl SavedList {
         save().map_err(|e| self.error("save", e))
     }
 
-    /// Forgets a download. Returns whether it was in the list. (Its files are not touched here.)
+    /// Removes a download and remembers it in the history. Returns whether it was in the list.
+    /// (Its files are not touched here.)
     pub fn remove(&self, info_hash: &str) -> Result<bool> {
+        let Some(connection) = &self.connection else {
+            return Ok(false);
+        };
+        let Some(download) = self.get(info_hash)? else {
+            return Ok(false);
+        };
+        // The size of the chosen files, from its file list (0 if it never arrived).
+        let size: u64 = download
+            .torrent
+            .as_deref()
+            .and_then(|torrent| crate::file_choice::files_of_torrent(torrent).ok())
+            .map(|files| {
+                let skipped = crate::file_choice::clean_skipped(&files, &download.skipped_files);
+                files
+                    .iter()
+                    .filter(|file| !skipped.contains(&file.index))
+                    .map(|file| file.size)
+                    .sum()
+            })
+            .unwrap_or(0);
+        let folder = download
+            .output_folder
+            .clone()
+            .unwrap_or_else(|| download.download_dir.clone());
+        let archive = || -> rusqlite::Result<usize> {
+            // All or nothing: in the history and out of the list, or neither.
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO history (info_hash, name, size_bytes, added_at, finished_at, \
+                 removed_at, uploaded_bytes, folder) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    download.info_hash,
+                    download.name,
+                    i64::try_from(size).unwrap_or(i64::MAX),
+                    i64::try_from(download.added_at).unwrap_or(i64::MAX),
+                    download
+                        .finished_at
+                        .map(|at| i64::try_from(at).unwrap_or(i64::MAX)),
+                    i64::try_from(now_seconds()).unwrap_or(i64::MAX),
+                    i64::try_from(download.uploaded_bytes).unwrap_or(i64::MAX),
+                    folder.to_string_lossy(),
+                ],
+            )?;
+            transaction.execute(
+                &format!(
+                    "DELETE FROM history WHERE rowid NOT IN \
+                     (SELECT rowid FROM history ORDER BY removed_at DESC, rowid DESC LIMIT {HISTORY_KEEP})"
+                ),
+                [],
+            )?;
+            let removed = transaction.execute(
+                "DELETE FROM downloads WHERE info_hash = ?1",
+                params![info_hash],
+            )?;
+            transaction.commit()?;
+            Ok(removed)
+        };
+        let removed = archive().map_err(|e| self.error("save", e))?;
+        Ok(removed == 1)
+    }
+
+    /// Forgets a download WITHOUT a history entry (one the safety check refused). Returns whether
+    /// it was in the list.
+    pub fn forget(&self, info_hash: &str) -> Result<bool> {
         let Some(connection) = &self.connection else {
             return Ok(false);
         };
@@ -556,6 +673,58 @@ impl SavedList {
             )
             .map_err(|e| self.error("save", e))?;
         Ok(removed == 1)
+    }
+
+    /// Adds to a day's totals (and forgets days older than [`DAYS_KEEP`]).
+    pub fn add_to_day(&self, day: i64, downloaded: u64, uploaded: u64) -> Result<()> {
+        let Some(connection) = &self.connection else {
+            return Ok(());
+        };
+        let add = || -> rusqlite::Result<()> {
+            connection.execute(
+                "INSERT INTO daily_totals (day, downloaded_bytes, uploaded_bytes) \
+                 VALUES (?1, ?2, ?3) ON CONFLICT(day) DO UPDATE SET \
+                 downloaded_bytes = downloaded_bytes + excluded.downloaded_bytes, \
+                 uploaded_bytes = uploaded_bytes + excluded.uploaded_bytes",
+                params![
+                    day,
+                    i64::try_from(downloaded).unwrap_or(i64::MAX),
+                    i64::try_from(uploaded).unwrap_or(i64::MAX),
+                ],
+            )?;
+            connection.execute(
+                "DELETE FROM daily_totals WHERE day < ?1",
+                params![day - DAYS_KEEP],
+            )?;
+            Ok(())
+        };
+        add().map_err(|e| self.error("save", e))
+    }
+
+    /// The removed downloads, newest first (at most `limit`).
+    pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let Some(connection) = &self.connection else {
+            return Ok(Vec::new());
+        };
+        history_rows(connection, limit).map_err(|e| self.error("read", e))
+    }
+
+    /// The totals of the days from `first_day` on, oldest first (days with nothing are left out).
+    pub fn daily_totals(&self, first_day: i64) -> Result<Vec<DayTotal>> {
+        let Some(connection) = &self.connection else {
+            return Ok(Vec::new());
+        };
+        day_rows(connection, first_day).map_err(|e| self.error("read", e))
+    }
+
+    /// [`SavedList::history`] without the lock, for `dinghy history` (an older list has none).
+    pub fn read_history(path: &Path, limit: usize) -> Result<Vec<HistoryEntry>> {
+        read_extra(path, |connection| history_rows(connection, limit))
+    }
+
+    /// [`SavedList::daily_totals`] without the lock, for `dinghy history`.
+    pub fn read_daily_totals(path: &Path, first_day: i64) -> Result<Vec<DayTotal>> {
+        read_extra(path, |connection| day_rows(connection, first_day))
     }
 
     fn error(&self, action: &str, error: rusqlite::Error) -> Error {
@@ -695,6 +864,73 @@ fn set_aside(path: &Path) -> Option<PathBuf> {
         let _ = std::fs::rename(&journal, with_suffix(&backup, "-journal"));
     }
     Some(backup)
+}
+
+/// Reads something from a list file without the lock; a missing file, or a list older than
+/// version 5, simply has nothing to show.
+fn read_extra<T>(
+    path: &Path,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<Vec<T>>,
+) -> Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let problem = |reason: String| {
+        Error::SavedList(format!(
+            "BitDinghy couldn't read the download list in {} ({reason}).",
+            path.display()
+        ))
+    };
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| problem(e.to_string()))?;
+    let _ = connection.busy_timeout(Duration::from_secs(5));
+    match check_identity(&connection) {
+        Ok(Some(version)) if version >= 5 => read(&connection).map_err(|e| problem(e.to_string())),
+        Ok(_) => Ok(Vec::new()),
+        Err(Failure::Newer(found)) => {
+            Err(Error::SavedList(Problem::NewerVersion { found }.message()))
+        }
+        Err(Failure::Damaged(reason) | Failure::CantOpen(reason)) => Err(problem(reason)),
+    }
+}
+
+fn history_rows(connection: &Connection, limit: usize) -> rusqlite::Result<Vec<HistoryEntry>> {
+    let mut statement = connection.prepare(
+        "SELECT info_hash, name, size_bytes, added_at, finished_at, removed_at, uploaded_bytes, \
+         folder FROM history ORDER BY removed_at DESC, rowid DESC LIMIT ?1",
+    )?;
+    let number = |value: i64| u64::try_from(value).unwrap_or(0);
+    let rows = statement.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+        Ok(HistoryEntry {
+            info_hash: row.get(0)?,
+            name: row.get(1)?,
+            size_bytes: number(row.get(2)?),
+            added_at: number(row.get(3)?),
+            finished_at: row.get::<_, Option<i64>>(4)?.map(number),
+            removed_at: number(row.get(5)?),
+            uploaded_bytes: number(row.get(6)?),
+            folder: PathBuf::from(row.get::<_, String>(7)?),
+        })
+    })?;
+    rows.collect()
+}
+
+fn day_rows(connection: &Connection, first_day: i64) -> rusqlite::Result<Vec<DayTotal>> {
+    let mut statement = connection.prepare(
+        "SELECT day, downloaded_bytes, uploaded_bytes FROM daily_totals WHERE day >= ?1 \
+         ORDER BY day",
+    )?;
+    let rows = statement.query_map(params![first_day], |row| {
+        Ok(DayTotal {
+            day: row.get(0)?,
+            downloaded_bytes: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+            uploaded_bytes: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+        })
+    })?;
+    rows.collect()
 }
 
 fn all_rows(connection: &Connection) -> rusqlite::Result<Vec<SavedDownload>> {
@@ -839,13 +1075,112 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_download_is_forgotten() {
+    fn a_removed_download_leaves_the_list_and_goes_into_the_history() {
         let work = tempfile::tempdir().unwrap();
-        let list = open(&work.path().join(FILE_NAME)).list;
+        let path = work.path().join(FILE_NAME);
+        let list = open(&path).list;
         list.add(&sample(HASH)).unwrap();
+        list.record_sharing(HASH, 777, 60, Some(1_791_700_500), Sharing::AsUsual)
+            .unwrap();
         assert!(list.remove(HASH).unwrap());
         assert!(!list.remove(HASH).unwrap());
         assert!(list.all().unwrap().is_empty());
+
+        let history = list.history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].name, "Ubuntu 24.04");
+        assert_eq!(history[0].uploaded_bytes, 777);
+        assert_eq!(history[0].finished_at, Some(1_791_700_500));
+        assert_eq!(history[0].size_bytes, 0, "its file list never arrived");
+        assert_eq!(history[0].folder, PathBuf::from("C:/Downloads/BitDinghy"));
+        assert_eq!(SavedList::read_history(&path, 10).unwrap(), history);
+    }
+
+    #[test]
+    fn a_refused_download_is_forgotten_without_a_history_entry() {
+        let work = tempfile::tempdir().unwrap();
+        let list = open(&work.path().join(FILE_NAME)).list;
+        list.add(&sample(HASH)).unwrap();
+        assert!(list.forget(HASH).unwrap());
+        assert!(list.all().unwrap().is_empty());
+        assert!(list.history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn daily_totals_add_up_and_old_days_are_forgotten() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        let list = open(&path).list;
+        list.add_to_day(20_000, 100, 10).unwrap();
+        list.add_to_day(20_000, 50, 5).unwrap();
+        list.add_to_day(20_001, 7, 0).unwrap();
+        let days = list.daily_totals(19_000).unwrap();
+        assert_eq!(
+            days,
+            vec![
+                DayTotal {
+                    day: 20_000,
+                    downloaded_bytes: 150,
+                    uploaded_bytes: 15
+                },
+                DayTotal {
+                    day: 20_001,
+                    downloaded_bytes: 7,
+                    uploaded_bytes: 0
+                },
+            ]
+        );
+        assert_eq!(list.daily_totals(20_001).unwrap().len(), 1);
+        assert_eq!(SavedList::read_daily_totals(&path, 0).unwrap(), days);
+        // A day long after: days more than DAYS_KEEP before it go.
+        list.add_to_day(20_001 + DAYS_KEEP + 1, 1, 1).unwrap();
+        assert_eq!(list.daily_totals(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_version_5_fixture_still_loads() {
+        // This fixture was written with list version 5 and must load in EVERY later version.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v5.sql"))
+            .unwrap();
+        assert_eq!(SavedList::read(&path).unwrap().len(), 1);
+        assert_eq!(SavedList::read_history(&path, 10).unwrap().len(), 1);
+        let opened = open(&path);
+        assert!(opened.problem.is_none(), "{:?}", opened.problem);
+        let list = opened.list;
+        assert_eq!(list.all().unwrap()[0].name, "testdata");
+        let history = list.history(10).unwrap();
+        assert_eq!(history[0].name, "Old Linux");
+        assert_eq!(history[0].size_bytes, 1_500_000_000);
+        assert_eq!(history[0].removed_at, 1_791_800_000);
+        assert_eq!(
+            list.daily_totals(0).unwrap(),
+            vec![DayTotal {
+                day: 20_737,
+                downloaded_bytes: 1_500_000_000,
+                uploaded_bytes: 250_000_000
+            }]
+        );
+    }
+
+    #[test]
+    fn an_older_list_has_no_history_to_read() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v4.sql"))
+            .unwrap();
+        assert!(SavedList::read_history(&path, 10).unwrap().is_empty());
+        assert!(SavedList::read_daily_totals(&path, 0).unwrap().is_empty());
+        assert!(
+            SavedList::read_history(&work.path().join("missing.db"), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1251,7 +1586,8 @@ mod tests {
             .unwrap();
 
         let upgraded =
-            SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, v3_to_v4, add_rating]).unwrap();
+            SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, add_rating])
+                .unwrap();
         assert!(upgraded.problem.is_none());
         assert_eq!(upgraded.list.all().unwrap().len(), 2);
         drop(upgraded);
@@ -1259,7 +1595,10 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5, "every step ran, from version 1");
+        assert_eq!(version, 6, "every step ran, from version 1");
+        connection
+            .prepare("SELECT day FROM daily_totals")
+            .expect("the version 5 tables exist");
         connection
             .prepare(
                 "SELECT skipped_files, position, uploaded_bytes, sharing, rating FROM downloads",

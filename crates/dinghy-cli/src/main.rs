@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{
-    format_bytes, format_eta, format_speed, fraction, ratio_text, waiting_text,
+    format_bytes, format_eta, format_speed, fraction, history_line, ratio_text, waiting_text,
 };
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
@@ -43,6 +43,8 @@ enum Command {
     Check(NumberArg),
     /// Move a download up or down the list, which is the order the queue starts them in
     Move(MoveArgs),
+    /// Show how much was downloaded and uploaded each day, and the downloads you removed
+    History(HistoryArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -51,6 +53,13 @@ enum Command {
 struct NumberArg {
     /// The download's number, as shown by `dinghy list`
     number: usize,
+}
+
+#[derive(Args)]
+struct HistoryArgs {
+    /// How many days to show (today included)
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(i64).range(1..=400))]
+    days: i64,
 }
 
 #[derive(Args)]
@@ -195,6 +204,7 @@ async fn main() -> ExitCode {
         Some(Command::Files(args)) => files(args).await,
         Some(Command::Check(which)) => check(which.number).await,
         Some(Command::Move(args)) => move_download(args).await,
+        Some(Command::History(args)) => history(args),
         Some(Command::Settings(args)) => settings(args).await,
         None => {
             println!("{}", dinghy_core::about());
@@ -1051,6 +1061,78 @@ async fn move_download(args: MoveArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `dinghy history`: each day's totals and the removed downloads, from the saved list (it works
+/// while the window is open; the window saves its counts every 15 seconds).
+fn history(args: HistoryArgs) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    let Some(path) = profile.saved_list_path() else {
+        println!("BitDinghy has no data folder right now, so it doesn't remember any history.");
+        return ExitCode::SUCCESS;
+    };
+    let first_day = dinghy_core::days::today() - args.days + 1;
+    let (totals, removed) = match (
+        SavedList::read_daily_totals(&path, first_day),
+        SavedList::read_history(&path, 10),
+    ) {
+        (Ok(totals), Ok(removed)) => (totals, removed),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for line in history_lines(&totals, &removed, args.days) {
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// What `dinghy history` prints.
+fn history_lines(
+    totals: &[dinghy_core::DayTotal],
+    removed: &[dinghy_core::HistoryEntry],
+    days: i64,
+) -> Vec<String> {
+    let plural = if days == 1 { "" } else { "s" };
+    let mut lines = Vec::new();
+    if totals.is_empty() {
+        lines.push(format!(
+            "Nothing was downloaded or uploaded in the last {days} day{plural}."
+        ));
+    } else {
+        lines.push(format!(
+            "Downloaded and uploaded per day (last {days} day{plural}):"
+        ));
+        let (mut down, mut up) = (0, 0);
+        for total in totals {
+            lines.push(format!(
+                "  {}  downloaded {:>10}  uploaded {:>10}",
+                dinghy_core::days::date_text(total.day),
+                format_bytes(total.downloaded_bytes),
+                format_bytes(total.uploaded_bytes)
+            ));
+            down += total.downloaded_bytes;
+            up += total.uploaded_bytes;
+        }
+        lines.push(format!(
+            "  Together    downloaded {:>10}  uploaded {:>10}",
+            format_bytes(down),
+            format_bytes(up)
+        ));
+    }
+    if removed.is_empty() {
+        lines.push("No removed downloads yet.".to_string());
+    } else {
+        lines.push("Removed downloads (newest first):".to_string());
+        lines.extend(
+            removed
+                .iter()
+                .map(|entry| format!("  {}", history_line(entry))),
+        );
+    }
+    lines
+}
+
 /// Where a download at `from` (counting from 0) ends up in a list of `count`.
 fn new_place(from: usize, count: usize, to: Move) -> usize {
     let last = count.saturating_sub(1);
@@ -1857,6 +1939,40 @@ mod tests {
         assert_eq!(parse_limit("fast"), None);
         assert_eq!(limit_text(0), "0  (no limit)");
         assert_eq!(limit_text(2048), "2048  KiB/s (2.0 MiB/s)");
+    }
+
+    #[test]
+    fn the_history_lists_days_with_a_total_and_removed_downloads() {
+        let totals = [
+            dinghy_core::DayTotal {
+                day: 20_736,
+                downloaded_bytes: 1024,
+                uploaded_bytes: 0,
+            },
+            dinghy_core::DayTotal {
+                day: 20_737,
+                downloaded_bytes: 2048,
+                uploaded_bytes: 512,
+            },
+        ];
+        let lines = history_lines(&totals, &[], 7);
+        assert_eq!(lines[0], "Downloaded and uploaded per day (last 7 days):");
+        assert!(
+            lines[1].starts_with("  2026-10-10  downloaded    1.0 KiB"),
+            "{lines:?}"
+        );
+        let together = &lines[3];
+        assert!(together.starts_with("  Together"), "{lines:?}");
+        assert!(
+            together.contains("3.0 KiB") && together.ends_with("512 B"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[4], "No removed downloads yet.");
+        let empty = history_lines(&[], &[], 1);
+        assert_eq!(
+            empty[0],
+            "Nothing was downloaded or uploaded in the last 1 day."
+        );
     }
 
     #[test]

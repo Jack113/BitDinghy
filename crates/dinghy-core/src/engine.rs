@@ -32,11 +32,15 @@
 //! and marked "stopped by a limit" (it stays stopped after a restart); "Resume" shares it again,
 //! and limits then no longer apply to it.
 //!
+//! **History** (M14): the same once-a-second count adds what was downloaded (verified pieces) and
+//! uploaded to today's totals (saved with the other counts), and keeps the total speeds of the
+//! last ten minutes for the window's chart. Removing a download puts it in the history.
+//!
 //! **Checking files** (M7): librqbit has no "check again" call, but it checks every piece already
 //! on disk whenever a torrent is added. So [`Engine::check`] takes the download out of librqbit
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -52,6 +56,7 @@ use librqbit::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::days;
 use crate::display::format_bytes;
 use crate::drive;
 use crate::error::{Error, Result};
@@ -61,7 +66,7 @@ use crate::magnet;
 use crate::owned_files::{self, Deleted};
 use crate::plain;
 use crate::safety::{self, Platform};
-use crate::saved_list::{SavedDownload, SavedList, Sharing};
+use crate::saved_list::{DayTotal, HistoryEntry, SavedDownload, SavedList, Sharing};
 use crate::torrent_file::{self, CheckedTorrent};
 use crate::web_link;
 
@@ -297,6 +302,8 @@ struct Counts {
     /// librqbit's upload counter as last seen, and which torrent it belonged to (a check adds the
     /// torrent again, and the new one counts from zero).
     last_seen: Option<(usize, u64)>,
+    /// The same for librqbit's "fetched from people" counter, to count each day's downloads (M14).
+    last_fetched: Option<(usize, u64)>,
     /// Changed since it was last saved.
     unsaved: bool,
 }
@@ -309,6 +316,7 @@ impl Counts {
             finished_at: saved.finished_at,
             sharing: saved.sharing,
             last_seen: None,
+            last_fetched: None,
             unsaved: false,
         }
     }
@@ -420,7 +428,22 @@ struct Shared {
     /// The sharing limits (M10): ratio in percent, and minutes. 0: no such limit.
     sharing_ratio_percent: AtomicU32,
     sharing_minutes: AtomicU32,
+    /// What was downloaded and uploaded today and not saved yet (M14).
+    tally: Mutex<DayTally>,
+    /// The total speeds (download, upload) of the last ten minutes, one a second, oldest first.
+    speeds: Mutex<VecDeque<(u64, u64)>>,
 }
+
+/// Today's not-yet-saved totals.
+#[derive(Debug, Clone, Copy, Default)]
+struct DayTally {
+    day: i64,
+    downloaded: u64,
+    uploaded: u64,
+}
+
+/// How many seconds of speeds the chart keeps.
+const SPEED_HISTORY_SECONDS: usize = 600;
 
 impl Shared {
     /// Runs `action` on the saved list, if there is one. A failure becomes a notice (shown once)
@@ -604,6 +627,8 @@ impl Shared {
         let ratio_percent = u64::from(self.sharing_ratio_percent.load(Ordering::SeqCst));
         let minutes = u64::from(self.sharing_minutes.load(Ordering::SeqCst));
         let entries = lock(&self.entries).clone();
+        let (mut downloaded, mut uploaded) = (0u64, 0u64);
+        let (mut download_speed, mut upload_speed) = (0u64, 0u64);
         for entry in entries {
             let handle = match &*lock(&entry.state) {
                 EntryState::Active(handle) => handle.clone(),
@@ -625,6 +650,22 @@ impl Shared {
             if added > 0 {
                 counts.uploaded_bytes = counts.uploaded_bytes.saturating_add(added);
                 counts.unsaved = true;
+                uploaded = uploaded.saturating_add(added);
+            }
+            // Downloads: everything fetched from people (what used the person's data), counted
+            // like uploads. Files found already on disk are never counted.
+            if let Some(live) = &stats.live {
+                let fetched = live.snapshot.fetched_bytes;
+                let new = match counts.last_fetched {
+                    Some((seen, before)) if seen == torrent && fetched >= before => {
+                        fetched - before
+                    }
+                    _ => fetched,
+                };
+                counts.last_fetched = Some((torrent, fetched));
+                downloaded = downloaded.saturating_add(new);
+                download_speed = download_speed.saturating_add(live.download_speed.as_bytes());
+                upload_speed = upload_speed.saturating_add(live.upload_speed.as_bytes());
             }
 
             if !stats.finished || matches!(stats.state, TorrentStatsState::Initializing { .. }) {
@@ -664,10 +705,44 @@ impl Shared {
                 _ => {}
             }
         }
+
+        // Today's totals: a new day saves the old one first.
+        let today = days::today();
+        if lock(&self.tally).day != today {
+            self.save_tally();
+            lock(&self.tally).day = today;
+        }
+        {
+            let mut tally = lock(&self.tally);
+            tally.downloaded = tally.downloaded.saturating_add(downloaded);
+            tally.uploaded = tally.uploaded.saturating_add(uploaded);
+        }
+        if !elapsed.is_zero() {
+            let mut speeds = lock(&self.speeds);
+            if speeds.len() == SPEED_HISTORY_SECONDS {
+                speeds.pop_front();
+            }
+            speeds.push_back((download_speed, upload_speed));
+        }
     }
 
-    /// Saves the counts that changed since they were last saved.
+    /// Adds today's unsaved totals to the saved list.
+    fn save_tally(&self) {
+        let tally = std::mem::replace(
+            &mut *lock(&self.tally),
+            DayTally {
+                day: days::today(),
+                ..DayTally::default()
+            },
+        );
+        if tally.downloaded > 0 || tally.uploaded > 0 {
+            self.with_list(|list| list.add_to_day(tally.day, tally.downloaded, tally.uploaded));
+        }
+    }
+
+    /// Saves the counts that changed since they were last saved, and today's totals.
     fn save_counts(&self) {
+        self.save_tally();
         let entries = lock(&self.entries).clone();
         for entry in entries {
             if lock(&entry.counts).unsaved {
@@ -811,6 +886,11 @@ impl Engine {
             stopped: AtomicBool::new(false),
             sharing_ratio_percent: AtomicU32::new(config.stop_sharing_ratio_percent),
             sharing_minutes: AtomicU32::new(config.stop_sharing_after_minutes),
+            tally: Mutex::new(DayTally {
+                day: days::today(),
+                ..DayTally::default()
+            }),
+            speeds: Mutex::new(VecDeque::with_capacity(SPEED_HISTORY_SECONDS)),
         });
         // Once a second, let the queue move on (a download that finished frees its place).
         let weak = Arc::downgrade(&shared);
@@ -873,6 +953,43 @@ impl Engine {
             .sharing_ratio_percent
             .store(ratio_percent, Ordering::SeqCst);
         self.shared.sharing_minutes.store(minutes, Ordering::SeqCst);
+    }
+
+    /// The total download and upload speeds of the last ten minutes, one a second, oldest first.
+    pub fn speed_history(&self) -> Vec<(u64, u64)> {
+        lock(&self.shared.speeds).iter().copied().collect()
+    }
+
+    /// Removed downloads, newest first (at most `limit`).
+    pub fn history(&self, limit: usize) -> Vec<HistoryEntry> {
+        self.shared
+            .with_list(|list| list.history(limit))
+            .unwrap_or_default()
+    }
+
+    /// What was downloaded and uploaded on each of the last `days` days (today included), oldest
+    /// first, with today's unsaved part added. Days with nothing are left out.
+    pub fn daily_totals(&self, days: i64) -> Vec<DayTotal> {
+        let today = days::today();
+        let mut totals = self
+            .shared
+            .with_list(|list| list.daily_totals(today - days + 1))
+            .unwrap_or_default();
+        let tally = *lock(&self.shared.tally);
+        if tally.downloaded > 0 || tally.uploaded > 0 {
+            match totals.iter_mut().find(|total| total.day == tally.day) {
+                Some(total) => {
+                    total.downloaded_bytes += tally.downloaded;
+                    total.uploaded_bytes += tally.uploaded;
+                }
+                None => totals.push(DayTotal {
+                    day: tally.day,
+                    downloaded_bytes: tally.downloaded,
+                    uploaded_bytes: tally.uploaded,
+                }),
+            }
+        }
+        totals
     }
 
     /// The port other people can connect to right now, if BitDinghy accepts connections.
@@ -1249,6 +1366,8 @@ impl Engine {
         };
         entry.removed.store(true, Ordering::SeqCst);
         lock(&self.shared.entries).retain(|other| other.id != id);
+        // Its latest counts first, so the history has them.
+        self.shared.save_entry_counts(&entry);
         self.shared.with_list(|list| list.remove(&entry.info_hash));
         // Its place in the queue is free for the next one.
         self.shared.rebalance();
@@ -1772,7 +1891,7 @@ async fn start_download(
         Ok(folder) => folder,
         Err(error) => {
             if matches!(error, Error::UnsafeFileName(_)) {
-                shared.with_list(|list| list.remove(&entry.info_hash));
+                shared.with_list(|list| list.forget(&entry.info_hash));
             }
             return Err(error);
         }
