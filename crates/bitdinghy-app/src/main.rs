@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
-use dinghy_core::settings::MAX_ACTIVE_DOWNLOADS_LIMIT;
+use dinghy_core::settings::{MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB};
 use dinghy_core::{
     DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, remote,
 };
@@ -44,6 +44,42 @@ fn info_color(ui: &egui::Ui) -> egui::Color32 {
 /// the pressed-button color, which the brand makes dark navy, so it vanished on the background.
 fn spinner(ui: &mut egui::Ui) {
     ui.add(egui::Spinner::new().color(info_color(ui)));
+}
+
+/// A speed-limit number box (KiB/s). Returns whether the person has finished changing it (not in
+/// the middle of a drag or typing), so the setting is saved once, not at every step.
+fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
+    let editing = ui.add(
+        egui::DragValue::new(kib)
+            .range(0..=MAX_SPEED_LIMIT_KIB)
+            .speed(16.0),
+    );
+    !editing.dragged() && !editing.has_focus()
+}
+
+/// A limit in words: "none", or "500 KiB/s".
+fn limit_words(kib: u32) -> String {
+    match kib {
+        0 => "none".to_string(),
+        kib => format_speed(u64::from(kib) * 1024),
+    }
+}
+
+/// The line with the total speeds and the limits.
+fn totals_text(downloads: &[DownloadSnapshot], (download_kib, upload_kib): (u32, u32)) -> String {
+    let down: u64 = downloads.iter().map(|d| d.download_bytes_per_second).sum();
+    let up: u64 = downloads.iter().map(|d| d.upload_bytes_per_second).sum();
+    let limit = |kib: u32| match kib {
+        0 => String::new(),
+        kib => format!(" (limit {})", format_speed(u64::from(kib) * 1024)),
+    };
+    format!(
+        "In total: downloading {}{}, uploading {}{}.",
+        format_speed(down),
+        limit(download_kib),
+        format_speed(up),
+        limit(upload_kib)
+    )
 }
 
 /// The up and down symbols. egui's own fonts have these two (and not the usual arrows); a test
@@ -84,6 +120,8 @@ struct BitDinghyApp {
     showing_files: HashSet<DownloadId>,
     /// The "downloads at the same time" number being edited in the settings.
     max_active_choice: u32,
+    /// The speed limits being edited in the settings (KiB/s, 0: no limit): download, upload.
+    limits_choice: (u32, u32),
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
@@ -124,6 +162,10 @@ impl BitDinghyApp {
             _ => None,
         };
         let max_active_choice = profile.settings().max_active_downloads;
+        let limits_choice = (
+            profile.settings().download_limit_kib,
+            profile.settings().upload_limit_kib,
+        );
         let folder_text = profile
             .settings()
             .download_dir_or_default()
@@ -142,6 +184,7 @@ impl BitDinghyApp {
             confirming_remove: None,
             showing_files: HashSet::new(),
             max_active_choice,
+            limits_choice,
             channel_problem,
             fetching: None,
         }
@@ -320,6 +363,7 @@ impl BitDinghyApp {
         let mut use_standard = false;
         let mut change_http = None;
         let mut change_max_active = None;
+        let mut change_limits = None;
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
             .default_open(self.engine.is_err())
@@ -374,6 +418,21 @@ impl BitDinghyApp {
                         change_max_active = Some(self.max_active_choice);
                     }
                 });
+                let saved_limits = (
+                    self.profile.settings().download_limit_kib,
+                    self.profile.settings().upload_limit_kib,
+                );
+                let mut settled = true;
+                ui.horizontal(|ui| {
+                    ui.label("Download limit:");
+                    settled &= limit_box(ui, &mut self.limits_choice.0);
+                    ui.label("Upload limit:");
+                    settled &= limit_box(ui, &mut self.limits_choice.1);
+                    ui.weak("(KiB/s, for all downloads together; 0 = no limit, else at least 32)");
+                });
+                if settled && self.limits_choice != saved_limits {
+                    change_limits = Some(self.limits_choice);
+                }
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
                         error_color(ui)
@@ -385,6 +444,30 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some((download, upload)) = change_limits {
+            self.settings_message = Some(match self.profile.set_speed_limits(download, upload) {
+                Ok(()) => {
+                    if let Ok(engine) = &self.engine {
+                        engine.set_speed_limits(download, upload);
+                    }
+                    (
+                        format!(
+                            "Speed limits, from now on: download {}, upload {}.",
+                            limit_words(download),
+                            limit_words(upload)
+                        ),
+                        false,
+                    )
+                }
+                Err(error) => {
+                    self.limits_choice = (
+                        self.profile.settings().download_limit_kib,
+                        self.profile.settings().upload_limit_kib,
+                    );
+                    (error.to_string(), true)
+                }
+            });
         }
         if let Some(limit) = change_max_active {
             self.settings_message = Some(match self.profile.set_max_active_downloads(limit) {
@@ -455,6 +538,8 @@ impl eframe::App for BitDinghyApp {
         ui.ctx().request_repaint_after(Duration::from_millis(500));
 
         ui.label(format!("Saving to: {}", engine.download_dir().display()));
+        let downloads_now = engine.snapshot();
+        ui.label(totals_text(&downloads_now, engine.speed_limits()));
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -879,7 +964,8 @@ fn draw_download(
         DownloadStatus::Queued => {
             ui.colored_label(
                 info_color(ui),
-                "Queued: it starts when another download finishes (Settings: downloads at the                  same time).",
+                "Queued: it starts when another download finishes (Settings: downloads at the \
+                  same time).",
             );
         }
         DownloadStatus::GettingInfo => {
@@ -1029,6 +1115,24 @@ mod tests {
             note: None,
             can_use_existing_files: false,
         }
+    }
+
+    #[test]
+    fn the_totals_line_adds_up_and_shows_the_limits() {
+        let mut one = snapshot(DownloadStatus::Downloading, 0, 0);
+        one.download_bytes_per_second = 1024 * 1024;
+        one.upload_bytes_per_second = 2048;
+        let mut two = one.clone();
+        two.download_bytes_per_second = 512 * 1024;
+        assert_eq!(
+            totals_text(&[one.clone(), two], (0, 0)),
+            "In total: downloading 1.5 MiB/s, uploading 4.0 KiB/s."
+        );
+        assert_eq!(
+            totals_text(&[one], (2048, 64)),
+            "In total: downloading 1.0 MiB/s (limit 2.0 MiB/s), uploading 2.0 KiB/s (limit 64.0 KiB/s)."
+        );
+        assert_eq!(limit_words(0), "none");
     }
 
     #[test]

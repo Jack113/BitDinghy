@@ -128,6 +128,10 @@ enum SettingKey {
     AllowHttpLinks,
     /// How many downloads run at the same time (the others wait in the queue); 0 = no limit
     MaxActiveDownloads,
+    /// The most all downloads together may download, in KiB/s (at least 32); 0 = no limit
+    DownloadLimit,
+    /// The most all downloads together may upload (share), in KiB/s (at least 32); 0 = no limit
+    UploadLimit,
 }
 
 #[derive(Args)]
@@ -222,12 +226,37 @@ fn show_settings(profile: &Profile) {
         }
     );
     println!(
+        "download-limit:  {}",
+        limit_text(profile.settings().download_limit_kib)
+    );
+    println!(
+        "upload-limit:  {}",
+        limit_text(profile.settings().upload_limit_kib)
+    );
+    println!(
         "max-active-downloads:  {}",
         match profile.settings().max_active_downloads {
             0 => "0  (no limit: every download runs at once)".to_string(),
             limit => format!("{limit}  (the others wait in the queue)"),
         }
     );
+}
+
+/// A speed limit for `dinghy settings`.
+fn limit_text(kib: u32) -> String {
+    match kib {
+        0 => "0  (no limit)".to_string(),
+        kib => format!("{kib}  KiB/s ({})", format_speed(u64::from(kib) * 1024)),
+    }
+}
+
+/// A speed limit typed on the command line: a number of KiB/s, or "none"/"off" for no limit.
+fn parse_limit(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if ["none", "off", "no"].contains(&value.to_ascii_lowercase().as_str()) {
+        return Some(0);
+    }
+    value.parse().ok()
 }
 
 /// "on"/"off" (and the usual other ways of saying yes or no).
@@ -269,6 +298,27 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        SettingKey::DownloadLimit | SettingKey::UploadLimit => match parse_limit(&value) {
+            Some(kib) => {
+                let (mut download, mut upload) = (
+                    profile.settings().download_limit_kib,
+                    profile.settings().upload_limit_kib,
+                );
+                if matches!(key, SettingKey::DownloadLimit) {
+                    download = kib;
+                } else {
+                    upload = kib;
+                }
+                profile.set_speed_limits(download, upload)
+            }
+            None => {
+                eprintln!(
+                    "A speed limit is a number of KiB/s, such as 500 (1024 KiB/s = 1 MiB/s), or 0 \
+                     for no limit."
+                );
+                return ExitCode::FAILURE;
+            }
+        },
     };
     match result {
         Ok(()) => {
@@ -282,6 +332,12 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 SettingKey::MaxActiveDownloads => Some(remote::Command::SetMaxActiveDownloads {
                     limit: profile.settings().max_active_downloads as usize,
                 }),
+                SettingKey::DownloadLimit | SettingKey::UploadLimit => {
+                    Some(remote::Command::SetSpeedLimits {
+                        download_kib: profile.settings().download_limit_kib,
+                        upload_kib: profile.settings().upload_limit_kib,
+                    })
+                }
             };
             let told_window = match (live, window_client(&profile).await) {
                 (Some(command), Ok(Some(mut window))) => window.ask(command).await.is_ok(),
@@ -1563,6 +1619,16 @@ mod tests {
         assert_eq!(example_pick(3), "1,3");
         assert_eq!(example_pick(4), "1,3-4");
         assert_eq!(example_pick(400), "1,3-5");
+    }
+
+    #[test]
+    fn speed_limits_are_typed_and_shown_in_kib() {
+        assert_eq!(parse_limit("500"), Some(500));
+        assert_eq!(parse_limit(" none "), Some(0));
+        assert_eq!(parse_limit("Off"), Some(0));
+        assert_eq!(parse_limit("fast"), None);
+        assert_eq!(limit_text(0), "0  (no limit)");
+        assert_eq!(limit_text(2048), "2048  KiB/s (2.0 MiB/s)");
     }
 
     #[test]

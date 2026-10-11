@@ -51,6 +51,24 @@ pub struct Settings {
     /// means no limit. Downloads that are only sharing don't count.
     #[serde(skip_serializing_if = "is_default_max_active")]
     pub max_active_downloads: u32,
+    /// The most all downloads together may download, in KiB per second (added in M9). 0 means no
+    /// limit.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub download_limit_kib: u32,
+    /// The most all downloads together may upload (share), in KiB per second. 0 means no limit.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub upload_limit_kib: u32,
+}
+
+/// The lowest speed limit, in KiB per second. librqbit asks for data in blocks of 16 KiB and can't
+/// wait for a block bigger than the limit, so anything lower would stop downloads altogether.
+pub const MIN_SPEED_LIMIT_KIB: u32 = 32;
+
+/// The highest speed limit that can be set, in KiB per second (about 3.8 GiB/s).
+pub const MAX_SPEED_LIMIT_KIB: u32 = 4_000_000;
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// The standard number of downloads that run at the same time.
@@ -74,6 +92,8 @@ impl Default for Settings {
             download_dir: None,
             allow_http_links: false,
             max_active_downloads: DEFAULT_MAX_ACTIVE_DOWNLOADS,
+            download_limit_kib: 0,
+            upload_limit_kib: 0,
         }
     }
 }
@@ -413,6 +433,31 @@ mod tests {
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().settings.max_active_downloads, 0);
+    }
+
+    #[test]
+    fn speed_limits_are_remembered_and_off_by_default() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        let loaded = store.load().settings;
+        assert_eq!((loaded.download_limit_kib, loaded.upload_limit_kib), (0, 0));
+        let settings = Settings {
+            download_limit_kib: 500,
+            upload_limit_kib: 64,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        let loaded = store.load().settings;
+        assert_eq!(
+            (loaded.download_limit_kib, loaded.upload_limit_kib),
+            (500, 64)
+        );
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(work.path().join(FILE_NAME)).unwrap();
+        assert!(
+            !text.contains("limit_kib"),
+            "no limit isn't written: {text}"
+        );
     }
 
     #[test]

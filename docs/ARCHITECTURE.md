@@ -335,6 +335,21 @@ finishes, and the torrent is taken straight back out.
   requests `SetMaxActiveDownloads`, `SetAllowHttpLinks`), and saving a setting starts from the
   file as it is now, so the window and `dinghy` can't undo each other's changes.
 
+## Speed limits (M9)
+
+- Two settings, `download_limit_kib` and `upload_limit_kib` (KiB/s, 0 = no limit), limit all
+  downloads together. They go to librqbit's session-wide limiter at start (`SessionOptions::
+  ratelimits`) and can change while running (`session.ratelimits.set_*_bps`, via
+  `Engine::set_speed_limits`); the window's Settings and `dinghy settings set download-limit /
+  upload-limit` apply them at once (the CLI tells an open window with `SetSpeedLimits`).
+- **The lowest limit is 32 KiB/s.** librqbit waits for the limiter one data block (16 KiB) at a
+  time and fails outright for a block bigger than the limit's whole budget, which would cut every
+  connection; `profile::check_speed_limit` refuses 1 to 31 (and more than 4,000,000).
+- The window shows a totals line under "Saving to": "In total: downloading X, uploading Y" with
+  the limits in force.
+- A test of the source itself (`tests/source_text.rs`) fails when a message has a long gap of
+  spaces, the sign of a lost `\` line join.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -346,5 +361,6 @@ finishes, and the torrent is taken straight back out.
 | M6 | Choosing files |
 | M7 | Checking files, using files already there |
 | M8 | The queue |
-| M9-M10 | Limits |
+| M9 | Speed limits |
+| M10 | Sharing limits |
 | M14 | History and charts |

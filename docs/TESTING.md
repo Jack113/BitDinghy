@@ -3,6 +3,65 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M9: speed limits
+
+**This test uses about 10 to 15 MB of download data** (the official Arch Linux torrent, held to a
+low speed and paused after half a minute).
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, terminal in
+   `C:\cargo-target\debug`. No Arch `.iso` in `Downloads\BitDinghy`, Arch not in the list.
+2. `.\dinghy.exe settings` shows `download-limit:  0  (no limit)` and `upload-limit:  0  (no
+   limit)`.
+
+**Test 1: the totals line and the limit boxes**
+- Do: open the window and open **Settings**.
+- You should see: under "Saving to: ..." a line "In total: downloading 0 B/s, uploading 0 B/s.";
+  in Settings "Download limit: 0  Upload limit: 0  (KiB/s, for all downloads together; 0 = no
+  limit, else at least 32)".
+
+**Test 2: too low is refused**
+- Do: click the Download limit number, type 10, press Enter.
+- You should see: a red line "The download limit must be 0 (no limit) or at least 32 KiB/s (and
+  at most 4000000 KiB/s). Less than 32 KiB/s would stop downloads altogether." and the box goes
+  back to 0.
+
+**Test 3: a limit**
+- Do: type 200 in the Download limit box, press Enter.
+- You should see: "Speed limits, from now on: download 200.0 KiB/s, upload none." and the totals
+  line ends "...downloading 0 B/s (limit 200.0 KiB/s), uploading 0 B/s."
+
+**Test 4: the limit holds (uses data)**
+- Do: paste `https://archlinux.org/releng/releases/2026.10.01/torrent/` into the link box, press
+  Download, and watch for about 30 seconds.
+- You should see: Arch's speed settles at about 200 KiB/s and never goes far above it (it may jump
+  for a second at the start); the totals line says the same. Don't pause yet.
+
+**Test 5: changing it from the command line**
+- Do: `.\dinghy.exe settings set download-limit 500`
+- You should see: "Saved. BitDinghy's open window uses it straight away." and the settings, with
+  `download-limit:  500  KiB/s (500.0 KiB/s)`. In the window, within a few seconds Arch's speed
+  climbs to about 500 KiB/s and the totals line says "(limit 500.0 KiB/s)". (The Settings box
+  still shows 200 until the window restarts.) Now press **Pause** on Arch.
+
+**Test 6: back to no limit**
+- Do: `.\dinghy.exe settings set download-limit none`
+- You should see: `download-limit:  0  (no limit)`, and in the window the totals line has no
+  "(limit ...)" any more.
+
+**Tidy up:** remove Arch (**Remove**, **Delete the files too**).
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The totals line and the limit boxes | |
+| 2. Too low is refused | |
+| 3. A limit | |
+| 4. The limit holds | |
+| 5. Changing it from the command line | |
+| 6. Back to no limit | |
+
 ## M8: the queue
 
 Data-free: three little test torrents nobody shares, so each download simply waits at 0%.

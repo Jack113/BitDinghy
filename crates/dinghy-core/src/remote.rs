@@ -103,6 +103,11 @@ pub enum Command {
     SetAllowHttpLinks {
         allow: bool,
     },
+    /// Change the speed limits, in KiB/s (0: no limit), for this run (the CLI saves them).
+    SetSpeedLimits {
+        download_kib: u32,
+        upload_kib: u32,
+    },
 }
 
 /// Which download a request is about.
@@ -396,6 +401,18 @@ async fn answer_or_problem(
         }
         Command::SetMaxActiveDownloads { limit } => {
             engine.set_max_active_downloads(limit);
+            Reply::Changed {
+                name: String::new(),
+            }
+        }
+        Command::SetSpeedLimits {
+            download_kib,
+            upload_kib,
+        } => {
+            for (which, kib) in [("download", download_kib), ("upload", upload_kib)] {
+                crate::profile::check_speed_limit(which, kib).map_err(said)?;
+            }
+            engine.set_speed_limits(download_kib, upload_kib);
             Reply::Changed {
                 name: String::new(),
             }

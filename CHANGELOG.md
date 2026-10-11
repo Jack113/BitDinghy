@@ -9,7 +9,15 @@ format is called out here.
 
 ## [Unreleased]
 
+### Fixed
+- Five messages had a long gap of spaces in the middle (a broken line join); a test now checks
+  every message for this.
+
 ### Added
+- **Speed limits** for all downloads together: download and upload, in KiB/s, in the window's
+  Settings or with `dinghy settings set download-limit <n>` / `upload-limit <n>` (0 or `none`
+  for no limit; at least 32 KiB/s, because lower would stop downloads). They apply at once. The
+  window shows the total download and upload speed, with the limits.
 - **A queue.** Only so many downloads run at the same time (3 unless you change it in Settings,
   or with `dinghy settings set max-active-downloads <n>`; 0 means no limit). The others show
   **Queued** and start, in list order, when a place frees up. Finished downloads that are only

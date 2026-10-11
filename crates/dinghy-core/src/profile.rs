@@ -9,8 +9,21 @@ use crate::engine::EngineConfig;
 use crate::error::{Error, Result};
 use crate::saved_list;
 use crate::settings::{
-    Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, Settings, SettingsStore, validate_download_dir,
+    Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB, MIN_SPEED_LIMIT_KIB, Settings,
+    SettingsStore, validate_download_dir,
 };
+
+/// A speed limit must be 0 (no limit) or between the lowest and highest that work.
+pub fn check_speed_limit(which: &str, kib: u32) -> Result<()> {
+    if kib == 0 || (MIN_SPEED_LIMIT_KIB..=MAX_SPEED_LIMIT_KIB).contains(&kib) {
+        return Ok(());
+    }
+    Err(Error::Settings(format!(
+        "The {which} limit must be 0 (no limit) or at least {MIN_SPEED_LIMIT_KIB} KiB/s (and at \
+          most {MAX_SPEED_LIMIT_KIB} KiB/s). Less than {MIN_SPEED_LIMIT_KIB} KiB/s would stop \
+          downloads altogether."
+    )))
+}
 
 /// The name of the file where the DHT keeps its saved contacts, inside the data folder.
 pub const DHT_STATE_FILE: &str = "dht.json";
@@ -85,6 +98,8 @@ impl Profile {
         config.saved_list_file = self.saved_list_path();
         config.allow_http_links = self.settings.allow_http_links;
         config.max_active_downloads = self.settings.max_active_downloads as usize;
+        config.download_limit_kib = self.settings.download_limit_kib;
+        config.upload_limit_kib = self.settings.upload_limit_kib;
         config
     }
 
@@ -114,10 +129,22 @@ impl Profile {
     pub fn set_max_active_downloads(&mut self, limit: u32) -> Result<()> {
         if limit > MAX_ACTIVE_DOWNLOADS_LIMIT {
             return Err(Error::Settings(format!(
-                "At most {MAX_ACTIVE_DOWNLOADS_LIMIT} downloads can run at the same time (0 means                  no limit)."
+                "At most {MAX_ACTIVE_DOWNLOADS_LIMIT} downloads can run at the same time (0 means \
+                  no limit)."
             )));
         }
         self.change(|settings| settings.max_active_downloads = limit)
+    }
+
+    /// Remembers the speed limits for all downloads together, in KiB per second (0: no limit).
+    pub fn set_speed_limits(&mut self, download_kib: u32, upload_kib: u32) -> Result<()> {
+        for (which, kib) in [("download", download_kib), ("upload", upload_kib)] {
+            check_speed_limit(which, kib)?;
+        }
+        self.change(|settings| {
+            settings.download_limit_kib = download_kib;
+            settings.upload_limit_kib = upload_kib;
+        })
     }
 
     /// Changes the settings and saves them; the change is only kept if it was saved.
@@ -175,6 +202,24 @@ mod tests {
             Some(chosen.as_path())
         );
         assert_eq!(second_run.engine_config().download_dir, chosen);
+    }
+
+    #[test]
+    fn speed_limits_are_checked_and_reach_the_engine() {
+        let work = tempfile::tempdir().unwrap();
+        let mut first_run = profile_in(work.path());
+        assert_eq!(first_run.engine_config().download_limit_kib, 0);
+        let error = first_run.set_speed_limits(10, 0).unwrap_err().to_string();
+        assert!(error.contains("at least 32 KiB/s"), "{error}");
+        let error = first_run
+            .set_speed_limits(0, 5_000_000)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upload"), "{error}");
+        first_run.set_speed_limits(500, 0).unwrap();
+        let second_run = profile_in(work.path());
+        assert_eq!(second_run.engine_config().download_limit_kib, 500);
+        assert_eq!(second_run.engine_config().upload_limit_kib, 0);
     }
 
     #[test]

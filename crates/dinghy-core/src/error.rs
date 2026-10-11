@@ -72,7 +72,9 @@ pub enum Error {
 
     /// A folder or file on the way to a download's files is a link to another place.
     #[error(
-        "BitDinghy didn't start this download because {} is a link to another place (a          \"symbolic link\" or \"junction\"). BitDinghy only saves into real folders inside the          download folder.",
+        "BitDinghy didn't start this download because {} is a link to another place (a \
+          \"symbolic link\" or \"junction\"). BitDinghy only saves into real folders inside the \
+          download folder.",
         .0.display()
     )]
     LinkInTheWay(PathBuf),

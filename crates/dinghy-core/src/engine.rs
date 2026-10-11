@@ -31,12 +31,14 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use librqbit::dht::DhtPersistenceConfig;
+use librqbit::limits::LimitsConfig;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
@@ -82,6 +84,9 @@ pub struct EngineConfig {
     pub allow_http_links: bool,
     /// How many downloads run at once; the others wait in the queue. 0: no limit (M8).
     pub max_active_downloads: usize,
+    /// The most all downloads together may download and upload, in KiB/s. 0: no limit (M9).
+    pub download_limit_kib: u32,
+    pub upload_limit_kib: u32,
 }
 
 impl EngineConfig {
@@ -96,6 +101,8 @@ impl EngineConfig {
             restore_saved: true,
             allow_http_links: false,
             max_active_downloads: crate::settings::DEFAULT_MAX_ACTIVE_DOWNLOADS as usize,
+            download_limit_kib: 0,
+            upload_limit_kib: 0,
         }
     }
 }
@@ -584,6 +591,10 @@ impl Engine {
             listen: config.accept_incoming.then(ListenerOptions::default),
             disable_local_service_discovery: !config.local_discovery,
             client_name_and_version: Some(format!("{} {}", crate::APP_NAME, crate::VERSION)),
+            ratelimits: LimitsConfig {
+                download_bps: bytes_per_second(config.download_limit_kib),
+                upload_bps: bytes_per_second(config.upload_limit_kib),
+            },
             ..Default::default()
         };
 
@@ -627,6 +638,21 @@ impl Engine {
             engine.restore_saved();
         }
         Ok(engine)
+    }
+
+    /// Changes the speed limits for all downloads together, in KiB/s (0: no limit). Applies
+    /// straight away. (Check them first with `profile::check_speed_limit`.)
+    pub fn set_speed_limits(&self, download_kib: u32, upload_kib: u32) {
+        let limits = &self.shared.session.ratelimits;
+        limits.set_download_bps(bytes_per_second(download_kib));
+        limits.set_upload_bps(bytes_per_second(upload_kib));
+    }
+
+    /// The speed limits in force, in KiB/s (0: no limit): (download, upload).
+    pub fn speed_limits(&self) -> (u32, u32) {
+        let limits = &self.shared.session.ratelimits;
+        let kib = |bps: Option<NonZeroU32>| bps.map_or(0, |bps| bps.get() / 1024);
+        (kib(limits.get_download_bps()), kib(limits.get_upload_bps()))
     }
 
     /// Changes how many downloads run at once (0: no limit). Applies straight away.
@@ -1321,6 +1347,11 @@ impl Engine {
     }
 }
 
+/// A limit in KiB/s as librqbit wants it: bytes per second, `None` for no limit.
+fn bytes_per_second(kib: u32) -> Option<NonZeroU32> {
+    NonZeroU32::new(kib.saturating_mul(1024))
+}
+
 /// What a finished check found, in plain words. `check_only`: checked by `dinghy check` with the
 /// window closed (it is paused only for the check).
 fn check_note(handle: &ManagedTorrent, check_only: bool) -> String {
@@ -1330,7 +1361,8 @@ fn check_note(handle: &ManagedTorrent, check_only: bool) -> String {
         "Checked: every chosen file is complete and correct.".to_string()
     } else if check_only {
         format!(
-            "Checked: {} of the chosen files are missing or damaged. They are downloaded again              the next time BitDinghy runs this download.",
+            "Checked: {} of the chosen files are missing or damaged. They are downloaded again \
+              the next time BitDinghy runs this download.",
             format_bytes(missing)
         )
     } else if handle.is_paused() {

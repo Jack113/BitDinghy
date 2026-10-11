@@ -1700,3 +1700,50 @@ async fn a_finished_download_frees_its_place_in_the_queue() {
     let _ = waiting;
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Speed limits (M9).
+// ---------------------------------------------------------------------------------------------
+
+/// A one-file torrent of `len` bytes, shared by a seeder on this computer.
+async fn one_file_torrent(work: &Path, len: usize) -> Seeder {
+    let source = work.join("source").join("big");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("big.bin"), pseudo_random_bytes(len, 31)).unwrap();
+    real_seeder(&work.join("seeder-scratch"), &source).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_download_limit_slows_downloads_and_can_be_lifted_at_once() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 1_000_000).await;
+    let download_dir = work.path().join("downloads");
+    let mut config = offline_config(&download_dir);
+    config.download_limit_kib = 64;
+    let engine = Engine::start(config).await.unwrap();
+    assert_eq!(engine.speed_limits(), (64, 0));
+    let started = Instant::now();
+    engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+
+    // At 64 KiB/s, 1 MB takes about 15 seconds: after 2 seconds it is far from done.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let early = engine.snapshot()[0].clone();
+    assert!(
+        early.progress_bytes < 400_000,
+        "the limit holds it back: {early:?}"
+    );
+
+    // Lifting the limit lets it finish quickly.
+    engine.set_speed_limits(0, 0);
+    assert_eq!(engine.speed_limits(), (0, 0));
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    assert_eq!(done.progress_bytes, 1_000_000);
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "it sped up when the limit was lifted: {:?}",
+        started.elapsed()
+    );
+    engine.shutdown().await;
+}
