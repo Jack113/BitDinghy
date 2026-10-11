@@ -387,8 +387,9 @@ involved, so nothing is uploaded; the time limit still counts).
    BitDinghy runs)` and `stop-sharing-after:  none`.
 
 **Test 1: what a finished download says about sharing**
-- Do: `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --use-existing-files --no-dht --no-listen`
-  (it says "Done: ..."), then open the window.
+- Do: `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --use-existing-files --no-listen`
+  (it says "Done: ..."), then open the window. (Not `--no-dht`: this torrent has no trackers, so
+  BitDinghy would refuse at once, see M12 test 1.)
 - You should see: BitDinghy M6 test, green "Finished: 6.2 MiB saved in ...", and under it
   "Sharing back to 0 people (0 B uploaded, ratio 0.00, for 3s). Closing BitDinghy stops sharing."
   with the time going up.

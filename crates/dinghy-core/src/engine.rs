@@ -45,7 +45,7 @@
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -910,23 +910,44 @@ impl Engine {
             ..Default::default()
         };
 
-        let wanted = config.accept_incoming.then(|| listener(config.listen_port));
+        // On Windows the engine opens its port in a way that SHARES a port another program
+        // already listens on (SO_REUSEADDR), so it would never notice that the port is busy, and
+        // incoming connections would go to either program. So BitDinghy checks first.
+        let fixed_port = config.accept_incoming && config.listen_port != 0;
+        let busy = fixed_port
+            .then(|| port_in_use(config.listen_ip, config.listen_port))
+            .flatten();
+        let port = if busy.is_some() {
+            0
+        } else {
+            config.listen_port
+        };
+        let wanted = config.accept_incoming.then(|| listener(port));
+        let couldnt_use = |reason: &str, now: u16| {
+            format!(
+                "BitDinghy couldn't use port {} for incoming connections ({reason}), so it uses \
+                 port {now} this time. Another program may be using that port; choose another in \
+                 Settings.",
+                config.listen_port
+            )
+        };
         let session = match Session::new_with_opts(download_dir.clone(), options(wanted)).await {
-            Ok(session) => session,
-            // The chosen port is probably taken by another program: carry on with a free one
-            // rather than not starting at all, and say so.
-            Err(error) if config.accept_incoming && config.listen_port != 0 => {
+            Ok(session) => {
+                if let Some(reason) = &busy {
+                    let now = session.listen_addr().map(|a| a.port()).unwrap_or_default();
+                    notices.push(couldnt_use(reason, now));
+                }
+                session
+            }
+            // The chosen port is taken by another program: carry on with a free one rather than
+            // not starting at all, and say so.
+            Err(error) if fixed_port && busy.is_none() => {
                 let session =
                     Session::new_with_opts(download_dir.clone(), options(Some(listener(0))))
                         .await
                         .map_err(|e| Error::EngineStart(format!("{e:#}")))?;
                 let now = session.listen_addr().map(|a| a.port()).unwrap_or_default();
-                notices.push(format!(
-                    "BitDinghy couldn't use port {} for incoming connections ({error:#}), so it \
-                     uses port {now} this time. Another program may be using that port; choose \
-                     another in Settings.",
-                    config.listen_port
-                ));
+                notices.push(couldnt_use(&format!("{error:#}"), now));
                 session
             }
             Err(error) => return Err(Error::EngineStart(format!("{error:#}"))),
@@ -1876,6 +1897,21 @@ fn bytes_per_second(kib: u32) -> Option<NonZeroU32> {
     NonZeroU32::new(kib.saturating_mul(1024))
 }
 
+/// Whether another program already listens on `port`: `Some(why)` if so. Checked with plain
+/// sockets, which (unlike the engine's) don't share a port. For the "any address" IPv6 socket,
+/// IPv4 is checked too, because the engine's socket takes both.
+fn port_in_use(ip: IpAddr, port: u16) -> Option<String> {
+    let mut addresses = vec![SocketAddr::new(ip, port)];
+    if ip == IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
+        addresses.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port));
+    }
+    addresses.into_iter().find_map(|address| {
+        std::net::TcpListener::bind(address)
+            .err()
+            .map(|error| error.to_string())
+    })
+}
+
 /// What a finished check found, in plain words, and whether something is missing or damaged.
 /// `check_only`: checked by `dinghy check` with the window closed (it is paused only for the check).
 fn check_note(handle: &ManagedTorrent, check_only: bool) -> (String, bool) {
@@ -2254,6 +2290,16 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_port_another_program_listens_on_is_found_busy() {
+        let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let other_program = std::net::TcpListener::bind((localhost, 0)).unwrap();
+        let port = other_program.local_addr().unwrap().port();
+        assert!(port_in_use(localhost, port).is_some());
+        drop(other_program);
+        assert_eq!(port_in_use(localhost, port), None);
+    }
 
     #[test]
     fn a_fat32_drive_refuses_a_file_of_4gb_and_a_full_drive_warns() {
