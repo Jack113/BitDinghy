@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 # eframe 0.36 needs Rust 1.95, so that is our floor too.
 rust-version = "1.95"
@@ -66,7 +66,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 winresource = "0.1"
 
 # The window toolkit. `glow` = OpenGL drawing (smaller and quicker to start than wgpu).
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# `accesskit`: screen readers (Windows Narrator, NVDA) can read the window (decided for v0.1.0).
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 # The "Open .torrent file..." dialog: Windows' own file dialog (on Linux, the desktop portal, so no
 # GTK is needed). No default features: only the parts we use.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
@@ -81,6 +82,11 @@ egui_plot = "0.37"
 debug = "line-tables-only"
 
 [profile.release]
-# Slower to compile, smaller and faster to run. Size/speed tuning is revisited at the first release.
+# Slower to compile, smaller and faster to run.
 lto = "fat"
 codegen-units = 1
+# Line numbers in the .pdb file next to each .exe (the .exe itself doesn't grow). The release
+# workflow keeps the .pdb files apart from the zip, so a crash report's backtrace can be turned
+# into function names and lines later (M13). `panic = "unwind"` (the standard) lets the crash
+# report be written before the program ends.
+debug = "line-tables-only"

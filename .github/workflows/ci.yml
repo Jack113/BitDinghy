@@ -56,6 +56,30 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  # The oldest Rust that BitDinghy says it builds with (`rust-version` in Cargo.toml).
+  msrv:
+    name: Oldest supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux packages needed to build the window
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libgl1-mesa-dev
+
+      - name: Install the Rust version in Cargo.toml
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d '"' -f2)
+          rustup toolchain install "$version" --profile minimal
+          rustup default "$version"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build everything (tests included)
+        run: cargo check --workspace --all-targets --locked
+
   # Checks every dependency's license against deny.toml and looks for known vulnerabilities.
   licenses-and-advisories:
     name: Licenses and advisories

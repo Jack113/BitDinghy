@@ -3,6 +3,44 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M18: the release build
+
+Data-free. This checks what a person downloading BitDinghy would get.
+
+**Step 0: get ready**
+1. In the repo folder: `cargo build --release --bins` (it takes several minutes).
+
+**Test 1: the version**
+- Do: `C:\cargo-target\release\dinghy.exe --version`, and right-click
+  `C:\cargo-target\release\BitDinghy.exe` > Properties > **Details**.
+- You should see: `dinghy 0.1.0`; Details shows product name BitDinghy, version 0.1.0 and a
+  description.
+
+**Test 2: the window, as released**
+- Do: copy `BitDinghy.exe` and `dinghy.exe` from `C:\cargo-target\release` to a new empty folder
+  (for example on your Desktop) and start `BitDinghy.exe` there.
+- You should see: the window opens quickly, with no black console window behind it; a `data`
+  folder appears next to the programs (portable). Close it. Delete that test folder.
+
+**Test 3: the notices**
+- Do: open `THIRD-PARTY-NOTICES.html` (in the repo folder) in your browser.
+- You should see: a long list of the libraries BitDinghy is built from with their licences,
+  including the SIL Open Font License and the Ubuntu Font Licence (the window's fonts).
+
+**Test 4 (optional): a screen reader**
+- Do: start Windows Narrator (Ctrl+Windows+Enter), open the window, press Tab a few times.
+- You should see/hear: Narrator reads the buttons ("Download", "Open .torrent file...") as they
+  get the focus. Ctrl+Windows+Enter stops Narrator.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The version | |
+| 2. The window, as released | |
+| 3. The notices | |
+| 4. A screen reader (optional) | |
+
 ## M17: encryption (a note, until the engine supports it)
 
 Data-free.
@@ -192,7 +230,7 @@ Data-free. The crashes are made on purpose with a setting only used for testing.
 - Do: open that file in Notepad.
 - You should see: "dinghy crash report", the line "This report stays on your computer. It may
   contain folder names (such as your user name). If you send it to anyone to help find the
-  problem, read it first.", "Program: dinghy 0.0.1", "System: Windows 10 Pro ..., build ...",
+  problem, read it first.", "Program: dinghy 0.1.0", "System: Windows 10 Pro ..., build ...",
   "Problem: ... a crash on purpose ...", and a "Where (backtrace):" list.
 
 **Test 3: the window crashes, and says so next time**

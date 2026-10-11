@@ -145,19 +145,20 @@ project is built **one feature at a time**.
 - Done in M12: a full disk and FAT32 give plain messages (and a warning before starting).
 
 ## Engineering
-- Decide on accessibility (`accesskit` feature of eframe) before the first release.
+- Done in M18: screen-reader support (`accesskit`) is on (about +0.2 MB).
 - Test the window on a VM or Remote Desktop session without a GPU. If OpenGL fails, add a `wgpu`
   fallback.
-- Tune the release profile (`opt-level`, `strip`, `panic`) at the first release. Remember crash
-  reports need function names, so stripping has a cost. Report real size and memory numbers.
-- Add an MSRV (minimum Rust version) CI job.
-- Add Dependabot or Renovate for crates and GitHub Actions.
+- Done in M18: release profile (line-number debug info in separate .pdb files, unwind), MSRV CI
+  job, Dependabot (librqbit excluded), release workflow (draft only), docs/RELEASE.md.
+- Size: BitDinghy.exe 19.9 MB, dinghy.exe 14.3 MB (both contain the engine, rustls with aws-lc,
+  SQLite). Smaller later: rustls with the `ring` provider instead of aws-lc, `opt-level = "s"`
+  for cold code; measure the speed cost first.
 - Native crash handling (access violations) beyond Rust panics. (M13 catches Rust panics.)
-- Release builds: keep each build's `.pdb` files (not shipped) so crash-report backtraces can be
-  turned into function names (M18).
+- Done in M18: the release workflow keeps the `.pdb` files in a separate zip (not shipped).
 - Hardening: reject tracker URLs that point at localhost or the LAN, cap `.torrent` size and
   file counts, and fuzz the torrent and magnet parsers.
-- Generate the third-party license notices file with `cargo-about` before the first release.
+- Done in M18: `THIRD-PARTY-NOTICES.html` (cargo-about 0.9.2, `about.toml`, `about.hbs`).
+  Regenerate it before every release (docs/RELEASE.md).
 - Privacy check before the first release: confirm with a network monitor that BitDinghy only
   talks to peers, trackers, the DHT and the router.
 - Optional: rename the local folder `E:\BitDinghy` to `BitDinghy`. The dev drive is a FAT32 USB stick;

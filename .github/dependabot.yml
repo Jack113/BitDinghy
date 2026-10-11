@@ -1,0 +1,18 @@
+# Dependabot proposes updates as pull requests (it never merges anything itself). Each one still
+# needs CI to pass and a person to merge it.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Pinned to one exact version on purpose (see Cargo.toml): upgrading the engine is a
+      # deliberate step, with every test and a security review, never an automatic one.
+      - dependency-name: librqbit
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

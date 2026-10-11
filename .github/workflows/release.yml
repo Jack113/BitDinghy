@@ -1,0 +1,91 @@
+# Builds the Windows release: a zip with both programs, the licence files and the third-party
+# notices; a SHA256 checksum file; and the debug symbols (.pdb) in a separate zip, kept for reading
+# crash reports and never shipped. Started by pushing a tag like "v0.1.0" (or by hand, to try it).
+#
+# A tag makes a DRAFT GitHub release: nothing is public until a person reviews it and presses
+# "Publish". Signing (SignPath Foundation) is a separate, manual step; see docs/RELEASE.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege: building only reads; only the draft job may write (to create the draft).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build the Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build (release, exactly the locked dependency versions)
+        run: cargo build --release --bins --locked
+
+      - name: Check the programs carry their icon and Details information
+        shell: pwsh
+        run: |
+          foreach ($exe in "target/release/BitDinghy.exe", "target/release/dinghy.exe") {
+            $info = (Get-Item $exe).VersionInfo
+            if ($info.ProductName -ne "BitDinghy") { throw "$exe has no Details information" }
+            Write-Host "$exe : $($info.ProductName) $($info.ProductVersion) - $($info.FileDescription)"
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).packages[0].version
+          $name = "BitDinghy-$version-windows-x64"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item target/release/BitDinghy.exe, target/release/dinghy.exe "dist/$name/"
+          Copy-Item README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-NOTICES.html "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Compress-Archive -Path target/release/BitDinghy.pdb, target/release/dinghy.pdb -DestinationPath "dist/$name-debug-symbols.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/SHA256SUMS.txt"
+          Get-Content dist/SHA256SUMS.txt
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  draft-release:
+    name: Make a draft GitHub release
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-release
+          path: dist
+
+      - name: Create the draft (not published)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "BitDinghy $TAG" \
+            --notes "Draft. Check the files and the checksums, sign them (docs/RELEASE.md), then publish."

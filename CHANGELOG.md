@@ -9,7 +9,12 @@ format is called out here.
 
 ## [Unreleased]
 
+Version 0.1.0 is prepared (the first release, not published yet; see docs/RELEASE.md).
+
 ### Added
+- The version is 0.1.0. A release workflow builds the Windows zip, a checksum file and the
+  debug symbols, and makes a draft release from a version tag. `THIRD-PARTY-NOTICES.html` lists
+  the licences of everything BitDinghy is built from. The window works with screen readers.
 - Settings and `dinghy settings` say plainly that connections aren't encrypted yet (the engine
   BitDinghy is built on doesn't support BitTorrent encryption; it comes when the engine does).
 - **Open magnet links and .torrent files with BitDinghy.** Settings has **Make BitDinghy the

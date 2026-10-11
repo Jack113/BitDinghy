@@ -479,6 +479,25 @@ ikatson/rqbit#633 was still open on 2026-10-11, and 9.0.1 is the newest release.
 an honest note (`dinghy_core::ENCRYPTION_NOTE`) in the window's Settings and in `dinghy settings`.
 `TODO.md` says what to do once upstream has it.
 
+## Getting a release ready (M18)
+
+- Version 0.1.0. `[profile.release]`: fat LTO, one codegen unit, line-number debug information
+  (in the separate `.pdb`, so the programs don't grow) and the standard `unwind` (the crash report
+  is written before the program ends). Development builds keep only line numbers too.
+- `.github/workflows/release.yml`: on a `v*` tag, builds on Windows, checks both programs carry
+  their Details information, zips them with the README, changelog, licences and
+  `THIRD-PARTY-NOTICES.html`, writes `SHA256SUMS.txt`, keeps the `.pdb` files in a separate zip,
+  and makes a **draft** release (publishing is a person's step). `docs/RELEASE.md` is the
+  checklist.
+- `THIRD-PARTY-NOTICES.html` is made by `cargo about` (`about.toml` accepts the same licences as
+  `deny.toml`; only what the programs contain, not build or test tools).
+- CI also checks the oldest Rust in `rust-version`; Dependabot proposes updates weekly (never
+  librqbit, which is upgraded by hand).
+- The window has screen-reader support (eframe's `accesskit`).
+- Measured on the development PC (release build): BitDinghy.exe 19.9 MB, dinghy.exe 14.3 MB, a
+  zip of both about 14 MB; the window answers about 0.6 s after starting; at rest it uses about
+  71 MB (working set), 90 MB private. Both programs need only Windows' own DLLs.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -499,3 +518,4 @@ an honest note (`dinghy_core::ENCRYPTION_NOTE`) in the window's Settings and in 
 | M15 | Recommended settings |
 | M16 | Opening links and files from other programs |
 | M17 | Encryption: an honest note until librqbit has it |
+| M18 | Release preparation (version 0.1.0, workflow, notices) |
