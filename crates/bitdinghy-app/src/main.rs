@@ -197,6 +197,16 @@ fn listening_text(port: Option<u16>) -> String {
     }
 }
 
+/// "Download limit 4.5 MiB/s, upload limit 819.0 KiB/s, 3 downloads at the same time."
+fn recommended_text(recommended: &dinghy_core::recommend::Recommended) -> String {
+    format!(
+        "Download limit {}, upload limit {}, {} downloads at the same time.",
+        limit_words(recommended.download_limit_kib),
+        limit_words(recommended.upload_limit_kib),
+        recommended.max_active_downloads
+    )
+}
+
 /// What the sharing limits mean, after a change.
 fn sharing_limits_text(ratio_percent: u32, minutes: u32) -> String {
     let ratio = (ratio_percent > 0).then(|| {
@@ -575,6 +585,12 @@ impl BitDinghyApp {
         let mut change_limits = None;
         let mut change_sharing = None;
         let mut change_connections = None;
+        let mut use_recommended = None;
+        let fastest = self
+            .engine
+            .as_ref()
+            .ok()
+            .map(|engine| engine.fastest_seen());
         let listening_now = self.engine.as_ref().ok().map(|engine| engine.listen_port());
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
@@ -677,6 +693,26 @@ impl BitDinghyApp {
                 }
 
                 ui.separator();
+                ui.label("Recommended settings (learned from your own downloads):");
+                match fastest.and_then(dinghy_core::recommend::recommend) {
+                    None => {
+                        ui.weak(dinghy_core::recommend::NOTHING_LEARNED);
+                    }
+                    Some(recommended) => {
+                        ui.label(dinghy_core::recommend::fastest_text(
+                            fastest.unwrap_or_default(),
+                        ));
+                        ui.horizontal(|ui| {
+                            ui.label(recommended_text(&recommended));
+                            if ui.button("Use these").clicked() {
+                                use_recommended = Some(recommended);
+                            }
+                        });
+                        ui.small(dinghy_core::recommend::REASONS);
+                    }
+                }
+
+                ui.separator();
                 ui.label("Connections (used the next time you start BitDinghy):");
                 let saved_connections = (
                     self.profile.settings().accept_incoming,
@@ -720,6 +756,34 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some(recommended) = use_recommended {
+            let saved = self
+                .profile
+                .set_speed_limits(recommended.download_limit_kib, recommended.upload_limit_kib)
+                .and_then(|()| {
+                    self.profile
+                        .set_max_active_downloads(recommended.max_active_downloads)
+                });
+            self.settings_message = Some(match saved {
+                Ok(()) => {
+                    if let Ok(engine) = &self.engine {
+                        engine.set_speed_limits(
+                            recommended.download_limit_kib,
+                            recommended.upload_limit_kib,
+                        );
+                        engine.set_max_active_downloads(recommended.max_active_downloads as usize);
+                    }
+                    self.limits_choice =
+                        (recommended.download_limit_kib, recommended.upload_limit_kib);
+                    self.max_active_choice = recommended.max_active_downloads;
+                    (
+                        "The recommended settings are used from now on.".to_string(),
+                        false,
+                    )
+                }
+                Err(error) => (error.to_string(), true),
+            });
         }
         if let Some((accept, port, upnp)) = change_connections {
             self.settings_message = Some(match self.profile.set_connections(accept, port, upnp) {
@@ -1478,6 +1542,19 @@ mod tests {
         let text = crash_notice_text(Path::new(r"C:\data\crash-reports"));
         assert!(text.contains(r"saved in C:\data\crash-reports"), "{text}");
         assert!(text.contains("stays on this computer"), "{text}");
+    }
+
+    #[test]
+    fn the_recommendation_is_said_in_one_line() {
+        let recommended = dinghy_core::recommend::Recommended {
+            download_limit_kib: 4608,
+            upload_limit_kib: 0,
+            max_active_downloads: 3,
+        };
+        assert_eq!(
+            recommended_text(&recommended),
+            "Download limit 4.5 MiB/s, upload limit none, 3 downloads at the same time."
+        );
     }
 
     #[test]

@@ -3,6 +3,49 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M15: recommended settings
+
+Tests 1 and 2 are data-free. **Test 3 is optional and uses data**: as much as your line downloads
+in about 15 seconds at full speed (on a fast line that can be several hundred MB). Skip it if data
+is precious; the automated tests cover the learning.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, PowerShell in
+   `C:\cargo-target\debug`.
+
+**Test 1: before anything is learned**
+- Do: `.\dinghy.exe recommend`, then open the window and its **Settings**.
+- You should see: "BitDinghy learns recommended settings from your own downloads (it never runs a
+  speed test). Download something for a minute or two, without speed limits, then look again." in
+  both places (in Settings under "Recommended settings (learned from your own downloads):").
+  (If you did test 3 before, you see the learned speeds instead: go on to test 2.)
+
+**Test 2: `--apply` refuses nothing it can't use**
+- Do: `.\dinghy.exe recommend --apply`
+- You should see: with nothing learned, the same message, and nothing changes in
+  `.\dinghy.exe settings`.
+
+**Test 3 (optional, uses data): learning and using the recommendation**
+- Do: make sure `.\dinghy.exe settings` shows `download-limit:  0  (no limit)`. Add the Arch link
+  (`https://archlinux.org/releng/releases/2026.10.01/torrent/`) in the window, let it run for 15
+  seconds at full speed, then **Pause** it.
+- You should see: in Settings, "Fastest seen: downloading X, uploading Y (10-second averages,
+  without limits)." and "Download limit ..., upload limit ..., N downloads at the same time." with
+  a **Use these** button and a small line explaining 90% and 80%. Press **Use these**: "The
+  recommended settings are used from now on.", and the Download limit and Downloads at the same
+  time boxes change. `.\dinghy.exe recommend` shows the same, with "Use them with: dinghy
+  recommend --apply".
+- Tidy up: set the Download and Upload limits back to 0 (or keep them), remove Arch (**Delete the
+  files too**).
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. Before anything is learned | |
+| 2. `--apply` with nothing learned | |
+| 3. Learning and using the recommendation (optional) | |
+
 ## M14: history and charts
 
 Data-free, but best done after the M9 test on the same day (its short Arch download gives the

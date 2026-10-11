@@ -30,7 +30,7 @@ use crate::file_choice;
 pub const FILE_NAME: &str = "downloads.db";
 
 /// The list format this version of BitDinghy writes.
-pub const CURRENT_VERSION: u32 = 5;
+pub const CURRENT_VERSION: u32 = 6;
 
 /// Marks the file as BitDinghy's (the letters "BDdy"), so another program's SQLite file is never
 /// mistaken for our list.
@@ -55,7 +55,7 @@ CREATE TABLE downloads (
 /// `tests/fixtures/` (like `downloads-v1.sql` and `downloads-v2.sql`) with a test that loads it.
 /// **Never change a step that has shipped**: lists out there have already been upgraded by it.
 type Migration = fn(&rusqlite::Transaction) -> rusqlite::Result<()>;
-const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5];
+const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6];
 
 /// Version 2 (M6, choosing files): remembers the files the person unticked, as the torrent's file
 /// indexes ("2,5"). Empty means every file, which is what every download from version 1 wants.
@@ -107,6 +107,17 @@ fn v4_to_v5(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
              day              INTEGER PRIMARY KEY NOT NULL,
              downloaded_bytes INTEGER NOT NULL DEFAULT 0,
              uploaded_bytes   INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+}
+
+/// Version 6 (M15, recommended settings): numbers BitDinghy learned, by name (for now the fastest
+/// download and upload speeds seen, in bytes per second).
+fn v5_to_v6(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE learned (
+             name  TEXT PRIMARY KEY NOT NULL,
+             value INTEGER NOT NULL
          );",
     )
 }
@@ -675,6 +686,52 @@ impl SavedList {
         Ok(removed == 1)
     }
 
+    /// A number BitDinghy learned (see [`v5_to_v6`]), if it has one.
+    pub fn learned(&self, name: &str) -> Result<Option<u64>> {
+        let Some(connection) = &self.connection else {
+            return Ok(None);
+        };
+        connection
+            .query_row(
+                "SELECT value FROM learned WHERE name = ?1",
+                params![name],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|value| value.map(|v| u64::try_from(v).unwrap_or(0)))
+            .map_err(|e| self.error("read", e))
+    }
+
+    /// Remembers a number BitDinghy learned.
+    pub fn set_learned(&self, name: &str, value: u64) -> Result<()> {
+        let Some(connection) = &self.connection else {
+            return Ok(());
+        };
+        connection
+            .execute(
+                "INSERT INTO learned (name, value) VALUES (?1, ?2) \
+                 ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                params![name, i64::try_from(value).unwrap_or(i64::MAX)],
+            )
+            .map_err(|e| self.error("save", e))?;
+        Ok(())
+    }
+
+    /// [`SavedList::learned`] without the lock, for `dinghy recommend` (an older list has none).
+    pub fn read_learned(path: &Path, name: &str) -> Result<Option<u64>> {
+        let rows = read_extra_from(path, 6, |connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM learned WHERE name = ?1",
+                    params![name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map(|value| value.into_iter().collect::<Vec<_>>())
+        })?;
+        Ok(rows.first().map(|v| u64::try_from(*v).unwrap_or(0)))
+    }
+
     /// Adds to a day's totals (and forgets days older than [`DAYS_KEEP`]).
     pub fn add_to_day(&self, day: i64, downloaded: u64, uploaded: u64) -> Result<()> {
         let Some(connection) = &self.connection else {
@@ -872,6 +929,15 @@ fn read_extra<T>(
     path: &Path,
     read: impl FnOnce(&Connection) -> rusqlite::Result<Vec<T>>,
 ) -> Result<Vec<T>> {
+    read_extra_from(path, 5, read)
+}
+
+/// Like [`read_extra`], for something that exists from list version `since` on.
+fn read_extra_from<T>(
+    path: &Path,
+    since: u32,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<Vec<T>>,
+) -> Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -888,7 +954,9 @@ fn read_extra<T>(
     .map_err(|e| problem(e.to_string()))?;
     let _ = connection.busy_timeout(Duration::from_secs(5));
     match check_identity(&connection) {
-        Ok(Some(version)) if version >= 5 => read(&connection).map_err(|e| problem(e.to_string())),
+        Ok(Some(version)) if version >= since => {
+            read(&connection).map_err(|e| problem(e.to_string()))
+        }
         Ok(_) => Ok(Vec::new()),
         Err(Failure::Newer(found)) => {
             Err(Error::SavedList(Problem::NewerVersion { found }.message()))
@@ -1164,6 +1232,46 @@ mod tests {
                 uploaded_bytes: 250_000_000
             }]
         );
+    }
+
+    #[test]
+    fn learned_numbers_are_remembered() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        {
+            let list = open(&path).list;
+            assert_eq!(list.learned("fastest_download").unwrap(), None);
+            list.set_learned("fastest_download", 5_000_000).unwrap();
+            list.set_learned("fastest_download", 6_000_000).unwrap();
+        }
+        let list = open(&path).list;
+        assert_eq!(list.learned("fastest_download").unwrap(), Some(6_000_000));
+        assert_eq!(
+            SavedList::read_learned(&path, "fastest_download").unwrap(),
+            Some(6_000_000)
+        );
+        assert_eq!(SavedList::read_learned(&path, "other").unwrap(), None);
+    }
+
+    #[test]
+    fn the_version_6_fixture_still_loads() {
+        // This fixture was written with list version 6 and must load in EVERY later version.
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join(FILE_NAME);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("../tests/fixtures/downloads-v6.sql"))
+            .unwrap();
+        assert_eq!(
+            SavedList::read_learned(&path, "fastest_upload").unwrap(),
+            Some(1_250_000)
+        );
+        let opened = open(&path);
+        assert!(opened.problem.is_none(), "{:?}", opened.problem);
+        let list = opened.list;
+        assert_eq!(list.all().unwrap().len(), 1);
+        assert_eq!(list.history(10).unwrap().len(), 1);
+        assert_eq!(list.learned("fastest_download").unwrap(), Some(12_500_000));
     }
 
     #[test]
@@ -1585,9 +1693,11 @@ mod tests {
             .execute_batch(include_str!("../tests/fixtures/downloads-v1.sql"))
             .unwrap();
 
-        let upgraded =
-            SavedList::open_with(&path, &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, add_rating])
-                .unwrap();
+        let upgraded = SavedList::open_with(
+            &path,
+            &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, add_rating],
+        )
+        .unwrap();
         assert!(upgraded.problem.is_none());
         assert_eq!(upgraded.list.all().unwrap().len(), 2);
         drop(upgraded);
@@ -1595,7 +1705,10 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6, "every step ran, from version 1");
+        assert_eq!(version, 7, "every step ran, from version 1");
+        connection
+            .prepare("SELECT value FROM learned")
+            .expect("the version 6 table exists");
         connection
             .prepare("SELECT day FROM daily_totals")
             .expect("the version 5 tables exist");

@@ -438,6 +438,20 @@ finishes, and the torrent is taken straight back out.
   totals, and the last 20 removed downloads. `dinghy history [--days N]` prints the same from
   the saved list (it works while the window is open).
 
+## Recommended settings (M15)
+
+- The brief's "Auto" speed, without a speed-test server: the engine remembers the fastest
+  download and upload speeds it has seen, as 10-second averages of the total speeds it already
+  samples for the chart, and only while that direction has **no limit** (a limited speed says
+  nothing about the line; learning from it would make the suggestions shrink each time). A new
+  fastest is kept when it beats the old one by more than 2%, in the saved list (**version 6**,
+  table `learned`).
+- **`recommend.rs`** turns them into suggestions: an upload limit of 80% of the fastest upload (a
+  full upload slows the whole line, downloads included), a download limit of 90% of the fastest
+  download (room for browsing and calls), and 2, 3 or 5 downloads at the same time for a slow,
+  average or fast line. Nothing changes until the person presses **Use these** in Settings or
+  runs `dinghy recommend --apply` (which also tells an open window).
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -455,3 +469,4 @@ finishes, and the torrent is taken straight back out.
 | M12 | Plain-language problems, drive checks |
 | M13 | Crash reports |
 | M14 | History and charts |
+| M15 | Recommended settings |

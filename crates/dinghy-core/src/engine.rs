@@ -36,6 +36,10 @@
 //! uploaded to today's totals (saved with the other counts), and keeps the total speeds of the
 //! last ten minutes for the window's chart. Removing a download puts it in the history.
 //!
+//! **Recommended settings** (M15): from the same speeds, the engine remembers the fastest
+//! 10-second averages seen in each direction (only while that direction has no limit) and keeps
+//! them in the saved list; `recommend.rs` turns them into suggestions.
+//!
 //! **Checking files** (M7): librqbit has no "check again" call, but it checks every piece already
 //! on disk whenever a torrent is added. So [`Engine::check`] takes the download out of librqbit
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
@@ -65,6 +69,7 @@ use crate::input::{self, Input};
 use crate::magnet;
 use crate::owned_files::{self, Deleted};
 use crate::plain;
+use crate::recommend::{self, Fastest};
 use crate::safety::{self, Platform};
 use crate::saved_list::{DayTotal, HistoryEntry, SavedDownload, SavedList, Sharing};
 use crate::torrent_file::{self, CheckedTorrent};
@@ -432,7 +437,12 @@ struct Shared {
     tally: Mutex<DayTally>,
     /// The total speeds (download, upload) of the last ten minutes, one a second, oldest first.
     speeds: Mutex<VecDeque<(u64, u64)>>,
+    /// The fastest 10-second averages seen (M15), as remembered in the saved list.
+    fastest: Mutex<Fastest>,
 }
+
+/// How many seconds a speed is averaged over before it counts as "seen".
+const FASTEST_AVERAGE_SECONDS: usize = 10;
 
 /// Today's not-yet-saved totals.
 #[derive(Debug, Clone, Copy, Default)]
@@ -723,6 +733,42 @@ impl Shared {
                 speeds.pop_front();
             }
             speeds.push_back((download_speed, upload_speed));
+            // The last 10 seconds' averages: the fastest seen, while nothing limited them.
+            if speeds.len() >= FASTEST_AVERAGE_SECONDS {
+                let recent = speeds.iter().rev().take(FASTEST_AVERAGE_SECONDS);
+                let (down, up) = recent.fold((0u64, 0u64), |(d, u), (sd, su)| (d + sd, u + su));
+                let average = |sum: u64| sum / FASTEST_AVERAGE_SECONDS as u64;
+                drop(speeds);
+                self.learn(average(down), average(up));
+            }
+        }
+    }
+
+    /// Remembers new fastest speeds (see [`Shared::account`]); only in a direction without a limit,
+    /// and only when clearly faster (so the saved list isn't written every second).
+    fn learn(&self, download: u64, upload: u64) {
+        let limits = &self.session.ratelimits;
+        let faster =
+            |seen: Option<u64>, now: u64| now > seen.unwrap_or(0).saturating_mul(102) / 100;
+        let mut fastest = lock(&self.fastest);
+        let mut save = Vec::new();
+        if limits.get_download_bps().is_none()
+            && download >= recommend::ENOUGH_DOWNLOAD
+            && faster(fastest.download, download)
+        {
+            fastest.download = Some(download);
+            save.push((recommend::FASTEST_DOWNLOAD, download));
+        }
+        if limits.get_upload_bps().is_none()
+            && upload >= recommend::ENOUGH_UPLOAD
+            && faster(fastest.upload, upload)
+        {
+            fastest.upload = Some(upload);
+            save.push((recommend::FASTEST_UPLOAD, upload));
+        }
+        drop(fastest);
+        for (name, value) in save {
+            self.with_list(|list| list.set_learned(name, value));
         }
     }
 
@@ -891,7 +937,14 @@ impl Engine {
                 ..DayTally::default()
             }),
             speeds: Mutex::new(VecDeque::with_capacity(SPEED_HISTORY_SECONDS)),
+            fastest: Mutex::new(Fastest::default()),
         });
+        // What earlier runs learned.
+        let learned = |name| shared.with_list(|list| list.learned(name)).flatten();
+        *lock(&shared.fastest) = Fastest {
+            download: learned(recommend::FASTEST_DOWNLOAD),
+            upload: learned(recommend::FASTEST_UPLOAD),
+        };
         // Once a second, let the queue move on (a download that finished frees its place).
         let weak = Arc::downgrade(&shared);
         tokio::spawn(async move {
@@ -953,6 +1006,12 @@ impl Engine {
             .sharing_ratio_percent
             .store(ratio_percent, Ordering::SeqCst);
         self.shared.sharing_minutes.store(minutes, Ordering::SeqCst);
+    }
+
+    /// The fastest download and upload speeds seen (10-second averages, bytes per second), over all
+    /// runs (M15).
+    pub fn fastest_seen(&self) -> Fastest {
+        *lock(&self.shared.fastest)
     }
 
     /// The total download and upload speeds of the last ten minutes, one a second, oldest first.

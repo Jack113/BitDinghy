@@ -45,6 +45,8 @@ enum Command {
     Move(MoveArgs),
     /// Show how much was downloaded and uploaded each day, and the downloads you removed
     History(HistoryArgs),
+    /// Show the settings BitDinghy recommends, learned from your downloads (--apply uses them)
+    Recommend(RecommendArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -53,6 +55,13 @@ enum Command {
 struct NumberArg {
     /// The download's number, as shown by `dinghy list`
     number: usize,
+}
+
+#[derive(Args)]
+struct RecommendArgs {
+    /// Use the recommended settings (they are saved, and an open window uses them at once)
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Args)]
@@ -205,6 +214,7 @@ async fn main() -> ExitCode {
         Some(Command::Check(which)) => check(which.number).await,
         Some(Command::Move(args)) => move_download(args).await,
         Some(Command::History(args)) => history(args),
+        Some(Command::Recommend(args)) => recommend(args).await,
         Some(Command::Settings(args)) => settings(args).await,
         None => {
             println!("{}", dinghy_core::about());
@@ -1058,6 +1068,77 @@ async fn move_download(args: MoveArgs) -> ExitCode {
         place + 1,
         order.len()
     );
+    ExitCode::SUCCESS
+}
+
+/// `dinghy recommend [--apply]`: the settings BitDinghy recommends from what it learned (kept in
+/// the saved list, so this works while the window is open too).
+async fn recommend(args: RecommendArgs) -> ExitCode {
+    use dinghy_core::recommend::{self, Fastest};
+    let mut profile = Profile::load();
+    print_notices(&profile);
+    let fastest = match profile.saved_list_path() {
+        None => Fastest::default(),
+        Some(path) => {
+            let read = |name| SavedList::read_learned(&path, name);
+            match (
+                read(recommend::FASTEST_DOWNLOAD),
+                read(recommend::FASTEST_UPLOAD),
+            ) {
+                (Ok(download), Ok(upload)) => Fastest { download, upload },
+                (Err(error), _) | (_, Err(error)) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    let Some(recommended) = recommend::recommend(fastest) else {
+        println!("{}", recommend::NOTHING_LEARNED);
+        return ExitCode::SUCCESS;
+    };
+    println!("{}", recommend::fastest_text(fastest));
+    println!("Recommended:");
+    println!(
+        "  download-limit:  {}",
+        limit_text(recommended.download_limit_kib)
+    );
+    println!(
+        "  upload-limit:  {}",
+        limit_text(recommended.upload_limit_kib)
+    );
+    println!(
+        "  max-active-downloads:  {}",
+        recommended.max_active_downloads
+    );
+    println!("{}", recommend::REASONS);
+    if !args.apply {
+        println!("Use them with: dinghy recommend --apply");
+        return ExitCode::SUCCESS;
+    }
+    let saved = profile
+        .set_speed_limits(recommended.download_limit_kib, recommended.upload_limit_kib)
+        .and_then(|()| profile.set_max_active_downloads(recommended.max_active_downloads));
+    if let Err(error) = saved {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    if let Ok(Some(mut window)) = window_client(&profile).await {
+        let _ = window
+            .ask(remote::Command::SetSpeedLimits {
+                download_kib: recommended.download_limit_kib,
+                upload_kib: recommended.upload_limit_kib,
+            })
+            .await;
+        let _ = window
+            .ask(remote::Command::SetMaxActiveDownloads {
+                limit: recommended.max_active_downloads as usize,
+            })
+            .await;
+        println!("Saved. BitDinghy's open window uses them straight away.");
+    } else {
+        println!("Saved. They will be used from now on, in the window too.");
+    }
     ExitCode::SUCCESS
 }
 

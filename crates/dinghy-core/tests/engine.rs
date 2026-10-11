@@ -2058,3 +2058,60 @@ async fn todays_totals_and_the_history_remember_what_happened() {
     let _ = id;
     next_run.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Recommended settings (M15).
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fastest_download_is_learned_and_remembered() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 2_000_000).await;
+    // On this computer a download is over in a blink, too short for a 10-second average: the
+    // seeder sends at most 192 KiB/s, so it takes about ten seconds. (BitDinghy itself has no
+    // limit, so it may learn.)
+    seeder
+        ._session
+        .ratelimits
+        .set_upload_bps(std::num::NonZeroU32::new(192 * 1024));
+    let list = work.path().join("downloads.db");
+    let mut config = offline_config(&work.path().join("downloads"));
+    config.saved_list_file = Some(list.clone());
+
+    let first_run = Engine::start(config.clone()).await.unwrap();
+    assert_eq!(
+        first_run.fastest_seen(),
+        dinghy_core::recommend::Fastest::default()
+    );
+    first_run
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    wait_for_status(&first_run, &[DownloadStatus::Finished]).await;
+    // Learned once 10 seconds of speeds have been seen.
+    let deadline = Instant::now() + TIMEOUT;
+    let fastest = loop {
+        if let Some(speed) = first_run.fastest_seen().download {
+            break speed;
+        }
+        assert!(Instant::now() < deadline, "nothing learned");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert!(
+        fastest >= dinghy_core::recommend::ENOUGH_DOWNLOAD,
+        "{fastest}"
+    );
+    let recommended = dinghy_core::recommend::recommend(first_run.fastest_seen()).unwrap();
+    assert!(recommended.download_limit_kib >= dinghy_core::settings::MIN_SPEED_LIMIT_KIB);
+    first_run.shutdown().await;
+    drop(first_run);
+
+    // Remembered in the saved list, and back after a restart.
+    assert_eq!(
+        dinghy_core::SavedList::read_learned(&list, dinghy_core::recommend::FASTEST_DOWNLOAD)
+            .unwrap(),
+        Some(fastest)
+    );
+    let next_run = Engine::start(config).await.unwrap();
+    assert_eq!(next_run.fastest_seen().download, Some(fastest));
+    next_run.shutdown().await;
+}

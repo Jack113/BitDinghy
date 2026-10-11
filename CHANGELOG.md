@@ -10,6 +10,10 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Recommended settings.** BitDinghy learns the fastest download and upload speeds of your line
+  from your own downloads (never with a speed test) and suggests speed limits and how many
+  downloads to run at once. Settings shows them with a **Use these** button; on the command
+  line, `dinghy recommend` (and `--apply`). The saved download list moves to **version 6**.
 - **History.** A History section in the window shows the download and upload speed of the last
   ten minutes, how much was downloaded and uploaded each day of the last 30 days, and the
   downloads you removed. `dinghy history` shows the days and the removed downloads too. The saved

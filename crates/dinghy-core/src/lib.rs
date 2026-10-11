@@ -22,6 +22,7 @@ pub mod magnet;
 pub mod owned_files;
 pub mod plain;
 pub mod profile;
+pub mod recommend;
 pub mod remote;
 pub mod safety;
 pub mod saved_list;
