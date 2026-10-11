@@ -43,6 +43,9 @@ format is called out here.
   connections.
 
 ### Fixed
+- A new download removed while it was still starting could leave its (empty) files behind, so
+  adding it again was refused as "a file with the same name is already there". Found by an
+  occasional test failure on the build server.
 - Pausing a download while its files were being checked left it showing "Checking files..."
   forever, and Resume didn't help (librqbit stops the check when paused). It now shows as paused,
   and Resume checks again and carries on. Found by an occasional test failure on the build server.

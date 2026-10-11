@@ -475,11 +475,17 @@ impl Shared {
         let shared = self.clone();
         self.runtime.spawn(async move {
             match start_download(&shared, &entry, source).await {
-                // Removed while it was starting: take it straight back out of the engine.
-                Ok(handle) if entry.removed.load(Ordering::SeqCst) => {
-                    let _ = shared.session.delete(handle.id().into(), false).await;
+                // Removed while it was starting: take it straight back out of the engine. Files
+                // this very start created (a new download; nothing was in them yet) go too, so
+                // nothing is left behind; files from earlier runs, or files that were already
+                // there ("use the files already there"), are never deleted here.
+                Ok(started) if entry.removed.load(Ordering::SeqCst) => {
+                    let _ = shared
+                        .session
+                        .delete(started.handle.id().into(), started.created_files)
+                        .await;
                 }
-                Ok(handle) => {
+                Ok(Started { handle, .. }) => {
                     *lock(&entry.state) = EntryState::Active(handle.clone());
                     // A pause or resume may have arrived while the download was starting. Reading
                     // the wish only AFTER publishing the handle means that either this line sees
@@ -1924,11 +1930,14 @@ fn still_starting(name: &str) -> Error {
 }
 
 /// Steps 1 to 3 from the module notes.
-async fn start_download(
-    shared: &Shared,
-    entry: &Entry,
-    source: Source,
-) -> Result<Arc<ManagedTorrent>> {
+/// A download librqbit has started.
+struct Started {
+    handle: Arc<ManagedTorrent>,
+    /// This start created its files (a new download that didn't use files already there).
+    created_files: bool,
+}
+
+async fn start_download(shared: &Shared, entry: &Entry, source: Source) -> Result<Started> {
     let initial_peers = (!entry.peers.is_empty()).then(|| entry.peers.clone());
     // The engine reports problems as general-purpose errors; `{:#}` prints the whole cause chain,
     // and `plain::explain` puts the common ones in plain words first.
@@ -2048,6 +2057,10 @@ async fn start_download(
         .await
         .map_err(engine_error)?
         .into_handle()
+        .map(|handle| Started {
+            handle,
+            created_files: !continuing && !entry.use_existing.load(Ordering::SeqCst),
+        })
         .ok_or_else(|| Error::Add("the engine did not start the download".to_string()))
 }
 
