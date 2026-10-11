@@ -224,6 +224,35 @@ pub fn refuse_existing_files(paths: &[PathBuf]) -> Result<()> {
     }
 }
 
+/// Refuses a download if any folder or file on the way to its files (inside the download folder)
+/// is a link to another place: a symbolic link or a junction. Writing "into" one would really
+/// write somewhere else, outside the download folder. (Cloud placeholders, such as OneDrive's,
+/// are not links and are fine.) The download folder itself is the person's own choice.
+pub fn refuse_links(download_dir: &Path, paths: &[PathBuf]) -> Result<()> {
+    let mut checked = std::collections::HashSet::new();
+    for path in paths {
+        let mut current = Some(path.as_path());
+        while let Some(place) = current
+            && place != download_dir
+            && place.starts_with(download_dir)
+        {
+            if !checked.insert(place) {
+                break; // This folder and everything above it were checked already.
+            }
+            // `symlink_metadata` looks at the place itself; on Windows `is_symlink` is true for
+            // symbolic links and junctions.
+            if place
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(Error::LinkInTheWay(place.to_path_buf()));
+            }
+            current = place.parent();
+        }
+    }
+    Ok(())
+}
+
 /// What deleting a download's files did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Deleted {
@@ -509,6 +538,61 @@ mod tests {
             0
         );
         assert!(!is_hidden(&file) && !is_hidden(&extras));
+    }
+
+    /// Makes `link` point to the folder `target`: a junction on Windows (no special rights
+    /// needed), a symbolic link elsewhere.
+    fn link_folder(target: &Path, link: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("cmd runs");
+            assert!(made.status.success(), "{made:?}");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn a_link_on_the_way_to_a_file_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let downloads = work.path().join("downloads");
+        let elsewhere = work.path().join("elsewhere");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // A real folder: fine (and so is a path that doesn't exist yet).
+        std::fs::create_dir_all(downloads.join("real")).unwrap();
+        let fine = [
+            downloads.join("real").join("a.bin"),
+            downloads.join("new").join("b.bin"),
+        ];
+        assert!(refuse_links(&downloads, &fine).is_ok());
+
+        // "album" is a link to a folder outside the download folder.
+        link_folder(&elsewhere, &downloads.join("album"));
+        let error = refuse_links(&downloads, &[downloads.join("album").join("a.mp3")]).unwrap_err();
+        assert!(
+            matches!(&error, Error::LinkInTheWay(place) if *place == downloads.join("album")),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("link to another place"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_download_folder_itself_may_be_a_link() {
+        let work = tempfile::tempdir().unwrap();
+        let real = work.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let downloads = work.path().join("downloads");
+        link_folder(&real, &downloads);
+        assert!(refuse_links(&downloads, &[downloads.join("a.bin")]).is_ok());
     }
 
     #[test]

@@ -257,6 +257,8 @@ impl BitDinghyApp {
                 }
                 Ok(None)
             }
+            Control::Check(id) => self.runtime.block_on(engine.check(id)).map(|()| None),
+            Control::UseExistingFiles(id) => engine.use_existing_files(id).map(|()| None),
             Control::ChooseFiles { id, chosen } => self
                 .runtime
                 .block_on(engine.choose_files(id, &chosen))
@@ -534,6 +536,10 @@ fn url_host(link: &str) -> String {
 enum Control {
     Pause(DownloadId),
     Resume(DownloadId),
+    /// "Check files": check its files on disk again.
+    Check(DownloadId),
+    /// "Use the files already there" (after a refusal because a file with the same name exists).
+    UseExistingFiles(DownloadId),
     /// "Files" was pressed: show or hide its file list.
     ToggleFiles(DownloadId),
     /// A tick box was changed: download only these files (their numbers).
@@ -732,6 +738,17 @@ fn draw_download(
             if ui.button(label).clicked() {
                 clicked = Some(control);
             }
+            if can_check(download)
+                && ui
+                    .button("Check files")
+                    .on_hover_text(
+                        "Reads its files on disk again and compares them with the torrent. \
+                         Anything missing or damaged is downloaded again.",
+                    )
+                    .clicked()
+            {
+                clicked = Some(Control::Check(download.id));
+            }
             // Only a torrent with several files has anything to choose.
             if download.files_total > 1
                 && ui
@@ -794,12 +811,25 @@ fn draw_download(
         DownloadStatus::Checking => {
             ui.horizontal(|ui| {
                 spinner(ui);
-                ui.colored_label(info_color(ui), "Checking files already on disk...");
+                ui.colored_label(info_color(ui), checking_text(download));
             });
         }
         DownloadStatus::Failed => {
             let message = download.error.as_deref().unwrap_or("The download failed.");
             ui.colored_label(error_color(ui), message);
+            if download.can_use_existing_files
+                && ui
+                    .button("Use the files already there")
+                    .on_hover_text(
+                        "BitDinghy checks the files that are already there and completes them; \
+                         parts that don't match the torrent are replaced. From then on they \
+                         count as this download's files (\"Delete the files too\" would delete \
+                         them).",
+                    )
+                    .clicked()
+            {
+                clicked = Some(Control::UseExistingFiles(download.id));
+            }
         }
         DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Finished => {
             let done = fraction(download.progress_bytes, download.total_bytes);
@@ -840,7 +870,35 @@ fn draw_download(
             }
         }
     }
+    // What the last "Check files" found.
+    if let Some(note) = &download.note
+        && download.status != DownloadStatus::Checking
+    {
+        ui.colored_label(info_color(ui), note);
+    }
     clicked
+}
+
+/// "Check files" makes sense once the file list is known, and not while it is starting or
+/// already being checked.
+fn can_check(download: &DownloadSnapshot) -> bool {
+    download.files_total > 0
+        && !matches!(
+            download.status,
+            DownloadStatus::Checking | DownloadStatus::GettingInfo
+        )
+}
+
+/// The line while files on disk are being checked, with how far it got.
+fn checking_text(download: &DownloadSnapshot) -> String {
+    if download.total_bytes == 0 {
+        "Checking files already on disk...".to_string()
+    } else {
+        format!(
+            "Checking files already on disk... {:.0}%",
+            fraction(download.progress_bytes, download.total_bytes) * 100.0
+        )
+    }
 }
 
 fn main() -> eframe::Result {
@@ -885,7 +943,37 @@ mod tests {
             error: None,
             files_total: 0,
             files_chosen: 0,
+            note: None,
+            can_use_existing_files: false,
         }
+    }
+
+    #[test]
+    fn check_files_is_offered_once_the_file_list_is_known() {
+        let mut download = snapshot(DownloadStatus::Downloading, 0, 100);
+        assert!(!can_check(&download), "file list not known yet");
+        download.files_total = 1;
+        assert!(can_check(&download));
+        for busy in [DownloadStatus::Checking, DownloadStatus::GettingInfo] {
+            download.status = busy;
+            assert!(!can_check(&download), "{busy:?}");
+        }
+        download.status = DownloadStatus::Paused;
+        assert!(can_check(&download));
+    }
+
+    #[test]
+    fn the_checking_line_shows_how_far_it_got() {
+        let download = snapshot(DownloadStatus::Checking, 45, 100);
+        assert_eq!(
+            checking_text(&download),
+            "Checking files already on disk... 45%"
+        );
+        let download = snapshot(DownloadStatus::Checking, 0, 0);
+        assert_eq!(
+            checking_text(&download),
+            "Checking files already on disk..."
+        );
     }
 
     fn file(number: usize, chosen: bool) -> FileChoice {

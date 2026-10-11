@@ -87,6 +87,7 @@ async fn the_command_line_adds_a_link_to_the_window_and_follows_it() {
         .ask(Command::Add {
             link: magnet,
             peers: vec![seeder_address],
+            use_existing_files: false,
         })
         .await
         .unwrap()
@@ -165,6 +166,7 @@ async fn several_command_lines_at_once_are_all_answered() {
         .ask(Command::Add {
             link: "hello".to_string(),
             peers: vec![],
+            use_existing_files: false,
         })
         .await
         .unwrap_err();

@@ -27,12 +27,13 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
 
-use crate::engine::{DownloadSnapshot, Engine};
+use crate::engine::{AddOptions, DownloadSnapshot, Engine};
 use crate::error::{Error, Result};
 use crate::file_choice::FileChoice;
 
 /// The version of the messages below. Change it whenever a message changes shape.
-/// Version 2 (M6): choosing files (`Files`, `ChooseFiles`), and file counts in each download.
+/// Version 2 (M6 and later, not released before): choosing files (`Files`, `ChooseFiles`), file
+/// counts in each download, `Check`, and `use_existing_files` on `Add`.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The longest message accepted, in bytes. A list of hundreds of downloads fits easily.
@@ -57,6 +58,9 @@ pub enum Command {
     Add {
         link: String,
         peers: Vec<SocketAddr>,
+        /// Use files with the same names already in the download folder (`--use-existing-files`).
+        #[serde(default)]
+        use_existing_files: bool,
     },
     Pause {
         target: Target,
@@ -80,6 +84,10 @@ pub enum Command {
     ChooseFiles {
         target: Target,
         chosen: BTreeSet<usize>,
+    },
+    /// Check a download's files on disk again (the result shows up in its `note`).
+    Check {
+        target: Target,
     },
 }
 
@@ -292,8 +300,16 @@ async fn answer_or_problem(
             downloads: engine.snapshot(),
             download_dir: engine.download_dir().to_path_buf(),
         },
-        Command::Add { link, peers } => {
-            let id = engine.add_any(&link, peers).await.map_err(said)?;
+        Command::Add {
+            link,
+            peers,
+            use_existing_files,
+        } => {
+            let options = AddOptions {
+                peers,
+                use_existing_files,
+            };
+            let id = engine.add_any_with(&link, options).await.map_err(said)?;
             Reply::Added {
                 info_hash: engine
                     .snapshot()
@@ -354,6 +370,13 @@ async fn answer_or_problem(
             Reply::FileList {
                 files: engine.files(download.id).map_err(said)?,
                 info_hash: download.info_hash,
+                name: download.name,
+            }
+        }
+        Command::Check { target } => {
+            let download = find(engine, &target)?;
+            engine.check(download.id).await.map_err(said)?;
+            Reply::Changed {
                 name: download.name,
             }
         }
@@ -644,6 +667,7 @@ mod tests {
             command: Command::Add {
                 link: "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056".to_string(),
                 peers: vec!["127.0.0.1:6881".parse().unwrap()],
+                use_existing_files: false,
             },
         };
         let text = serde_json::to_string(&request).unwrap();
@@ -712,6 +736,9 @@ mod tests {
                 target: Target::Number(1),
                 chosen: BTreeSet::from([1]),
             }),
+            request(Command::Check {
+                target: Target::Number(1),
+            }),
             request(Command::Remove {
                 target: Target::InfoHash(hash.to_string()),
                 delete_files: true,
@@ -761,16 +788,22 @@ mod tests {
                 "{answer:?}"
             );
         }
+        // ...and nothing to check yet either.
         assert!(
-            matches!(&answers[6], Reply::Removed { name, deleted: 0, .. } if name == "Example"),
+            matches!(&answers[6], Reply::Problem { message } if message.contains("can't be checked yet")),
             "{:?}",
             answers[6]
         );
-        // Removed by fingerprint once; a second time there is nothing left to remove.
         assert!(
-            matches!(&answers[7], Reply::Problem { message } if message.contains("isn't in BitDinghy's window")),
+            matches!(&answers[7], Reply::Removed { name, deleted: 0, .. } if name == "Example"),
             "{:?}",
             answers[7]
+        );
+        // Removed by fingerprint once; a second time there is nothing left to remove.
+        assert!(
+            matches!(&answers[8], Reply::Problem { message } if message.contains("isn't in BitDinghy's window")),
+            "{:?}",
+            answers[8]
         );
         assert!(engine.snapshot().is_empty());
         engine.shutdown().await;

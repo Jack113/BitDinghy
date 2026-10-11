@@ -1290,3 +1290,202 @@ async fn only_the_chosen_files_are_downloaded_and_the_choice_is_remembered() {
     );
     third_run.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Checking files, using files already there, and links (M7).
+// ---------------------------------------------------------------------------------------------
+
+/// Overwrites the first bytes of a file in place (like a disk error would), without changing its
+/// size. Works while the engine has the file open.
+fn damage(path: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&[0xAB; 1000]).unwrap();
+}
+
+/// Waits until the first download has a check note, and returns its snapshot.
+async fn wait_for_note(engine: &Engine) -> DownloadSnapshot {
+    wait_until(engine, "the check's note", |s| {
+        s.note.is_some() && s.status != DownloadStatus::Checking
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checking_finds_damage_and_it_is_downloaded_again() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    let folder = done.save_folder.unwrap();
+    assert!(done.note.is_none());
+
+    // A check of good files says so.
+    engine.check(id).await.unwrap();
+    let checked = wait_for_note(&engine).await;
+    assert_eq!(
+        checked.note.as_deref(),
+        Some("Checked: every chosen file is complete and correct.")
+    );
+
+    // Damage a file: the check finds it, and the download repairs it from the seeder.
+    damage(&folder.join("a.bin"));
+    engine.check(id).await.unwrap();
+    let checked = wait_for_note(&engine).await;
+    let note = checked.note.unwrap();
+    assert!(note.contains("were missing or damaged"), "{note}");
+    wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    assert_eq!(std::fs::read(folder.join("a.bin")).unwrap(), files[0].1);
+
+    // A paused download stays paused after a check.
+    engine.pause(id).await.unwrap();
+    wait_until(&engine, "paused", really_paused).await;
+    damage(&folder.join("b.bin"));
+    engine.check(id).await.unwrap();
+    let checked = wait_for_note(&engine).await;
+    assert!(really_paused(&checked), "{checked:?}");
+    let note = checked.note.unwrap();
+    assert!(note.contains("when you resume it"), "{note}");
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checking_with_the_window_closed_downloads_nothing_and_changes_nothing() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let first = remembering_engine(&download_dir, &list, true).await;
+    first
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&first, &[DownloadStatus::Finished]).await;
+    first.shutdown().await;
+    drop(first);
+    let folder = done.save_folder.unwrap();
+    damage(&folder.join("b.bin"));
+    let damaged = std::fs::read(folder.join("b.bin")).unwrap();
+
+    // Like `dinghy check 1`: its own engine, nothing restored.
+    let checker = remembering_engine(&download_dir, &list, false).await;
+    checker.check_saved(&done.info_hash).unwrap();
+    let checked = wait_for_note(&checker).await;
+    let note = checked.note.clone().unwrap();
+    assert!(note.contains("missing or damaged"), "{note}");
+    assert!(note.contains("the next time BitDinghy runs"), "{note}");
+    assert!(really_paused(&checked));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        std::fs::read(folder.join("b.bin")).unwrap(),
+        damaged,
+        "nothing was downloaded"
+    );
+    assert!(
+        !dinghy_core::SavedList::read(&list).unwrap()[0].paused,
+        "the saved list is not changed"
+    );
+    checker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_already_there_can_be_used_after_all() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    // The same files are already there: a.bin correct, b.bin half wrong.
+    let folder = download_dir.join("testdata");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("a.bin"), &files[0].1).unwrap();
+    let mut half = files[1].1.clone();
+    half[..20_000].fill(0);
+    std::fs::write(folder.join("b.bin"), &half).unwrap();
+
+    let engine = offline_engine(&download_dir).await;
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let refused = wait_for_status(&engine, &[DownloadStatus::Failed]).await;
+    assert!(refused.can_use_existing_files, "{refused:?}");
+    assert_eq!(
+        std::fs::read(folder.join("b.bin")).unwrap(),
+        half,
+        "untouched"
+    );
+
+    engine.use_existing_files(id).unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert!(!done.can_use_existing_files);
+    for (name, bytes) in &files {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes, "{name}");
+    }
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_already_there_can_be_used_from_the_start() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let folder = download_dir.join("testdata");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("a.bin"), &files[0].1).unwrap();
+
+    let engine = offline_engine(&download_dir).await;
+    let options = dinghy_core::AddOptions {
+        peers: vec![seeder.address],
+        use_existing_files: true,
+    };
+    engine
+        .add_any_with(&seeder.magnet(), options)
+        .await
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!(std::fs::read(folder.join("b.bin")).unwrap(), files[1].1);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_in_the_download_folder_is_never_written_through() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let elsewhere = work.path().join("elsewhere");
+    std::fs::create_dir_all(&download_dir).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    // "testdata" (the torrent's folder name) is a link to a folder outside the download folder.
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(download_dir.join("testdata"))
+            .arg(&elsewhere)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, download_dir.join("testdata")).unwrap();
+
+    let engine = offline_engine(&download_dir).await;
+    engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let refused =
+        wait_for_status(&engine, &[DownloadStatus::Failed, DownloadStatus::Finished]).await;
+    assert_eq!(refused.status, DownloadStatus::Failed);
+    let error = refused.error.unwrap();
+    assert!(error.contains("link to another place"), "{error}");
+    assert!(
+        entries_in(&elsewhere).is_empty(),
+        "nothing was written through the link"
+    );
+    engine.shutdown().await;
+}

@@ -61,11 +61,8 @@ project is built **one feature at a time**.
   running"); only the window answers requests. Fine for now.
 
 ## Noticed while building M3
-- After "Remove, keep the files", adding the same torrent again is refused, because its files are
-  no longer BitDinghy's (the "never take over a file" rule). A choice like "Use the files already
-  there (check them first)" belongs with M7 (verify and re-check).
-- Without any data folder (very rare), `dinghy get` can't continue an interrupted download: the
-  files already there aren't known to be BitDinghy's, so they are refused. Same fix as above.
+- Done in M7: "Use the files already there" (window button, `dinghy get --use-existing-files`)
+  answers both the re-add after "Remove, keep the files" and `dinghy get` without a data folder.
 - Removing with "delete the files" can hold the window for up to two seconds when Windows keeps
   a file busy. Fine for now; revisit if it ever shows.
 - `dinghy get --no-dht` on a link with no trackers and no `--peer` waits forever ("Looking for

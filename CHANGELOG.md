@@ -10,6 +10,15 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Check files.** A **Check files** button on each download (and `dinghy check <n>`) reads its
+  files on disk again and compares them with the torrent. It says whether everything is complete
+  and correct, or how much was missing or damaged; that part is downloaded again. With the window
+  closed, `dinghy check` downloads nothing and contacts nobody.
+- **Use the files already there.** A new download refused because a file with the same name is
+  already in the folder now offers **Use the files already there** (`dinghy get <link>
+  --use-existing-files`): BitDinghy checks those files and completes them instead.
+- BitDinghy never saves through a link (a symbolic link or junction) inside the download folder
+  that points somewhere else.
 - **Choose which files to download.** A torrent with several files gets a **Files** button in the
   window: a list with tick boxes, each file's size and how far it got. Untick the files you don't
   want, at any time, while the download runs or is paused. On the command line,

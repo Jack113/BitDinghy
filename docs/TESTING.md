@@ -3,6 +3,78 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M7: checking files, and using files already there
+
+Data-free like M6: it uses the M6 test torrent, whose files exist on your PC. Nobody shares it, so
+nothing is ever downloaded; the files already there do all the work.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`. `cargo build --workspace`. If you haven't yet, make the
+   test torrent: `cargo run -p dinghy-core --example make_test_torrent`.
+2. Terminal in `C:\cargo-target\debug`. `BitDinghy M6 test` is not in the window's list, and
+   `Downloads\BitDinghy` has no `BitDinghy M6 test` folder.
+3. Copy the folder `%TEMP%\bitdinghy-m6-test\BitDinghy M6 test` (the made-up files) into
+   `Downloads\BitDinghy`.
+
+**Test 1: use the files already there**
+- Do: open the window. **Open .torrent file...**, `%TEMP%\bitdinghy-m6-test`,
+  `bitdinghy-m6-test.torrent`.
+- You should see: the row turns red: "BitDinghy didn't start this download because a file with
+  the same name is already in the download folder: ...\BitDinghy M6 test\Episode 1.bin.
+  BitDinghy never overwrites files it didn't download. Move or rename that file, then try again."
+  Under it, a new button **Use the files already there**; hovering it explains that the files are
+  checked and completed, and then count as this download's files.
+- Then: press it. For a moment "Checking files already on disk... N%", then "Finished: 6.2 MiB
+  saved in ...". Nothing was downloaded (nobody shares this torrent): the files you copied were
+  complete.
+
+**Test 2: Check files**
+- Do: press **Check files** (next to Pause).
+- You should see: "Checking files already on disk... N%" with a spinner, then green "Finished"
+  again and a teal line "Checked: every chosen file is complete and correct."
+
+**Test 3: a damaged file is found**
+- Do: in PowerShell, damage the start of Episode 2 (this writes 100 bytes into it):
+  `$f=[IO.File]::Open("$HOME\Downloads\BitDinghy\BitDinghy M6 test\Episode 2.bin",'Open','Write','ReadWrite'); $f.Write([byte[]](1..100),0,100); $f.Close()`
+  Then press **Check files**.
+- You should see: "Checked: 256.0 KiB of the chosen files were missing or damaged. BitDinghy
+  downloads them again." The progress bar shows 96.0%, with 0 people connected: nobody shares
+  this test torrent, so the damaged piece can't come back. (With a real torrent it would.)
+
+**Test 4: `dinghy check` with the window open**
+- Do: `.\dinghy.exe list` (note the number `<n>`), then `.\dinghy.exe check <n>`.
+- You should see: "Checking the files of "BitDinghy M6 test" in BitDinghy's window...", a
+  "checking files already on disk... N%" line, then "Checked: 256.0 KiB of the chosen files were
+  missing or damaged. BitDinghy downloads them again." The window shows the same.
+
+**Test 5: `dinghy check` with the window closed**
+- Do: close the window. `.\dinghy.exe check <n>`.
+- You should see: "Checking the files of "BitDinghy M6 test" (nothing is downloaded)...", then
+  "Checked: 256.0 KiB of the chosen files are missing or damaged. They are downloaded again the
+  next time BitDinghy runs this download."
+
+**Test 6: `dinghy get --use-existing-files`**
+- Do: `.\dinghy.exe remove <n>` (keeps the files). Then
+  `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --no-dht --no-listen`.
+- You should see: the same "a file with the same name is already in the download folder" message,
+  and "To use the file that is already there instead, run the same command again with
+  --use-existing-files (BitDinghy checks it first and completes it)."
+- Then: run it again with `--use-existing-files` at the end: "Saving to ...", a progress line at
+  96%, `peers 0` (the damaged piece from test 3 can't come back). Press Ctrl+C.
+
+**Tidy up:** `.\dinghy.exe remove <n> --delete-files`, answer `yes`.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. Use the files already there | |
+| 2. Check files | |
+| 3. A damaged file is found | |
+| 4. `dinghy check`, window open | |
+| 5. `dinghy check`, window closed | |
+| 6. `dinghy get --use-existing-files` | |
+
 ## M6: choosing which files to download
 
 Tests are done one at a time: do the test, compare with "You should see", then go to the next.

@@ -70,6 +70,13 @@ pub enum Error {
     #[error("{0}")]
     Remote(String),
 
+    /// A folder or file on the way to a download's files is a link to another place.
+    #[error(
+        "BitDinghy didn't start this download because {} is a link to another place (a          \"symbolic link\" or \"junction\"). BitDinghy only saves into real folders inside the          download folder.",
+        .0.display()
+    )]
+    LinkInTheWay(PathBuf),
+
     /// A new download would have overwritten a file that BitDinghy didn't download.
     #[error(
         "BitDinghy didn't start this download because a file with the same name is already in \

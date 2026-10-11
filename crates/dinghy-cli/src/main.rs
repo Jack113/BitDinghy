@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dinghy_core::display::{format_bytes, format_eta, format_speed, fraction, waiting_text};
 use dinghy_core::input::{self, Input};
 use dinghy_core::{
-    DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, SavedDownload, SavedList,
-    file_choice, owned_files, remote, torrent_file, web_link,
+    AddOptions, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Profile, SavedDownload,
+    SavedList, file_choice, owned_files, remote, torrent_file, web_link,
 };
 
 /// BitDinghy on the command line.
@@ -37,6 +37,8 @@ enum Command {
     Remove(RemoveArgs),
     /// Show a download's files, or choose which of them to download (--pick)
     Files(FilesArgs),
+    /// Check a download's files on disk again (with the window closed, nothing is downloaded)
+    Check(NumberArg),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -119,6 +121,11 @@ struct GetArgs {
     #[arg(long)]
     no_listen: bool,
 
+    /// If files with the same names are already in the download folder, use them (they are
+    /// checked first and completed) instead of stopping
+    #[arg(long)]
+    use_existing_files: bool,
+
     /// Show the engine's detailed log messages (useful when something goes wrong)
     #[arg(short, long)]
     verbose: bool,
@@ -133,6 +140,7 @@ async fn main() -> ExitCode {
         Some(Command::Resume(which)) => set_paused(which.number, false).await,
         Some(Command::Remove(args)) => remove(args).await,
         Some(Command::Files(args)) => files(args).await,
+        Some(Command::Check(which)) => check(which.number).await,
         Some(Command::Settings(args)) => settings(args),
         None => {
             println!("{}", dinghy_core::about());
@@ -834,7 +842,11 @@ async fn get(mut args: GetArgs) -> ExitCode {
         eprintln!("Note: {notice}");
     }
 
-    let id = match engine.add_any(&args.link, args.peers).await {
+    let options = AddOptions {
+        peers: args.peers,
+        use_existing_files: args.use_existing_files,
+    };
+    let id = match engine.add_any_with(&args.link, options).await {
         Ok(id) => id,
         Err(error) => {
             eprintln!("{error}");
@@ -905,9 +917,184 @@ fn show_progress(
                 "{}",
                 snapshot.error.as_deref().unwrap_or("The download failed.")
             );
+            if snapshot.can_use_existing_files {
+                eprintln!(
+                    "To use the file that is already there instead, run the same command again \
+                     with --use-existing-files (BitDinghy checks it first and completes it)."
+                );
+            }
             Some(ExitCode::FAILURE)
         }
         _ => None,
+    }
+}
+
+/// `dinghy check <n>`: checks a download's files on disk again. Through the open window, or with
+/// the window closed in an engine of its own that contacts nobody and downloads nothing.
+async fn check(number: usize) -> ExitCode {
+    let profile = Profile::load();
+    print_notices(&profile);
+    match window_client(&profile).await {
+        Err(code) => return code,
+        Ok(Some(mut window)) => return check_in_window(&mut window, number).await,
+        Ok(None) => {}
+    }
+    let Some(path) = profile.saved_list_path() else {
+        eprintln!("BitDinghy has no data folder right now, so it doesn't remember any downloads.");
+        return ExitCode::FAILURE;
+    };
+    let saved = match SavedList::read(&path) {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(download) = number.checked_sub(1).and_then(|index| saved.get(index)) else {
+        eprintln!("There is no download number {number}. `dinghy list` shows the numbers.");
+        return ExitCode::FAILURE;
+    };
+
+    // Checking needs no one else: no DHT, no listening, no local search.
+    let mut config = profile.engine_config();
+    config.use_dht = false;
+    config.accept_incoming = false;
+    config.local_discovery = false;
+    config.restore_saved = false;
+    let engine = match Engine::start(config).await {
+        Ok(engine) => engine,
+        Err(dinghy_core::Error::AlreadyRunning) => {
+            eprintln!(
+                "BitDinghy is busy in another terminal (`dinghy get`), so this can't check \
+                 anything right now. Stop it with Ctrl+C first, or use the window."
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let id = match engine.check_saved(&download.info_hash) {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("{error}");
+            engine.shutdown().await;
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "Checking the files of \"{}\" (nothing is downloaded)...",
+        download.name
+    );
+    let mut printer = ProgressPrinter::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let exit = loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let Some(snapshot) = engine.snapshot().into_iter().find(|s| s.id == id) else {
+                    continue;
+                };
+                if let Some(code) = show_check(&mut printer, &snapshot) {
+                    break code;
+                }
+            }
+            _ = &mut ctrl_c => {
+                printer.finish();
+                println!("Stopped checking. Nothing was changed.");
+                break ExitCode::from(130);
+            }
+        }
+    };
+    engine.shutdown().await;
+    exit
+}
+
+/// `dinghy check` while the window is open: the window checks, this terminal follows it.
+async fn check_in_window(window: &mut remote::Client, number: usize) -> ExitCode {
+    // The fingerprint first, so the terminal follows the right download even if the list changes.
+    let info_hash = match window.ask(remote::Command::List).await {
+        Ok(remote::Reply::Downloads { downloads, .. }) => {
+            match number.checked_sub(1).and_then(|index| downloads.get(index)) {
+                Some(download) => download.info_hash.clone(),
+                None => {
+                    eprintln!(
+                        "There is no download number {number} in BitDinghy's window. \
+                         `dinghy list` shows the numbers."
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        other => return explain_unexpected(other),
+    };
+    match window
+        .ask(remote::Command::Check {
+            target: remote::Target::InfoHash(info_hash.clone()),
+        })
+        .await
+    {
+        Ok(remote::Reply::Changed { name }) => {
+            println!("Checking the files of \"{name}\" in BitDinghy's window...");
+        }
+        other => return explain_unexpected(other),
+    }
+    let mut printer = ProgressPrinter::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let downloads = match window.ask(remote::Command::List).await {
+                    Ok(remote::Reply::Downloads { downloads, .. }) => downloads,
+                    Ok(_) => continue,
+                    Err(_) => {
+                        printer.finish();
+                        eprintln!("BitDinghy's window was closed during the check.");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let Some(snapshot) = downloads.iter().find(|d| d.info_hash == info_hash) else {
+                    printer.finish();
+                    println!("The download was removed in the window.");
+                    return ExitCode::SUCCESS;
+                };
+                if let Some(code) = show_check(&mut printer, snapshot) {
+                    return code;
+                }
+            }
+            _ = &mut ctrl_c => {
+                printer.finish();
+                println!("Stopped following. The check carries on in BitDinghy's window.");
+                return ExitCode::from(130);
+            }
+        }
+    }
+}
+
+/// Draws a check's progress. Once it is done, says what it found and returns the exit code.
+fn show_check(printer: &mut ProgressPrinter, snapshot: &DownloadSnapshot) -> Option<ExitCode> {
+    if snapshot.status == DownloadStatus::Failed {
+        printer.finish();
+        eprintln!(
+            "{}",
+            snapshot.error.as_deref().unwrap_or("The check failed.")
+        );
+        return Some(ExitCode::FAILURE);
+    }
+    match &snapshot.note {
+        Some(note) if snapshot.status != DownloadStatus::Checking => {
+            printer.finish();
+            println!("{note}");
+            Some(ExitCode::SUCCESS)
+        }
+        _ => {
+            printer.show(snapshot);
+            None
+        }
     }
 }
 
@@ -945,6 +1132,7 @@ async fn get_through_window(mut window: remote::Client, args: GetArgs) -> ExitCo
         .ask(remote::Command::Add {
             link: args.link,
             peers: args.peers,
+            use_existing_files: args.use_existing_files,
         })
         .await
     {
@@ -1039,7 +1227,7 @@ fn live_state(download: &DownloadSnapshot) -> String {
     let percent = fraction(download.progress_bytes, download.total_bytes) * 100.0;
     match download.status {
         DownloadStatus::GettingInfo => "looking for people sharing it".to_string(),
-        DownloadStatus::Checking => "checking files already on disk".to_string(),
+        DownloadStatus::Checking => format!("checking files on disk, {percent:.0}%"),
         DownloadStatus::Downloading => format!(
             "{percent:.1}% of {}, {}, {} left",
             format_bytes(download.total_bytes),
@@ -1075,8 +1263,9 @@ fn progress_line(s: &DownloadSnapshot) -> String {
         DownloadStatus::GettingInfo => waiting_text(s.waiting_for.unwrap_or_default()),
         DownloadStatus::Checking => {
             format!(
-                "{}: checking files already on disk...",
-                shorten(&s.name, 40)
+                "{}: checking files already on disk... {:.0}%",
+                shorten(&s.name, 40),
+                fraction(s.progress_bytes, s.total_bytes) * 100.0
             )
         }
         _ => format!(
@@ -1160,6 +1349,8 @@ mod tests {
             error: None,
             files_total: 3,
             files_chosen: 3,
+            note: None,
+            can_use_existing_files: false,
         }
     }
 

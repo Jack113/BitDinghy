@@ -292,6 +292,30 @@ finishes, and the torrent is taken straight back out.
 - The saved list is now **version 2** (one new column, added by an upgrade step); the channel's
   messages are **version 2** (`Files`, `ChooseFiles`, and file counts in each download).
 
+## Checking files, and using files already there (M7)
+
+- **"Check files"** (window) and **`dinghy check <n>`** read a download's files on disk again and
+  compare every piece with the torrent's fingerprints. librqbit has no "check again" call, but it
+  checks everything already on disk whenever a torrent is added, so `Engine::check` takes the
+  download out of librqbit (its files stay) and adds it again from its saved file list. When
+  librqbit has finished checking, the download gets a `note`: "every chosen file is complete and
+  correct", or how much was missing or damaged (that part is downloaded again; a paused download
+  stays paused). While it checks, the window and `dinghy` show a percentage.
+- With the window closed, `dinghy check` runs an engine of its own with no DHT, no listening and
+  no local search, adds just that download paused (`Engine::check_saved`; the saved list is not
+  changed), reports, and stops. Nothing is downloaded and nobody is contacted.
+- **"Use the files already there"** answers M3's "never take over a file" refusal: when a new
+  download is refused because a file with one of its names exists, the window offers this button
+  (`dinghy get <link> --use-existing-files` on the command line). The files are checked like any
+  files on disk, and completed; parts that don't match are replaced. From then on they count as
+  the download's own files, so "Remove, delete the files too" deletes them. It is always the
+  person's explicit choice.
+- **Never through a link.** Before a download starts, every folder and file on the way to its
+  files (inside the download folder) is looked at: a symbolic link or a junction to another place
+  is refused (`owned_files::refuse_links`, `Error::LinkInTheWay`), because writing "into" it
+  would write outside the download folder. Cloud placeholders (OneDrive) are not links. The
+  download folder itself may be a link: it is the person's own choice.
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -301,5 +325,6 @@ finishes, and the torrent is taken straight back out.
 | M4 | The channel between the window and the command line |
 | M5 | .torrent files and web links to them |
 | M6 | Choosing files |
+| M7 | Checking files, using files already there |
 | M8-M10 | Queue and limits |
 | M14 | History and charts |

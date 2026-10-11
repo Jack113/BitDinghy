@@ -18,6 +18,10 @@
 //! at any time; it is passed to the engine at step 3, and straight away while a download runs.
 //! The engine still creates unticked files on disk, so BitDinghy marks them hidden once the engine
 //! has set a download up, and again after every change (see `owned_files.rs`).
+//!
+//! **Checking files** (M7): librqbit has no "check again" call, but it checks every piece already
+//! on disk whenever a torrent is added. So [`Engine::check`] takes the download out of librqbit
+//! (keeping its files) and adds it again from its saved file list, then says what it found.
 
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
@@ -33,6 +37,7 @@ use librqbit::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::display::format_bytes;
 use crate::error::{Error, Result};
 use crate::file_choice::{self, FileChoice, TorrentFile};
 use crate::input::{self, Input};
@@ -133,6 +138,33 @@ pub struct DownloadSnapshot {
     /// How many of them are chosen (ticked). The progress counts only these.
     #[serde(default)]
     pub files_chosen: usize,
+    /// What the last "check files" found, once it has finished (M7).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// It failed because a file with the same name was already there; the person can choose to
+    /// use that file instead ([`Engine::use_existing_files`]).
+    #[serde(default)]
+    pub can_use_existing_files: bool,
+}
+
+/// Choices for adding a download.
+#[derive(Debug, Clone, Default)]
+pub struct AddOptions {
+    /// Extra addresses to try directly (handy on your own network, and in tests).
+    pub peers: Vec<SocketAddr>,
+    /// Use files with the same names that are already in the download folder, instead of refusing
+    /// the download. They are checked first and completed; afterwards they count as this
+    /// download's files ("remove, delete the files too" deletes them).
+    pub use_existing_files: bool,
+}
+
+impl AddOptions {
+    fn with_peers(peers: Vec<SocketAddr>) -> Self {
+        Self {
+            peers,
+            ..Self::default()
+        }
+    }
 }
 
 enum EntryState {
@@ -169,6 +201,16 @@ struct Entry {
     file_list: Mutex<Option<Arc<Vec<TorrentFile>>>>,
     /// The files the person unticked (the torrent's own indexes). Empty: every file.
     skipped: Mutex<BTreeSet<usize>>,
+    /// The person chose to use files already in the folder (see [`AddOptions`]).
+    use_existing: AtomicBool,
+    /// The last start failed because a file with the same name was already there.
+    name_clash: AtomicBool,
+    /// A "check files" is under way: say what it found once librqbit has checked.
+    check_requested: AtomicBool,
+    /// Added only to be checked (`dinghy check` with the window closed): it is paused just here.
+    check_only: AtomicBool,
+    /// What the last check found.
+    note: Mutex<Option<String>>,
     state: Mutex<EntryState>,
     /// Smooths the download speed shown to the user (see [`Smoother`]).
     speed: Mutex<Smoother>,
@@ -184,6 +226,7 @@ struct NewEntry {
     peers: Vec<SocketAddr>,
     known_torrent: Option<Vec<u8>>,
     skipped: BTreeSet<usize>,
+    use_existing: bool,
 }
 
 /// Where a download's file list comes from.
@@ -425,7 +468,7 @@ impl Engine {
             parsed.display_name.as_deref(),
             &parsed.clean_link,
             Source::Magnet(parsed.clean_link.clone()),
-            extra_peers,
+            AddOptions::with_peers(extra_peers),
         )
     }
 
@@ -433,15 +476,22 @@ impl Engine {
     /// read and rebuilt from checked parts first (`torrent_file.rs`), so a bad file fails here.
     /// Web links need fetching: use [`Engine::add_any`].
     pub fn add(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
+        self.add_with(input, AddOptions::with_peers(extra_peers))
+    }
+
+    /// [`Engine::add`] with more choices (see [`AddOptions`]).
+    pub fn add_with(&self, input: &str, options: AddOptions) -> Result<DownloadId> {
         match input::classify(input)? {
             Input::Magnet(parsed) => self.add_new(
                 &parsed.info_hash,
                 parsed.display_name.as_deref(),
                 &parsed.clean_link,
                 Source::Magnet(parsed.clean_link.clone()),
-                extra_peers,
+                options,
             ),
-            Input::TorrentFile(path) => self.add_torrent(torrent_file::read(&path)?, extra_peers),
+            Input::TorrentFile(path) => {
+                self.add_checked_torrent(torrent_file::read(&path)?, options)
+            }
             // Fetching takes time, so web links go through `add_any`.
             Input::WebLink(_) => Err(Error::WebLink(
                 "A web link has to be fetched first (use `add_any`).".to_string(),
@@ -453,9 +503,19 @@ impl Engine {
     /// first (carefully, see `web_link.rs`). Fetching can take a few seconds, so this is `async`;
     /// the window runs it in the background.
     pub async fn add_any(&self, input: &str, extra_peers: Vec<SocketAddr>) -> Result<DownloadId> {
+        self.add_any_with(input, AddOptions::with_peers(extra_peers))
+            .await
+    }
+
+    /// [`Engine::add_any`] with more choices (see [`AddOptions`]).
+    pub async fn add_any_with(&self, input: &str, options: AddOptions) -> Result<DownloadId> {
         match input::classify(input)? {
-            Input::WebLink(link) => self.add_from_web(&link, extra_peers).await,
-            _ => self.add(input, extra_peers),
+            Input::WebLink(link) => {
+                let rules = web_link::Rules::new(self.allow_http_links.load(Ordering::SeqCst));
+                let torrent = web_link::fetch(&link, rules).await?;
+                self.add_checked_torrent(torrent, options)
+            }
+            _ => self.add_with(input, options),
         }
     }
 
@@ -481,6 +541,14 @@ impl Engine {
         torrent: CheckedTorrent,
         extra_peers: Vec<SocketAddr>,
     ) -> Result<DownloadId> {
+        self.add_checked_torrent(torrent, AddOptions::with_peers(extra_peers))
+    }
+
+    fn add_checked_torrent(
+        &self,
+        torrent: CheckedTorrent,
+        options: AddOptions,
+    ) -> Result<DownloadId> {
         self.add_new(
             &torrent.info_hash,
             torrent.display_name.as_deref(),
@@ -489,7 +557,7 @@ impl Engine {
                 bytes: torrent.bytes,
                 folder: None,
             },
-            extra_peers,
+            options,
         )
     }
 
@@ -502,11 +570,20 @@ impl Engine {
         name: Option<&str>,
         clean_link: &str,
         first_source: Source,
-        extra_peers: Vec<SocketAddr>,
+        options: AddOptions,
     ) -> Result<DownloadId> {
         let mut entries = lock(&self.entries);
-        if let Some(existing) = entries.iter().find(|e| e.info_hash == info_hash) {
-            return Ok(existing.id); // Adding the same torrent twice just shows the same download.
+        if let Some(existing) = entries.iter().find(|e| e.info_hash == info_hash).cloned() {
+            drop(entries);
+            // Adding the same torrent twice just shows the same download (asking to use the files
+            // already there tries a download refused for that reason again).
+            if options.use_existing_files
+                && existing.name_clash.load(Ordering::SeqCst)
+                && matches!(*lock(&existing.state), EntryState::Failed(_))
+            {
+                self.use_existing_files(existing.id)?;
+            }
+            return Ok(existing.id);
         }
         // Kept so that "Try again" can start from this file list without asking anyone for it.
         let known_torrent = match &first_source {
@@ -553,9 +630,10 @@ impl Engine {
             download_dir,
             magnet: clean_link.to_string(),
             paused: false,
-            peers: extra_peers,
+            peers: options.peers,
             known_torrent,
             skipped,
+            use_existing: options.use_existing_files,
         });
         let id = entry.id;
         entries.push(entry.clone());
@@ -609,6 +687,7 @@ impl Engine {
                 peers: Vec::new(),
                 known_torrent: None,
                 skipped,
+                use_existing: false,
             });
             lock(&self.entries).push(entry.clone());
             match source {
@@ -635,6 +714,11 @@ impl Engine {
             files: Mutex::new(None),
             file_list: Mutex::new(None),
             skipped: Mutex::new(start.skipped),
+            use_existing: AtomicBool::new(start.use_existing),
+            name_clash: AtomicBool::new(false),
+            check_requested: AtomicBool::new(false),
+            check_only: AtomicBool::new(false),
+            note: Mutex::new(None),
             state: Mutex::new(EntryState::GettingInfo(Instant::now())),
             speed: Mutex::new(Smoother::new()),
         })
@@ -660,14 +744,22 @@ impl Engine {
                         let _ = shared.session.unpause(&handle).await;
                     }
                     // The engine creates the files while it sets the download up: hide the
-                    // leftovers of unticked files once it has.
+                    // leftovers of unticked files once it has. A "check files" reports here too.
                     if handle.wait_until_initialized().await.is_ok()
                         && !entry.removed.load(Ordering::SeqCst)
                     {
+                        if entry.check_requested.swap(false, Ordering::SeqCst) {
+                            let check_only = entry.check_only.load(Ordering::SeqCst);
+                            *lock(&entry.note) = Some(check_note(&handle, check_only));
+                        }
                         let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
                     }
                 }
                 Err(error) => {
+                    entry.check_requested.store(false, Ordering::SeqCst);
+                    entry
+                        .name_clash
+                        .store(matches!(error, Error::NameClash(_)), Ordering::SeqCst);
                     let mut state = lock(&entry.state);
                     // Paused in the meantime: the person doesn't want it running anyway, so it
                     // simply waits to be resumed (which tries again).
@@ -928,24 +1020,168 @@ impl Engine {
                     )));
                 }
             }
-            None => {
-                // Start (or try again) from the saved file list if there is one.
-                let source = self
-                    .shared
-                    .with_list(|list| list.get(&entry.info_hash))
-                    .flatten()
-                    .and_then(Source::saved)
-                    .unwrap_or_else(|| match &entry.known_torrent {
-                        Some(bytes) => Source::Torrent {
-                            bytes: bytes.clone(),
-                            folder: None,
-                        },
-                        None => Source::Magnet(entry.magnet.clone()),
-                    });
-                self.spawn_start(entry, source);
-            }
+            None => self.start_again(entry),
         }
         Ok(())
+    }
+
+    /// Starts a download that isn't running (stopped or failed) again: from the saved file list
+    /// if there is one, else from the `.torrent` it was added from, else from its magnet link.
+    fn start_again(&self, entry: Arc<Entry>) {
+        entry.name_clash.store(false, Ordering::SeqCst);
+        let source = self
+            .shared
+            .with_list(|list| list.get(&entry.info_hash))
+            .flatten()
+            .and_then(Source::saved)
+            .unwrap_or_else(|| match &entry.known_torrent {
+                Some(bytes) => Source::Torrent {
+                    bytes: bytes.clone(),
+                    folder: None,
+                },
+                None => Source::Magnet(entry.magnet.clone()),
+            });
+        self.spawn_start(entry, source);
+    }
+
+    /// For a download refused because a file with the same name was already there: use that file
+    /// (and any others with its files' names) after all. The files are checked first and
+    /// completed; from then on they count as this download's files.
+    pub fn use_existing_files(&self, id: DownloadId) -> Result<()> {
+        let entry = self.entry(id)?;
+        {
+            let mut state = lock(&entry.state);
+            if !matches!(*state, EntryState::Failed(_) | EntryState::Stopped) {
+                return Err(Error::Control(format!(
+                    "\"{}\" is already running with its own files.",
+                    entry.label
+                )));
+            }
+            *state = EntryState::GettingInfo(Instant::now());
+        }
+        entry.use_existing.store(true, Ordering::SeqCst);
+        entry.wants_pause.store(false, Ordering::SeqCst);
+        self.shared
+            .with_list(|list| list.set_paused(&entry.info_hash, false));
+        self.start_again(entry);
+        Ok(())
+    }
+
+    /// Checks a download's files on disk again, piece by piece, against the torrent's
+    /// fingerprints. Anything missing or damaged is downloaded again (when it runs). The result
+    /// shows up as the download's `note` when the check is done. A paused download stays paused.
+    pub async fn check(&self, id: DownloadId) -> Result<()> {
+        let entry = self.entry(id)?;
+        let Some((bytes, folder)) = self.known_file_list(&entry) else {
+            return Err(Error::Control(format!(
+                "\"{}\" can't be checked yet: BitDinghy doesn't know its files yet.",
+                entry.label
+            )));
+        };
+        let handle = {
+            let mut state = lock(&entry.state);
+            let handle = match &*state {
+                EntryState::Active(handle) => {
+                    if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+                        return Err(Error::Control(format!(
+                            "\"{}\" is being checked already.",
+                            entry.label
+                        )));
+                    }
+                    Some(handle.clone())
+                }
+                EntryState::GettingInfo(_) => return Err(still_starting(&entry.label)),
+                EntryState::Stopped | EntryState::Failed(_) => None,
+            };
+            *state = EntryState::GettingInfo(Instant::now());
+            handle
+        };
+        *lock(&entry.note) = None;
+        entry.check_requested.store(true, Ordering::SeqCst);
+        if let Some(handle) = handle {
+            // Out of librqbit (its files stay), so that adding it again checks every piece.
+            if let Err(error) = self.shared.session.delete(handle.id().into(), false).await {
+                entry.check_requested.store(false, Ordering::SeqCst);
+                *lock(&entry.state) = EntryState::Active(handle);
+                return Err(Error::Control(format!(
+                    "Couldn't check \"{}\": {error:#}",
+                    entry.label
+                )));
+            }
+        }
+        self.spawn_start(
+            entry,
+            Source::Torrent {
+                bytes,
+                folder: Some(folder),
+            },
+        );
+        Ok(())
+    }
+
+    /// For `dinghy check` with the window closed: checks a SAVED download's files without
+    /// downloading anything (it is added paused, just for this engine; the saved list is not
+    /// changed). Its result shows up as the download's `note`.
+    pub fn check_saved(&self, info_hash: &str) -> Result<DownloadId> {
+        let saved = self
+            .shared
+            .with_list(|list| list.get(info_hash))
+            .flatten()
+            .ok_or_else(|| {
+                Error::Control("That download isn't in the saved list any more.".to_string())
+            })?;
+        let (label, download_dir) = (saved.name.clone(), saved.download_dir.clone());
+        let skipped = saved.skipped_files.clone();
+        let magnet = saved.magnet.clone();
+        let Some(source) = Source::saved(saved) else {
+            return Err(Error::Control(format!(
+                "\"{label}\" can't be checked yet: BitDinghy doesn't know its files yet."
+            )));
+        };
+        let entry = self.new_entry(NewEntry {
+            info_hash: info_hash.to_string(),
+            label,
+            download_dir,
+            magnet,
+            paused: true,
+            peers: Vec::new(),
+            known_torrent: None,
+            skipped,
+            use_existing: false,
+        });
+        entry.check_requested.store(true, Ordering::SeqCst);
+        entry.check_only.store(true, Ordering::SeqCst);
+        let id = entry.id;
+        lock(&self.entries).push(entry.clone());
+        self.spawn_start(entry, source);
+        Ok(id)
+    }
+}
+
+/// What a finished check found, in plain words. `check_only`: checked by `dinghy check` with the
+/// window closed (it is paused only for the check).
+fn check_note(handle: &ManagedTorrent, check_only: bool) -> String {
+    let stats = handle.stats();
+    let missing = stats.total_bytes.saturating_sub(stats.progress_bytes);
+    if missing == 0 {
+        "Checked: every chosen file is complete and correct.".to_string()
+    } else if check_only {
+        format!(
+            "Checked: {} of the chosen files are missing or damaged. They are downloaded again              the next time BitDinghy runs this download.",
+            format_bytes(missing)
+        )
+    } else if handle.is_paused() {
+        format!(
+            "Checked: {} of the chosen files are missing or damaged. They are downloaded again \
+             when you resume it.",
+            format_bytes(missing)
+        )
+    } else {
+        format!(
+            "Checked: {} of the chosen files were missing or damaged. BitDinghy downloads them \
+             again.",
+            format_bytes(missing)
+        )
     }
 }
 
@@ -1032,8 +1268,10 @@ async fn start_download(
     // files there are its own. A refused one is kept in the list, so the person can move the
     // other file away and press "Try again".
     let paths = owned_files::paths_in(&listing.info, &output_folder)?;
+    // Never save through a link (a symbolic link or junction) to another place.
+    owned_files::refuse_links(&entry.download_dir, &paths)?;
     let continuing = saved_folder.is_some();
-    if !continuing {
+    if !continuing && !entry.use_existing.load(Ordering::SeqCst) {
         owned_files::refuse_existing_files(&paths)?;
     }
     *lock(&entry.files) = Some((listing.torrent_bytes.to_vec(), output_folder.clone()));
@@ -1170,10 +1408,16 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         error: None,
         files_total,
         files_chosen,
+        note: lock(&entry.note).clone(),
+        can_use_existing_files: false,
     };
 
     let state = lock(&entry.state);
     match &*state {
+        // Taken out of librqbit for a check, and on its way back in.
+        EntryState::GettingInfo(_) if entry.check_requested.load(Ordering::SeqCst) => {
+            snapshot.status = DownloadStatus::Checking;
+        }
         EntryState::GettingInfo(since) => {
             if entry.wants_pause.load(Ordering::SeqCst) {
                 snapshot.status = DownloadStatus::Paused;
@@ -1187,6 +1431,7 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         EntryState::Failed(message) => {
             snapshot.status = DownloadStatus::Failed;
             snapshot.error = Some(message.clone());
+            snapshot.can_use_existing_files = entry.name_clash.load(Ordering::SeqCst);
         }
         EntryState::Active(handle) => {
             let stats = handle.stats();
