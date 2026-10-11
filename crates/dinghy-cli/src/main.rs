@@ -138,6 +138,12 @@ enum SettingKey {
     StopSharingAtRatio,
     /// A finished download stops sharing after this many minutes of sharing; none = never
     StopSharingAfter,
+    /// Accept connections from other people: "on" or "off" (used at the next start)
+    AcceptIncoming,
+    /// The port other people connect to; 0 = automatic (used at the next start)
+    ListenPort,
+    /// Ask the router to forward the port (UPnP): "on" or "off" (used at the next start)
+    Upnp,
 }
 
 #[derive(Args)]
@@ -259,6 +265,30 @@ fn show_settings(profile: &Profile) {
             minutes => format!("{minutes} minutes of sharing"),
         }
     );
+    let settings = profile.settings();
+    println!(
+        "accept-incoming:  {}",
+        if settings.accept_incoming {
+            "on  (other people can connect: sharing works much better)"
+        } else {
+            "off  (only BitDinghy makes connections)"
+        }
+    );
+    println!(
+        "listen-port:  {}",
+        match settings.listen_port {
+            0 => "0  (automatic: a different free port at each start)".to_string(),
+            port => port.to_string(),
+        }
+    );
+    println!(
+        "upnp:  {}",
+        if settings.upnp {
+            "on  (BitDinghy asks the router to forward the port)"
+        } else {
+            "off  (the router is left alone)"
+        }
+    );
     println!(
         "max-active-downloads:  {}",
         match profile.settings().max_active_downloads {
@@ -340,6 +370,37 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        SettingKey::AcceptIncoming | SettingKey::Upnp => match on_or_off(&value) {
+            Some(on) => {
+                let settings = profile.settings();
+                let (mut accept, port, mut upnp) = (
+                    settings.accept_incoming,
+                    settings.listen_port,
+                    settings.upnp,
+                );
+                if matches!(key, SettingKey::AcceptIncoming) {
+                    accept = on;
+                } else {
+                    upnp = on;
+                }
+                profile.set_connections(accept, port, upnp)
+            }
+            None => {
+                eprintln!("This setting is \"on\" or \"off\".");
+                return ExitCode::FAILURE;
+            }
+        },
+        SettingKey::ListenPort => match value.trim().parse::<u16>() {
+            Ok(port) => {
+                let settings = profile.settings();
+                let (accept, upnp) = (settings.accept_incoming, settings.upnp);
+                profile.set_connections(accept, port, upnp)
+            }
+            Err(_) => {
+                eprintln!("listen-port is a number between 1024 and 65535, or 0 for automatic.");
+                return ExitCode::FAILURE;
+            }
+        },
         SettingKey::StopSharingAtRatio => match parse_ratio(&value) {
             Some(percent) => {
                 profile.set_sharing_limits(percent, profile.settings().stop_sharing_after_minutes)
@@ -385,7 +446,11 @@ async fn settings(args: SettingsArgs) -> ExitCode {
             // The open window gets the change straight away (the download folder only applies
             // at its next start, as before).
             let live = match key {
-                SettingKey::DownloadDir => None,
+                // These are only used when BitDinghy starts.
+                SettingKey::DownloadDir
+                | SettingKey::AcceptIncoming
+                | SettingKey::ListenPort
+                | SettingKey::Upnp => None,
                 SettingKey::AllowHttpLinks => Some(remote::Command::SetAllowHttpLinks {
                     allow: profile.settings().allow_http_links,
                 }),
@@ -405,12 +470,20 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                     })
                 }
             };
-            let told_window = match (live, window_client(&profile).await) {
-                (Some(command), Ok(Some(mut window))) => window.ask(command).await.is_ok(),
+            let at_next_start = live.is_none();
+            let window = window_client(&profile).await.ok().flatten();
+            let window_open = window.is_some();
+            let told_window = match (live, window) {
+                (Some(command), Some(mut window)) => window.ask(command).await.is_ok(),
                 _ => false,
             };
             if told_window {
                 println!("Saved. BitDinghy's open window uses it straight away.");
+            } else if at_next_start && window_open {
+                println!(
+                    "Saved. BitDinghy's open window uses it the next time it starts (close it \
+                     and open it again)."
+                );
             } else {
                 println!("Saved. It will be used from now on, in the window too.");
             }
@@ -1080,7 +1153,10 @@ async fn get(mut args: GetArgs) -> ExitCode {
         config.download_dir = dir.clone();
     }
     config.use_dht = !args.no_dht;
-    config.accept_incoming = !args.no_listen;
+    // The setting decides, unless --no-listen says no for this run.
+    if args.no_listen {
+        config.accept_incoming = false;
+    }
     // Only this one download: the others in the saved list wait for the window.
     config.restore_saved = false;
     let engine = match Engine::start(config).await {

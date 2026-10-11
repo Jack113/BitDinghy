@@ -59,6 +59,14 @@ fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
     !editing.dragged() && !editing.has_focus()
 }
 
+/// Whether, and on which port, BitDinghy accepts connections right now.
+fn listening_text(port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!("Right now: accepting connections on port {port}."),
+        None => "Right now: not accepting connections from other people.".to_string(),
+    }
+}
+
 /// What the sharing limits mean, after a change.
 fn sharing_limits_text(ratio_percent: u32, minutes: u32) -> String {
     let ratio = (ratio_percent > 0).then(|| {
@@ -153,6 +161,8 @@ struct BitDinghyApp {
     limits_choice: (u32, u32),
     /// The sharing limits being edited in the settings: ratio (1.5) and minutes (0: none).
     sharing_choice: (f64, u32),
+    /// The connection settings being edited: accept incoming, port (0: automatic), UPnP.
+    connections_choice: (bool, u16, bool),
     /// Why the command line can't talk to this window, if it can't.
     channel_problem: Option<String>,
     /// A web link being fetched in the background, if any.
@@ -193,6 +203,11 @@ impl BitDinghyApp {
             _ => None,
         };
         let max_active_choice = profile.settings().max_active_downloads;
+        let connections_choice = (
+            profile.settings().accept_incoming,
+            profile.settings().listen_port,
+            profile.settings().upnp,
+        );
         let sharing_choice = (
             f64::from(profile.settings().stop_sharing_ratio_percent) / 100.0,
             profile.settings().stop_sharing_after_minutes,
@@ -221,6 +236,7 @@ impl BitDinghyApp {
             max_active_choice,
             limits_choice,
             sharing_choice,
+            connections_choice,
             channel_problem,
             fetching: None,
         }
@@ -401,6 +417,8 @@ impl BitDinghyApp {
         let mut change_max_active = None;
         let mut change_limits = None;
         let mut change_sharing = None;
+        let mut change_connections = None;
+        let listening_now = self.engine.as_ref().ok().map(|engine| engine.listen_port());
         // Open it by default when the engine couldn't start, because the fix is probably here.
         egui::CollapsingHeader::new("Settings")
             .default_open(self.engine.is_err())
@@ -500,6 +518,40 @@ impl BitDinghyApp {
                 if settled && chosen_sharing != saved_sharing {
                     change_sharing = Some(chosen_sharing);
                 }
+
+                ui.separator();
+                ui.label("Connections (used the next time you start BitDinghy):");
+                let saved_connections = (
+                    self.profile.settings().accept_incoming,
+                    self.profile.settings().listen_port,
+                    self.profile.settings().upnp,
+                );
+                ui.checkbox(
+                    &mut self.connections_choice.0,
+                    "Accept connections from other people (sharing works much better)",
+                );
+                let mut settled = true;
+                ui.add_enabled_ui(self.connections_choice.0, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Port:");
+                        let port = ui.add(egui::DragValue::new(&mut self.connections_choice.1));
+                        settled &= !port.dragged() && !port.has_focus();
+                        ui.weak("(0 = automatic: a different free port at each start)");
+                    });
+                    ui.checkbox(
+                        &mut self.connections_choice.2,
+                        "Ask my router to forward this port (UPnP), so people outside your home \
+                         network can connect",
+                    );
+                });
+                if settled && self.connections_choice != saved_connections {
+                    change_connections = Some(self.connections_choice);
+                }
+                ui.small(listening_text(listening_now.flatten()));
+                ui.small(
+                    "The first time BitDinghy accepts connections, Windows Firewall may ask \
+                     whether to allow it. At home, allowing it on private networks is enough.",
+                );
                 if let Some((message, is_error)) = &self.settings_message {
                     let color = if *is_error {
                         error_color(ui)
@@ -511,6 +563,23 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some((accept, port, upnp)) = change_connections {
+            self.settings_message = Some(match self.profile.set_connections(accept, port, upnp) {
+                Ok(()) => (
+                    "Saved. It is used the next time you start BitDinghy.".to_string(),
+                    false,
+                ),
+                Err(error) => {
+                    let settings = self.profile.settings();
+                    self.connections_choice = (
+                        settings.accept_incoming,
+                        settings.listen_port,
+                        settings.upnp,
+                    );
+                    (error.to_string(), true)
+                }
+            });
         }
         if let Some((ratio_percent, minutes)) = change_sharing {
             self.settings_message = Some(
@@ -1202,6 +1271,15 @@ mod tests {
             shared_seconds: 0,
             sharing_stopped: false,
         }
+    }
+
+    #[test]
+    fn the_listening_line_says_what_is_happening_now() {
+        assert_eq!(
+            listening_text(Some(51413)),
+            "Right now: accepting connections on port 51413."
+        );
+        assert!(listening_text(None).contains("not accepting"));
     }
 
     #[test]

@@ -137,8 +137,7 @@ project is built **one feature at a time**.
   the same folder will replace it. Fix with M3: remember which files each torrent created, or give
   every torrent its own folder.
 - "Open folder" button on finished downloads.
-- The first run triggers a Windows Firewall prompt. Explain it in the app when port and UPnP
-  settings arrive (M11).
+- Done in M11: Settings explain the Windows Firewall prompt.
 - librqbit reserves each file's full size on disk at the start. On FAT32, or when the disk is
   nearly full, that fails; give a plain-language message (M12).
 

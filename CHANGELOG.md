@@ -10,6 +10,16 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Connection settings**: accept connections from other people (on), a fixed port for them (or
+  automatic), and asking the router to forward that port (UPnP, off unless you turn it on). In
+  the window's Settings, which also show the port in use right now, or with `dinghy settings set
+  accept-incoming / listen-port / upnp`. They apply the next time BitDinghy starts. If the chosen
+  port is busy, BitDinghy uses a free one and says so.
+- Settings explain the Windows Firewall question that appears the first time BitDinghy accepts
+  connections.
+
+### Fixed
+- `dinghy get` accepted connections even when that was turned off in Settings.
 - **Sharing limits.** In Settings (or `dinghy settings set stop-sharing-at-ratio 1.5` /
   `stop-sharing-after 120`), a finished download can stop sharing once it has shared a number of
   times its size, or after so many minutes of sharing. Off unless you choose. A download that

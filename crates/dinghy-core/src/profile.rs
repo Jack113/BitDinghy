@@ -10,7 +10,8 @@ use crate::error::{Error, Result};
 use crate::saved_list;
 use crate::settings::{
     Loaded, MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SHARING_MINUTES, MAX_SHARING_RATIO_PERCENT,
-    MAX_SPEED_LIMIT_KIB, MIN_SPEED_LIMIT_KIB, Settings, SettingsStore, validate_download_dir,
+    MAX_SPEED_LIMIT_KIB, MIN_LISTEN_PORT, MIN_SPEED_LIMIT_KIB, Settings, SettingsStore,
+    validate_download_dir,
 };
 
 /// A speed limit must be 0 (no limit) or between the lowest and highest that work.
@@ -102,6 +103,9 @@ impl Profile {
         config.upload_limit_kib = self.settings.upload_limit_kib;
         config.stop_sharing_ratio_percent = self.settings.stop_sharing_ratio_percent;
         config.stop_sharing_after_minutes = self.settings.stop_sharing_after_minutes;
+        config.accept_incoming = self.settings.accept_incoming;
+        config.listen_port = self.settings.listen_port;
+        config.upnp = self.settings.upnp;
         config
     }
 
@@ -169,6 +173,21 @@ impl Profile {
         })
     }
 
+    /// Remembers how other people may connect: at all, on which port (0: automatic), and whether
+    /// to ask the router to forward it (UPnP). Used the next time BitDinghy starts.
+    pub fn set_connections(&mut self, accept_incoming: bool, port: u16, upnp: bool) -> Result<()> {
+        if port != 0 && port < MIN_LISTEN_PORT {
+            return Err(Error::Settings(format!(
+                "The port must be 0 (automatic) or between {MIN_LISTEN_PORT} and 65535."
+            )));
+        }
+        self.change(|settings| {
+            settings.accept_incoming = accept_incoming;
+            settings.listen_port = port;
+            settings.upnp = upnp;
+        })
+    }
+
     /// Changes the settings and saves them; the change is only kept if it was saved.
     fn change(&mut self, edit: impl FnOnce(&mut Settings)) -> Result<()> {
         let Some(store) = &self.store else {
@@ -224,6 +243,24 @@ mod tests {
             Some(chosen.as_path())
         );
         assert_eq!(second_run.engine_config().download_dir, chosen);
+    }
+
+    #[test]
+    fn connection_settings_are_checked_and_reach_the_engine() {
+        let work = tempfile::tempdir().unwrap();
+        let mut first_run = profile_in(work.path());
+        let config = first_run.engine_config();
+        assert!(config.accept_incoming && !config.upnp);
+        assert_eq!(config.listen_port, 0);
+        let error = first_run.set_connections(true, 80, false).unwrap_err();
+        assert!(
+            error.to_string().contains("between 1024 and 65535"),
+            "{error}"
+        );
+        first_run.set_connections(true, 51413, true).unwrap();
+        let config = profile_in(work.path()).engine_config();
+        assert_eq!(config.listen_port, 51413);
+        assert!(config.upnp);
     }
 
     #[test]

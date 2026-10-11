@@ -369,6 +369,21 @@ finishes, and the torrent is taken straight back out.
   downloads they stopped share again within a second.
 - These totals are the start of the history in M14.
 
+## Port and UPnP (M11)
+
+- Three settings, used when the engine starts (librqbit can't change its listener while
+  running): `accept_incoming` (on), `listen_port` (0 = automatic: librqbit picks a different free
+  port at each start) and `upnp` (off: BitDinghy doesn't change the router unless asked; when
+  on, librqbit asks the router to forward the port).
+- If the chosen port can't be used (usually another program has it), the engine starts again
+  with an automatic port and shows a notice naming both ports, instead of not starting at all.
+- The window's Settings show the port in use right now ("Right now: accepting connections on
+  port N") and explain the Windows Firewall question that comes the first time.
+- `EngineConfig::listen_ip` is every network normally; the tests listen on this computer's own
+  address only, so running them never brings up a firewall question.
+- `dinghy get` now follows the "accept connections" setting (`--no-listen` still turns it off
+  for one run).
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -382,4 +397,5 @@ finishes, and the torrent is taken straight back out.
 | M8 | The queue |
 | M9 | Speed limits |
 | M10 | Sharing limits |
+| M11 | Port and UPnP |
 | M14 | History and charts |

@@ -66,6 +66,28 @@ pub struct Settings {
     /// such limit (added in M10).
     #[serde(skip_serializing_if = "is_zero")]
     pub stop_sharing_after_minutes: u32,
+    /// Accept connections from other people (added in M11; on unless turned off). Downloading
+    /// works without it, but sharing works much better with it.
+    #[serde(skip_serializing_if = "is_true")]
+    pub accept_incoming: bool,
+    /// The port other people connect to. 0 means automatic: a different free port at each start.
+    #[serde(skip_serializing_if = "is_zero_port")]
+    pub listen_port: u16,
+    /// Ask the router to forward the port (UPnP), so people outside the home network can connect.
+    /// Off unless turned on: BitDinghy doesn't change the router unless asked.
+    #[serde(skip_serializing_if = "is_false")]
+    pub upnp: bool,
+}
+
+/// The lowest port that can be chosen (lower ones belong to well-known services).
+pub const MIN_LISTEN_PORT: u16 = 1024;
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_zero_port(value: &u16) -> bool {
+    *value == 0
 }
 
 /// The highest sharing ratio that can be set, in percent (a ratio of 1000).
@@ -110,6 +132,9 @@ impl Default for Settings {
             upload_limit_kib: 0,
             stop_sharing_ratio_percent: 0,
             stop_sharing_after_minutes: 0,
+            accept_incoming: true,
+            listen_port: 0,
+            upnp: false,
         }
     }
 }
@@ -449,6 +474,29 @@ mod tests {
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().settings.max_active_downloads, 0);
+    }
+
+    #[test]
+    fn connection_settings_are_remembered_with_safe_defaults() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        let loaded = store.load().settings;
+        assert!(loaded.accept_incoming);
+        assert_eq!(loaded.listen_port, 0);
+        assert!(!loaded.upnp, "the router is never changed unless asked");
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(work.path().join(FILE_NAME)).unwrap();
+        for word in ["accept_incoming", "listen_port", "upnp"] {
+            assert!(!text.contains(word), "the standard isn't written: {text}");
+        }
+        let settings = Settings {
+            accept_incoming: false,
+            listen_port: 51413,
+            upnp: true,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        assert_eq!(store.load().settings, settings);
     }
 
     #[test]

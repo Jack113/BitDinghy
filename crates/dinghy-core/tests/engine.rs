@@ -1872,3 +1872,69 @@ async fn turning_the_limit_off_lets_a_stopped_download_share_again() {
     assert!(sharing.save_folder.is_some());
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The port for incoming connections (M11). Only this computer's own address is used, so no
+// firewall question appears while the tests run.
+// ---------------------------------------------------------------------------------------------
+
+/// A port that is free right now on this computer's own address.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn listening_config(download_dir: &Path, port: u16) -> EngineConfig {
+    let mut config = offline_config(download_dir);
+    config.accept_incoming = true;
+    config.listen_ip = Ipv4Addr::LOCALHOST.into();
+    config.listen_port = port;
+    config
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_chosen_port_is_used() {
+    let work = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let engine = Engine::start(listening_config(&work.path().join("downloads"), port))
+        .await
+        .unwrap();
+    assert_eq!(engine.listen_port(), Some(port));
+    assert!(engine.notices().is_empty(), "{:?}", engine.notices());
+    // Someone can really connect to it.
+    assert!(std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_port_in_use_falls_back_to_a_free_one_and_says_so() {
+    let work = tempfile::tempdir().unwrap();
+    let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let engine = Engine::start(listening_config(&work.path().join("downloads"), port))
+        .await
+        .expect("BitDinghy still starts");
+    let now = engine.listen_port().expect("it listens on another port");
+    assert_ne!(now, port);
+    let notices = engine.notices().join(" ");
+    assert!(
+        notices.contains(&format!("couldn't use port {port}")),
+        "{notices}"
+    );
+    assert!(
+        notices.contains(&format!("uses port {now} this time")),
+        "{notices}"
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_incoming_connections_off_nothing_listens() {
+    let work = tempfile::tempdir().unwrap();
+    let engine = offline_engine(&work.path().join("downloads")).await;
+    assert_eq!(engine.listen_port(), None);
+    engine.shutdown().await;
+}

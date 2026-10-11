@@ -3,6 +3,64 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M11: port and UPnP
+
+Data-free. The window accepts connections as before; this only changes how.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, terminal in
+   `C:\cargo-target\debug`.
+2. `.\dinghy.exe settings` shows `accept-incoming:  on  (...)`, `listen-port:  0  (automatic: a
+   different free port at each start)` and `upnp:  off  (the router is left alone)`.
+
+**Test 1: the connection settings in the window**
+- Do: open the window and **Settings**.
+- You should see: "Connections (used the next time you start BitDinghy):", a ticked "Accept
+  connections from other people (sharing works much better)", "Port: 0 (0 = automatic: a
+  different free port at each start)", an unticked "Ask my router to forward this port (UPnP),
+  ...", and small lines "Right now: accepting connections on port N." (some number) and "The
+  first time BitDinghy accepts connections, Windows Firewall may ask ...".
+
+**Test 2: a fixed port**
+- Do: set Port to 51413 (click, type, Enter). Close the window and open it again.
+- You should see: first "Saved. It is used the next time you start BitDinghy."; after reopening,
+  "Right now: accepting connections on port 51413." (Close and reopen again: still 51413.)
+
+**Test 3: a port another program uses**
+- Do: close the window. In PowerShell (a second one), occupy the port:
+  `$l=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::IPv6Any,51413); $l.Start()`.
+  Open the window.
+- You should see: an orange line "BitDinghy couldn't use port 51413 for incoming connections
+  (...), so it uses port N this time. Another program may be using that port; choose another in
+  Settings." and "Right now: accepting connections on port N." Close the window, then in the
+  second PowerShell `$l.Stop()`.
+
+**Test 4: not accepting connections**
+- Do: open the window, untick "Accept connections from other people", close and reopen.
+- You should see: the Port box and the UPnP box are greyed out, and "Right now: not accepting
+  connections from other people."
+
+**Test 5: the command line**
+- Do: `.\dinghy.exe settings set accept-incoming on`, `.\dinghy.exe settings set upnp on`,
+  `.\dinghy.exe settings set listen-port 80`.
+- You should see: with the window open, "Saved. BitDinghy's open window uses it the next time it
+  starts (close it and open it again)."; `upnp:  on  (BitDinghy asks the router to forward the
+  port)`; and for port 80: "The port must be 0 (automatic) or between 1024 and 65535."
+- Then (optional, only if your router shows UPnP forwardings): reopen the window and look in the
+  router's page for a forwarding of port 51413 to this PC.
+
+**Tidy up:** `.\dinghy.exe settings set upnp off`, `.\dinghy.exe settings set listen-port 0`.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The connection settings in the window | |
+| 2. A fixed port | |
+| 3. A port another program uses | |
+| 4. Not accepting connections | |
+| 5. The command line | |
+
 ## M10: sharing limits
 
 Data-free: the M6 test torrent, finished at once from its own made-up files (nobody else is

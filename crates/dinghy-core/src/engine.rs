@@ -37,7 +37,7 @@
 //! (keeping its files) and adds it again from its saved file list, then says what it found.
 
 use std::collections::{BTreeSet, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -98,6 +98,13 @@ pub struct EngineConfig {
     /// this many minutes. 0: no such limit (M10).
     pub stop_sharing_ratio_percent: u32,
     pub stop_sharing_after_minutes: u32,
+    /// The port other people connect to (0: automatic, a different one at each start), and
+    /// whether to ask the router to forward it (UPnP) (M11). Only with `accept_incoming`.
+    pub listen_port: u16,
+    pub upnp: bool,
+    /// The address to listen on. Every network (the standard); tests use this computer only, so
+    /// no firewall question pops up while they run.
+    pub listen_ip: IpAddr,
 }
 
 impl EngineConfig {
@@ -116,6 +123,9 @@ impl EngineConfig {
             upload_limit_kib: 0,
             stop_sharing_ratio_percent: 0,
             stop_sharing_after_minutes: 0,
+            listen_port: 0,
+            upnp: false,
+            listen_ip: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         }
     }
 }
@@ -722,7 +732,12 @@ impl Engine {
             },
         };
 
-        let options = SessionOptions {
+        let listener = |port: u16| ListenerOptions {
+            listen_addr: SocketAddr::new(config.listen_ip, port),
+            enable_upnp_port_forwarding: config.upnp,
+            ..Default::default()
+        };
+        let options = |listen: Option<ListenerOptions>| SessionOptions {
             // By default the DHT would remember its contacts in a file in the user's profile.
             // BitDinghy must not write anywhere we didn't choose, so we either point it at a file
             // inside our own data folder, or (when none is given) turn remembering off.
@@ -739,7 +754,7 @@ impl Engine {
             // librqbit's own saved list stays off: BitDinghy keeps its own (see `saved_list.rs`).
             persistence: None,
             fastresume: false,
-            listen: config.accept_incoming.then(ListenerOptions::default),
+            listen,
             disable_local_service_discovery: !config.local_discovery,
             client_name_and_version: Some(format!("{} {}", crate::APP_NAME, crate::VERSION)),
             ratelimits: LimitsConfig {
@@ -749,9 +764,27 @@ impl Engine {
             ..Default::default()
         };
 
-        let session = Session::new_with_opts(download_dir.clone(), options)
-            .await
-            .map_err(|e| Error::EngineStart(format!("{e:#}")))?;
+        let wanted = config.accept_incoming.then(|| listener(config.listen_port));
+        let session = match Session::new_with_opts(download_dir.clone(), options(wanted)).await {
+            Ok(session) => session,
+            // The chosen port is probably taken by another program: carry on with a free one
+            // rather than not starting at all, and say so.
+            Err(error) if config.accept_incoming && config.listen_port != 0 => {
+                let session =
+                    Session::new_with_opts(download_dir.clone(), options(Some(listener(0))))
+                        .await
+                        .map_err(|e| Error::EngineStart(format!("{e:#}")))?;
+                let now = session.listen_addr().map(|a| a.port()).unwrap_or_default();
+                notices.push(format!(
+                    "BitDinghy couldn't use port {} for incoming connections ({error:#}), so it \
+                     uses port {now} this time. Another program may be using that port; choose \
+                     another in Settings.",
+                    config.listen_port
+                ));
+                session
+            }
+            Err(error) => return Err(Error::EngineStart(format!("{error:#}"))),
+        };
 
         let shared = Arc::new(Shared {
             session,
@@ -827,6 +860,14 @@ impl Engine {
             .sharing_ratio_percent
             .store(ratio_percent, Ordering::SeqCst);
         self.shared.sharing_minutes.store(minutes, Ordering::SeqCst);
+    }
+
+    /// The port other people can connect to right now, if BitDinghy accepts connections.
+    pub fn listen_port(&self) -> Option<u16> {
+        self.shared
+            .session
+            .listen_addr()
+            .map(|address| address.port())
     }
 
     /// Changes how many downloads run at once (0: no limit). Applies straight away.
