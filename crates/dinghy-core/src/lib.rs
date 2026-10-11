@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub mod crash;
 pub mod data_dir;
 pub mod days;
+pub mod default_app;
 pub mod display;
 pub mod drive;
 pub mod engine;

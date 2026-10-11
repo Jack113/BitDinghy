@@ -47,6 +47,8 @@ enum Command {
     History(HistoryArgs),
     /// Show the settings BitDinghy recommends, learned from your downloads (--apply uses them)
     Recommend(RecommendArgs),
+    /// Register BitDinghy for magnet links and .torrent files (on), undo it (off), or show it
+    DefaultApp(DefaultAppArgs),
     /// Show where BitDinghy keeps its files and what it remembers, or change a setting
     Settings(SettingsArgs),
 }
@@ -55,6 +57,20 @@ enum Command {
 struct NumberArg {
     /// The download's number, as shown by `dinghy list`
     number: usize,
+}
+
+#[derive(Args)]
+struct DefaultAppArgs {
+    /// on: register (Windows' Default apps opens, choose BitDinghy there); off: undo; status
+    #[arg(default_value = "status")]
+    action: DefaultAppAction,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DefaultAppAction {
+    On,
+    Off,
+    Status,
 }
 
 #[derive(Args)]
@@ -215,6 +231,7 @@ async fn main() -> ExitCode {
         Some(Command::Move(args)) => move_download(args).await,
         Some(Command::History(args)) => history(args),
         Some(Command::Recommend(args)) => recommend(args).await,
+        Some(Command::DefaultApp(args)) => default_app(args),
         Some(Command::Settings(args)) => settings(args).await,
         None => {
             println!("{}", dinghy_core::about());
@@ -1069,6 +1086,68 @@ async fn move_download(args: MoveArgs) -> ExitCode {
         order.len()
     );
     ExitCode::SUCCESS
+}
+
+/// `dinghy default-app [on|off|status]`: registers the BitDinghy.exe next to this dinghy.exe for
+/// magnet links and .torrent files (Windows then lets the person choose it), undoes it, or says.
+fn default_app(args: DefaultAppArgs) -> ExitCode {
+    use dinghy_core::default_app::{self, Place, Status};
+    let place = Place::real();
+    let window = std::env::current_exe()
+        .ok()
+        .and_then(|me| Some(me.parent()?.join("BitDinghy.exe")));
+    match args.action {
+        DefaultAppAction::Status => {
+            match default_app::status(&place) {
+                Status::NotRegistered => {
+                    println!("BitDinghy isn't set up to open magnet links and .torrent files.")
+                }
+                Status::Registered { exe } => println!(
+                    "BitDinghy is registered to open magnet links and .torrent files: {}\n\
+                     To make it the default, choose it in Windows' Default apps.",
+                    exe.display()
+                ),
+            }
+            ExitCode::SUCCESS
+        }
+        DefaultAppAction::On => {
+            let Some(exe) = window.filter(|exe| exe.is_file()) else {
+                eprintln!(
+                    "BitDinghy.exe isn't next to dinghy.exe, and it is the program Windows should \
+                     start. Put them in the same folder."
+                );
+                return ExitCode::FAILURE;
+            };
+            match default_app::register(&place, &exe) {
+                Ok(()) => {
+                    default_app::open_default_apps();
+                    println!(
+                        "Registered {}. Windows' Default apps is open: choose BitDinghy for \
+                         .torrent and for MAGNET there.",
+                        exe.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        DefaultAppAction::Off => match default_app::unregister(&place) {
+            Ok(()) => {
+                println!(
+                    "BitDinghy is no longer registered. Windows asks which program to use the \
+                     next time you open a magnet link or a .torrent file."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
 /// `dinghy recommend [--apply]`: the settings BitDinghy recommends from what it learned (kept in

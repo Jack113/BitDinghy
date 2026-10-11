@@ -48,7 +48,7 @@ project is built **one feature at a time**.
   max-active-downloads; the download folder still applies at the next start).
 - The window's Settings section shows its own copy of the settings: a change made with `dinghy`
   while the window is open applies, but the window's boxes show the old value until it restarts.
-- Opening `.torrent` files / magnet links from Explorer or a browser is M16 (default app).
+- Done in M16: opening `.torrent` files and magnet links from Explorer or a browser.
 - Done in M12: `dinghy get` following a paused download says "paused at N%".
 
 ## Noticed while building M4

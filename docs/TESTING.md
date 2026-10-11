@@ -3,6 +3,71 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## M16: opening magnet links and .torrent files from other programs
+
+Data-free. This changes your Windows settings for `.torrent` and magnet links (only for your
+Windows user); test 6 undoes it. It uses the queue test torrents from M8.
+
+**Step 0: get ready**
+1. Close the window, stop any `dinghy`, `cargo build --workspace`, PowerShell in
+   `C:\cargo-target\debug`. Make the test torrents if needed.
+2. `.\dinghy.exe default-app` says "BitDinghy isn't set up to open magnet links and .torrent
+   files."
+
+**Test 1: the setting**
+- Do: open the window and **Settings**.
+- You should see: "Magnet links and .torrent files:", "BitDinghy isn't set up to open them yet.",
+  and a button **Make BitDinghy the default...** (hovering it explains that you choose it in
+  Windows' Default apps).
+
+**Test 2: registering, and choosing it in Windows**
+- Do: press **Make BitDinghy the default...**.
+- You should see: "Registered. Windows' Default apps is open: choose BitDinghy for .torrent and for
+  MAGNET there." and Windows Settings opens on Default apps. In Windows 10: **Choose default apps
+  by file type**, find `.torrent`, choose **BitDinghy**; then **Choose default apps by protocol**,
+  find **MAGNET**, choose **BitDinghy**. (Windows 11: BitDinghy's page lists both.) Back in
+  BitDinghy, Settings now says "BitDinghy is registered to open them. To make it the default,
+  choose it in Windows' Default apps." with **Open Default apps** and **Undo**.
+
+**Test 3: a .torrent file opened from Explorer, window closed**
+- Do: close the window. In Explorer, go to `%TEMP%\bitdinghy-m6-test` and double-click
+  `queue-1.torrent`.
+- You should see: BitDinghy opens with "Another program asked BitDinghy to open this. Download
+  it?", "The .torrent file C:\Users\...\queue-1.torrent", and **Download** / **Not now**.
+  Press **Not now**: the question goes and nothing is added.
+
+**Test 4: a .torrent file opened while the window is open**
+- Do: with the window open (put another window in front of it), double-click `queue-2.torrent`.
+- You should see: BitDinghy comes to the front with the same question for queue-2.torrent. Press
+  **Download**: Queue test 2 is added (and waits at 0%: nobody shares it).
+
+**Test 5: a magnet link from the browser**
+- Do: in your browser's address bar, paste
+  `magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c&dn=Browser%20test` and press
+  Enter. The browser asks whether to open BitDinghy: allow it.
+- You should see: BitDinghy asks: "A magnet link: "Browser test"". Press **Not now**.
+
+**Test 6: undo**
+- Do: `.\dinghy.exe default-app` (it names `C:\cargo-target\debug\BitDinghy.exe`), then in the
+  window's Settings press **Undo**, then `.\dinghy.exe default-app` again.
+- You should see: "BitDinghy is no longer registered. Windows asks which program to use the next
+  time you open a magnet link or a .torrent file." and "BitDinghy isn't set up to open magnet
+  links and .torrent files." Double-clicking `queue-1.torrent` now makes Windows ask which program
+  to use (close that question).
+
+**Tidy up:** remove Queue test 2 (**Delete the files too**).
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The setting | |
+| 2. Registering, and choosing it in Windows | |
+| 3. A .torrent file from Explorer, window closed | |
+| 4. A .torrent file while the window is open | |
+| 5. A magnet link from the browser | |
+| 6. Undo | |
+
 ## M15: recommended settings
 
 Tests 1 and 2 are data-free. **Test 3 is optional and uses data**: as much as your line downloads

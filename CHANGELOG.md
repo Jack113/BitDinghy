@@ -10,6 +10,12 @@ format is called out here.
 ## [Unreleased]
 
 ### Added
+- **Open magnet links and .torrent files with BitDinghy.** Settings has **Make BitDinghy the
+  default...**: it registers BitDinghy (for your Windows user only) and opens Windows' Default
+  apps, where you choose it (Windows doesn't let programs choose themselves). **Undo** removes the
+  registration. Then a magnet link in the browser or a double-clicked `.torrent` opens BitDinghy,
+  which asks before adding it; if the window is already open, it comes to the front and asks
+  there. On the command line: `dinghy default-app on|off|status`.
 - **Recommended settings.** BitDinghy learns the fastest download and upload speeds of your line
   from your own downloads (never with a speed test) and suggests speed limits and how many
   downloads to run at once. Settings shows them with a **Use these** button; on the command

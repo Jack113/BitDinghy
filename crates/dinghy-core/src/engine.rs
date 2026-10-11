@@ -829,6 +829,9 @@ pub struct Engine {
     allow_http_links: AtomicBool,
     download_dir: PathBuf,
     next_id: AtomicU64,
+    /// Links another program asked to open (a browser, Explorer: M16), waiting for the person to
+    /// say yes in the window. Nothing is added until then.
+    offers: Mutex<Vec<String>>,
 }
 
 impl Engine {
@@ -976,6 +979,7 @@ impl Engine {
             shared,
             download_dir,
             next_id: AtomicU64::new(1),
+            offers: Mutex::new(Vec::new()),
         };
         if config.restore_saved {
             engine.restore_saved();
@@ -1198,6 +1202,20 @@ impl Engine {
     }
 
     /// Changes the "allow plain http links" setting for this run (the window's Settings).
+    /// A link another program asked to open: kept until the window asks the person (see
+    /// [`Engine::take_offers`]). At most 20 wait, so a flood of links can't pile up.
+    pub fn offer(&self, link: String) {
+        let mut offers = lock(&self.offers);
+        if offers.len() < 20 && !offers.contains(&link) {
+            offers.push(link);
+        }
+    }
+
+    /// The links offered since the last call (for the window to ask about).
+    pub fn take_offers(&self) -> Vec<String> {
+        std::mem::take(&mut *lock(&self.offers))
+    }
+
     pub fn set_allow_http_links(&self, allow: bool) {
         self.allow_http_links.store(allow, Ordering::SeqCst);
     }

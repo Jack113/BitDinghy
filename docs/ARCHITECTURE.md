@@ -452,6 +452,26 @@ finishes, and the torrent is taken straight back out.
   average or fast line. Nothing changes until the person presses **Use these** in Settings or
   runs `dinghy recommend --apply` (which also tells an open window).
 
+## Opening magnet links and .torrent files from other programs (M16)
+
+- **`default_app.rs`** registers BitDinghy, for the current Windows user only and only when the
+  person asks: ProgIds `BitDinghy.Torrent` and `BitDinghy.Magnet` (icon and `"BitDinghy.exe"
+  "%1"`), BitDinghy in `.torrent`'s "Open with" list, and `Software\BitDinghy\Capabilities` plus
+  `RegisteredApplications`, which make it appear in Windows' Default apps. It never writes the
+  `.torrent` default or `Software\Classes\magnet` (the silent take-over Windows forbids): the
+  person chooses BitDinghy in Default apps, which opens right after registering. **Undo**
+  removes exactly those keys and values. `status` says which BitDinghy.exe is registered (a
+  portable copy can move). Tests use a key of their own and delete it.
+- When Windows starts BitDinghy.exe with a link or a file, and a window is already open on the
+  same data folder, the new BitDinghy.exe gives it to that window over the local channel
+  (`Command::Offer`) and quits. Otherwise the new window starts with it.
+- **Nothing is added without a yes.** Offered links wait (`Engine::offer`, at most 20) until the
+  window asks "Another program asked BitDinghy to open this. Download it?" with what it is and
+  **Download** / **Not now**; a new offer brings the window to the front. A web page can start a
+  magnet link, so this check matters. Offered links are checked like typed ones first.
+- `dinghy default-app on|off|status` does the same from the command line (it registers the
+  BitDinghy.exe next to dinghy.exe).
+
 ## Where each piece appears
 
 | Milestone | What lands |
@@ -470,3 +490,4 @@ finishes, and the torrent is taken straight back out.
 | M13 | Crash reports |
 | M14 | History and charts |
 | M15 | Recommended settings |
+| M16 | Opening links and files from other programs |

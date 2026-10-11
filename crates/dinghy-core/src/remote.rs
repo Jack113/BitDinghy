@@ -103,6 +103,11 @@ pub enum Command {
     SetAllowHttpLinks {
         allow: bool,
     },
+    /// A link another program asked BitDinghy to open (a browser or Explorer started a second
+    /// BitDinghy.exe with it): the window asks the person before adding it.
+    Offer {
+        link: String,
+    },
     /// Change the sharing limits (ratio in percent, minutes; 0: none), for this run.
     SetSharingLimits {
         ratio_percent: u32,
@@ -406,6 +411,14 @@ async fn answer_or_problem(
         }
         Command::SetMaxActiveDownloads { limit } => {
             engine.set_max_active_downloads(limit);
+            Reply::Changed {
+                name: String::new(),
+            }
+        }
+        Command::Offer { link } => {
+            // Checked like anything typed, so a bad link is refused now, not after asking.
+            crate::input::classify(&link).map_err(said)?;
+            engine.offer(link);
             Reply::Changed {
                 name: String::new(),
             }
@@ -870,6 +883,44 @@ mod tests {
             answers[8]
         );
         assert!(engine.snapshot().is_empty());
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_offered_link_waits_for_the_person_and_a_bad_one_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let engine = offline_engine(work.path()).await;
+        let request = |link: &str| {
+            serde_json::to_string(&Request {
+                version: PROTOCOL_VERSION,
+                command: Command::Offer {
+                    link: link.to_string(),
+                },
+            })
+            .unwrap()
+        };
+        let good = "magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c";
+        let lines = [request(good), request("magnet:?nonsense")];
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let answers: Vec<Reply> = exchange(&engine, &lines)
+            .await
+            .iter()
+            .map(|answer| serde_json::from_str(answer).unwrap())
+            .collect();
+        assert!(
+            matches!(answers[0], Reply::Changed { .. }),
+            "{:?}",
+            answers[0]
+        );
+        assert!(
+            matches!(answers[1], Reply::Problem { .. }),
+            "{:?}",
+            answers[1]
+        );
+        // Nothing was added: the window asks first.
+        assert!(engine.snapshot().is_empty());
+        assert_eq!(engine.take_offers(), vec![good.to_string()]);
+        assert!(engine.take_offers().is_empty(), "taken once");
         engine.shutdown().await;
     }
 

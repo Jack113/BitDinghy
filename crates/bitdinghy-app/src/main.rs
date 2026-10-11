@@ -170,6 +170,19 @@ fn day_totals_text(totals: &[DayTotal], today: i64) -> String {
     )
 }
 
+/// What an offered link is, in a few words.
+fn offer_text(link: &str) -> String {
+    match input::classify(link) {
+        Ok(Input::Magnet(parsed)) => match parsed.display_name {
+            Some(name) => format!("A magnet link: \"{name}\""),
+            None => format!("A magnet link (fingerprint {})", &parsed.info_hash[..8]),
+        },
+        Ok(Input::TorrentFile(path)) => format!("The .torrent file {}", path.display()),
+        Ok(Input::WebLink(link)) => format!("A .torrent file from {}", url_host(&link)),
+        Err(error) => error.to_string(),
+    }
+}
+
 /// What the window says after a crash.
 fn crash_notice_text(folder: &Path) -> String {
     format!(
@@ -194,6 +207,25 @@ fn listening_text(port: Option<u16>) -> String {
     match port {
         Some(port) => format!("Right now: accepting connections on port {port}."),
         None => "Right now: not accepting connections from other people.".to_string(),
+    }
+}
+
+/// Whether (and which) BitDinghy opens magnet links and .torrent files.
+fn default_app_text(status: &dinghy_core::default_app::Status, this_exe: Option<&Path>) -> String {
+    match status {
+        dinghy_core::default_app::Status::NotRegistered => {
+            "BitDinghy isn't set up to open them yet.".to_string()
+        }
+        dinghy_core::default_app::Status::Registered { exe } if Some(exe.as_path()) == this_exe => {
+            "BitDinghy is registered to open them. To make it the default, choose it in Windows' \
+             Default apps."
+                .to_string()
+        }
+        dinghy_core::default_app::Status::Registered { exe } => format!(
+            "Another copy of BitDinghy is registered to open them: {}. Make this copy the \
+             default instead, or undo it.",
+            exe.display()
+        ),
     }
 }
 
@@ -297,6 +329,8 @@ struct BitDinghyApp {
     showing_files: HashSet<DownloadId>,
     /// Crash reports saved since the person was last told (M13).
     crash_reports: Vec<std::path::PathBuf>,
+    /// Links other programs asked BitDinghy to open, waiting for the person's yes (M16).
+    offers: Vec<String>,
     /// The "downloads at the same time" number being edited in the settings.
     max_active_choice: u32,
     /// The speed limits being edited in the settings (KiB/s, 0: no limit): download, upload.
@@ -319,7 +353,7 @@ struct Fetching {
 }
 
 impl BitDinghyApp {
-    fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+    fn new(creation_context: &eframe::CreationContext<'_>, opened_with: Option<String>) -> Self {
         brand::apply(&creation_context.egui_ctx);
         let logos = brand::Logos::load(&creation_context.egui_ctx);
 
@@ -378,6 +412,7 @@ impl BitDinghyApp {
             confirming_remove: None,
             showing_files: HashSet::new(),
             crash_reports,
+            offers: opened_with.into_iter().collect(),
             max_active_choice,
             limits_choice,
             sharing_choice,
@@ -534,6 +569,40 @@ impl BitDinghyApp {
         };
     }
 
+    /// The first link another program asked to open, with Download and Not now.
+    fn draw_offer(&mut self, ui: &mut egui::Ui, engine: &Arc<Engine>) {
+        let Some(link) = self.offers.first().cloned() else {
+            return;
+        };
+        let mut answer = None;
+        ui.group(|ui| {
+            ui.colored_label(
+                info_color(ui),
+                "Another program asked BitDinghy to open this. Download it?",
+            );
+            ui.label(offer_text(&link));
+            ui.horizontal(|ui| {
+                if ui.button("Download").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Not now").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                self.offers.remove(0);
+                self.link = link;
+                self.submit_link(engine);
+            }
+            Some(false) => {
+                self.offers.remove(0);
+            }
+            None => {}
+        }
+    }
+
     /// After a crash: says a report was saved, with a button to open its folder.
     fn draw_crash_notice(&mut self, ui: &mut egui::Ui) {
         let Some(newest) = self.crash_reports.last() else {
@@ -586,6 +655,7 @@ impl BitDinghyApp {
         let mut change_sharing = None;
         let mut change_connections = None;
         let mut use_recommended = None;
+        let mut default_app = None;
         let fastest = self
             .engine
             .as_ref()
@@ -713,6 +783,42 @@ impl BitDinghyApp {
                 }
 
                 ui.separator();
+                ui.label("Magnet links and .torrent files:");
+                let this_exe = std::env::current_exe().ok();
+                let place = dinghy_core::default_app::Place::real();
+                let status = dinghy_core::default_app::status(&place);
+                ui.label(default_app_text(&status, this_exe.as_deref()));
+                ui.horizontal(|ui| {
+                    let registered_here = matches!(
+                        &status,
+                        dinghy_core::default_app::Status::Registered { exe }
+                            if Some(exe.as_path()) == this_exe.as_deref()
+                    );
+                    if !registered_here
+                        && ui
+                            .button("Make BitDinghy the default...")
+                            .on_hover_text(
+                                "Registers BitDinghy (for your Windows user only) and opens \
+                                 Windows' Default apps, where you choose it.",
+                            )
+                            .clicked()
+                    {
+                        default_app = Some(true);
+                    }
+                    if registered_here && ui.button("Open Default apps").clicked() {
+                        dinghy_core::default_app::open_default_apps();
+                    }
+                    if status != dinghy_core::default_app::Status::NotRegistered
+                        && ui
+                            .button("Undo")
+                            .on_hover_text("Removes everything BitDinghy registered.")
+                            .clicked()
+                    {
+                        default_app = Some(false);
+                    }
+                });
+
+                ui.separator();
                 ui.label("Connections (used the next time you start BitDinghy):");
                 let saved_connections = (
                     self.profile.settings().accept_incoming,
@@ -756,6 +862,28 @@ impl BitDinghyApp {
             });
         if save || use_standard {
             self.save_download_folder(use_standard);
+        }
+        if let Some(make_default) = default_app {
+            let place = dinghy_core::default_app::Place::real();
+            let result = if make_default {
+                std::env::current_exe()
+                    .map_err(|e| dinghy_core::Error::Settings(e.to_string()))
+                    .and_then(|exe| dinghy_core::default_app::register(&place, &exe))
+                    .map(|()| {
+                        dinghy_core::default_app::open_default_apps();
+                        "Registered. Windows' Default apps is open: choose BitDinghy for .torrent \
+                         and for MAGNET there."
+                    })
+            } else {
+                dinghy_core::default_app::unregister(&place).map(|()| {
+                    "BitDinghy is no longer registered. Windows asks which program to use the \
+                     next time you open a magnet link or a .torrent file."
+                })
+            };
+            self.settings_message = Some(match result {
+                Ok(message) => (message.to_string(), false),
+                Err(error) => (error.to_string(), true),
+            });
         }
         if let Some(recommended) = use_recommended {
             let saved = self
@@ -915,6 +1043,15 @@ impl eframe::App for BitDinghyApp {
         // Redraw a couple of times a second so progress keeps moving.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
 
+        // Links from other programs (a browser, Explorer): ask first. A new one brings the
+        // window to the front.
+        let arrived = engine.take_offers();
+        if !arrived.is_empty() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.offers.extend(arrived);
+        }
+        self.draw_offer(ui, &engine);
+
         ui.label(format!("Saving to: {}", engine.download_dir().display()));
         let downloads_now = engine.snapshot();
         ui.label(totals_text(&downloads_now, engine.speed_limits()));
@@ -1018,6 +1155,45 @@ impl eframe::App for BitDinghyApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Ok(engine) = &self.engine {
             shut_down(&self.runtime, engine);
+        }
+    }
+}
+
+/// Gives a link to the BitDinghy window that is already open, if there is one. Returns whether
+/// it was handled (given, or refused with a message shown).
+fn hand_to_open_window(data_dir: &Path, link: &str) -> bool {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return false;
+    };
+    let address = remote::Address::for_data_dir(data_dir);
+    let answer = runtime.block_on(async {
+        let mut window = remote::Client::connect(&address).await.ok()??;
+        Some(
+            window
+                .ask(remote::Command::Offer {
+                    link: link.to_string(),
+                })
+                .await,
+        )
+    });
+    match answer {
+        None => false,
+        Some(Ok(remote::Reply::Changed { .. })) => true,
+        Some(other) => {
+            let message = match other {
+                Ok(remote::Reply::Problem { message }) => message,
+                Err(error) => error.to_string(),
+                Ok(_) => "BitDinghy's window gave an unexpected answer.".to_string(),
+            };
+            rfd::MessageDialog::new()
+                .set_title(dinghy_core::APP_NAME)
+                .set_description(message)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+            true
         }
     }
 }
@@ -1458,7 +1634,17 @@ fn main() -> eframe::Result {
     let data_dir = dinghy_core::DataDir::locate()
         .ok()
         .map(|dir| dir.path().to_path_buf());
-    dinghy_core::crash::install("BitDinghy", data_dir);
+    dinghy_core::crash::install("BitDinghy", data_dir.clone());
+
+    // Started by Windows with a magnet link or a .torrent file (M16): if a BitDinghy window is
+    // already open, hand the link to it (it asks the person) and stop here.
+    let opened_with = std::env::args().nth(1).filter(|arg| !arg.trim().is_empty());
+    if let (Some(link), Some(data_dir)) = (&opened_with, &data_dir)
+        && hand_to_open_window(data_dir, link)
+    {
+        return Ok(());
+    }
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([820.0, 600.0])
         .with_min_inner_size([480.0, 340.0]);
@@ -1473,7 +1659,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         dinghy_core::APP_NAME,
         options,
-        Box::new(|creation_context| Ok(Box::new(BitDinghyApp::new(creation_context)))),
+        Box::new(move |creation_context| {
+            Ok(Box::new(BitDinghyApp::new(creation_context, opened_with)))
+        }),
     )
 }
 
@@ -1542,6 +1730,46 @@ mod tests {
         let text = crash_notice_text(Path::new(r"C:\data\crash-reports"));
         assert!(text.contains(r"saved in C:\data\crash-reports"), "{text}");
         assert!(text.contains("stays on this computer"), "{text}");
+    }
+
+    #[test]
+    fn an_offered_link_is_described_before_asking() {
+        assert_eq!(
+            offer_text(
+                "magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c&dn=Some%20Linux"
+            ),
+            "A magnet link: \"Some Linux\""
+        );
+        assert_eq!(
+            offer_text("magnet:?xt=urn:btih:5a8b2f0c9e1d4b7a6c3e8f0a1b2c3d4e5f6a7b8c"),
+            "A magnet link (fingerprint 5a8b2f0c)"
+        );
+        assert_eq!(
+            offer_text("https://example.org/x.torrent"),
+            "A .torrent file from example.org"
+        );
+        assert!(
+            offer_text("magnet:?broken").contains("magnet"),
+            "{}",
+            offer_text("magnet:?broken")
+        );
+    }
+
+    #[test]
+    fn the_default_app_line_says_which_copy_is_registered() {
+        use dinghy_core::default_app::Status;
+        let here = Path::new(r"C:\Apps\BitDinghy.exe");
+        assert!(default_app_text(&Status::NotRegistered, Some(here)).contains("isn't set up"));
+        let mine = Status::Registered {
+            exe: here.to_path_buf(),
+        };
+        assert!(default_app_text(&mine, Some(here)).contains("choose it in Windows' Default apps"));
+        let other = Status::Registered {
+            exe: r"D:\Old\BitDinghy.exe".into(),
+        };
+        assert!(default_app_text(&other, Some(here)).contains(
+            r"Another copy of BitDinghy is registered to open them: D:\Old\BitDinghy.exe"
+        ));
     }
 
     #[test]
