@@ -1598,11 +1598,16 @@ fn draw_download(
     if let Some(warning) = &download.warning {
         ui.colored_label(warning_color(ui), warning);
     }
-    // What the last "Check files" found.
+    // What the last "Check files" found: orange when something is missing or damaged.
     if let Some(note) = &download.note
         && download.status != DownloadStatus::Checking
     {
-        ui.colored_label(info_color(ui), note);
+        let color = if download.note_is_warning {
+            warning_color(ui)
+        } else {
+            info_color(ui)
+        };
+        ui.colored_label(color, note);
     }
     clicked
 }
@@ -1690,6 +1695,7 @@ mod tests {
             files_total: 0,
             files_chosen: 0,
             note: None,
+            note_is_warning: false,
             can_use_existing_files: false,
             shared_seconds: 0,
             sharing_stopped: false,

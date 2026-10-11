@@ -33,6 +33,11 @@ pub fn install(program: &'static str, data_dir: Option<PathBuf>) {
     let folder = report_folder(data_dir.as_deref());
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Whoever was reading the output stopped (for example `dinghy list | more`, quit early):
+        // nothing went wrong in BitDinghy, so it just ends, without a report.
+        if info.payload_as_str().is_some_and(output_was_closed) {
+            std::process::exit(1);
+        }
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current();
         let text = report_text(
@@ -52,6 +57,12 @@ pub fn install(program: &'static str, data_dir: Option<PathBuf>) {
         }
         previous(info);
     }));
+}
+
+/// Rust's own words when printing fails because the output was closed by its reader.
+fn output_was_closed(problem: &str) -> bool {
+    problem.starts_with("failed printing to stdout")
+        || problem.starts_with("failed printing to stderr")
 }
 
 /// Crashes on purpose if [`TEST_VARIABLE`] is set, to try out the crash report.
@@ -229,6 +240,17 @@ fn windows_registry_text(key: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_closed_by_its_reader_is_not_a_crash() {
+        assert!(output_was_closed(
+            "failed printing to stdout: The pipe is being closed. (os error 232)"
+        ));
+        assert!(output_was_closed(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
+        assert!(!output_was_closed("index out of bounds"));
+    }
 
     #[test]
     fn a_report_says_what_and_where_and_that_it_stays_here() {

@@ -1358,11 +1358,13 @@ async fn checking_finds_damage_and_it_is_downloaded_again() {
         checked.note.as_deref(),
         Some("Checked: every chosen file is complete and correct.")
     );
+    assert!(!checked.note_is_warning);
 
     // Damage a file: the check finds it, and the download repairs it from the seeder.
     damage(&folder.join("a.bin"));
     engine.check(id).await.unwrap();
     let checked = wait_for_note(&engine).await;
+    assert!(checked.note_is_warning);
     let note = checked.note.unwrap();
     assert!(note.contains("were missing or damaged"), "{note}");
     wait_for_status(&engine, &[DownloadStatus::Finished]).await;

@@ -598,7 +598,7 @@ nothing is ever downloaded; the files already there do all the work.
 - Do: in PowerShell, damage the start of Episode 2 (this writes 100 bytes into it):
   `$f=[IO.File]::Open("$HOME\Downloads\BitDinghy\BitDinghy M6 test\Episode 2.bin",'Open','Write','ReadWrite'); $f.Write([byte[]](1..100),0,100); $f.Close()`
   Then press **Check files**.
-- You should see: "Checked: 256.0 KiB of the chosen files were missing or damaged. BitDinghy
+- You should see, in orange: "Checked: 256.0 KiB of the chosen files were missing or damaged. BitDinghy
   downloads them again." The progress bar shows 96.0%, with 0 people connected: nobody shares
   this test torrent, so the damaged piece can't come back. (With a real torrent it would.)
 
@@ -616,7 +616,9 @@ nothing is ever downloaded; the files already there do all the work.
 
 **Test 6: `dinghy get --use-existing-files`**
 - Do: `.\dinghy.exe remove <n>` (keeps the files). Then
-  `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --no-dht --no-listen`.
+  `.\dinghy.exe get "$env:TEMP\bitdinghy-m6-test\bitdinghy-m6-test.torrent" --no-listen`.
+  (Not `--no-dht`: this torrent has no trackers, so with `--no-dht` BitDinghy says at once that it
+  could find nobody, see M12 test 1. The DHT only learns that nobody has this made-up torrent.)
 - You should see: the same "a file with the same name is already in the download folder" message,
   and "To use the file that is already there instead, run the same command again with
   --use-existing-files (BitDinghy checks it first and completes it)."

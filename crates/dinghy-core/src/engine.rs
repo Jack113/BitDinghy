@@ -200,6 +200,9 @@ pub struct DownloadSnapshot {
     /// What the last "check files" found, once it has finished (M7).
     #[serde(default)]
     pub note: Option<String>,
+    /// The note says something is missing or damaged (shown as a warning, not as good news).
+    #[serde(default)]
+    pub note_is_warning: bool,
     /// It failed because a file with the same name was already there; the person can choose to
     /// use that file instead ([`Engine::use_existing_files`]).
     #[serde(default)]
@@ -285,8 +288,8 @@ struct Entry {
     check_requested: AtomicBool,
     /// Added only to be checked (`dinghy check` with the window closed): it is paused just here.
     check_only: AtomicBool,
-    /// What the last check found.
-    note: Mutex<Option<String>>,
+    /// What the last check found, and whether it found something missing or damaged.
+    note: Mutex<Option<(String, bool)>>,
     /// Something to know that isn't a failure (see [`DownloadSnapshot::warning`]).
     warning: Mutex<Option<String>>,
     /// Uploads and sharing time, over all runs (see [`Shared::account`]).
@@ -1873,11 +1876,15 @@ fn bytes_per_second(kib: u32) -> Option<NonZeroU32> {
     NonZeroU32::new(kib.saturating_mul(1024))
 }
 
-/// What a finished check found, in plain words. `check_only`: checked by `dinghy check` with the
-/// window closed (it is paused only for the check).
-fn check_note(handle: &ManagedTorrent, check_only: bool) -> String {
+/// What a finished check found, in plain words, and whether something is missing or damaged.
+/// `check_only`: checked by `dinghy check` with the window closed (it is paused only for the check).
+fn check_note(handle: &ManagedTorrent, check_only: bool) -> (String, bool) {
     let stats = handle.stats();
     let missing = stats.total_bytes.saturating_sub(stats.progress_bytes);
+    (check_text(handle, check_only, missing), missing > 0)
+}
+
+fn check_text(handle: &ManagedTorrent, check_only: bool, missing: u64) -> String {
     if missing == 0 {
         "Checked: every chosen file is complete and correct.".to_string()
     } else if check_only {
@@ -2123,6 +2130,11 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         None => (0, 0),
     };
     let counts = lock(&entry.counts).clone();
+    // Read once: locking it twice in one expression would wait for itself forever.
+    let (note, note_is_warning) = match lock(&entry.note).clone() {
+        Some((text, warning)) => (Some(text), warning),
+        None => (None, false),
+    };
     let mut snapshot = DownloadSnapshot {
         id: entry.id,
         info_hash: entry.info_hash.clone(),
@@ -2143,7 +2155,8 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
         error: None,
         files_total,
         files_chosen,
-        note: lock(&entry.note).clone(),
+        note,
+        note_is_warning,
         can_use_existing_files: false,
         warning: lock(&entry.warning).clone(),
     };

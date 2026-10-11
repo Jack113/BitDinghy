@@ -1987,6 +1987,7 @@ mod tests {
             files_total: 3,
             files_chosen: 3,
             note: None,
+            note_is_warning: false,
             can_use_existing_files: false,
             shared_seconds: 0,
             sharing_stopped: false,
