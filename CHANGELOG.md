@@ -25,6 +25,9 @@ format is called out here.
   connections.
 
 ### Fixed
+- Pausing a download while its files were being checked left it showing "Checking files..."
+  forever, and Resume didn't help (librqbit stops the check when paused). It now shows as paused,
+  and Resume checks again and carries on. Found by an occasional test failure on the build server.
 - `dinghy get` accepted connections even when that was turned off in Settings.
 - **Sharing limits.** In Settings (or `dinghy settings set stop-sharing-at-ratio 1.5` /
   `stop-sharing-after 120`), a finished download can stop sharing once it has shared a number of

@@ -535,6 +535,12 @@ impl Shared {
                 let stats = handle.stats();
                 match stats.state {
                     TorrentStatsState::Initializing { .. } => {
+                        // Paused while checking: librqbit stopped the check. Not paused by the
+                        // person (any more), nor stopped by a sharing limit: check again.
+                        let stopped = lock(&entry.counts).sharing == Sharing::StoppedByLimit;
+                        if handle.is_paused() && !stopped {
+                            self.unpause_later(handle.clone());
+                        }
                         running += 1;
                         continue;
                     }
@@ -1515,7 +1521,9 @@ impl Engine {
             let mut state = lock(&entry.state);
             let handle = match &*state {
                 EntryState::Active(handle) => {
-                    if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+                    if matches!(handle.stats().state, TorrentStatsState::Initializing { .. })
+                        && !handle.is_paused()
+                    {
                         return Err(Error::Control(format!(
                             "\"{}\" is being checked already.",
                             entry.label
@@ -1973,6 +1981,13 @@ fn snapshot_of(entry: &Entry) -> DownloadSnapshot {
                 snapshot.peers_known = live.snapshot.peer_stats.seen;
             }
             snapshot.status = match stats.state {
+                // Paused during a check, librqbit stops checking and waits: that is "paused".
+                // (A "check files" of a paused download does check, though.)
+                TorrentStatsState::Initializing { paused }
+                    if paused && !entry.check_requested.load(Ordering::SeqCst) =>
+                {
+                    DownloadStatus::Paused
+                }
                 TorrentStatsState::Initializing { .. } => DownloadStatus::Checking,
                 TorrentStatsState::Live if stats.finished => DownloadStatus::Finished,
                 TorrentStatsState::Live => DownloadStatus::Downloading,

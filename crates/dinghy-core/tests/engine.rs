@@ -1938,3 +1938,64 @@ async fn with_incoming_connections_off_nothing_listens() {
     assert_eq!(engine.listen_port(), None);
     engine.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// A pause that arrives while files are being checked (found by CI during M11).
+// ---------------------------------------------------------------------------------------------
+
+/// librqbit stops a check when it is paused and waits; the download must then show as paused
+/// (not "checking" forever), and Resume must check again and carry on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pausing_while_files_are_checked_pauses_and_resume_checks_again() {
+    let work = tempfile::tempdir().unwrap();
+    let download_dir = work.path().join("downloads");
+    let folder = download_dir.join("big");
+    std::fs::create_dir_all(&folder).unwrap();
+    // Big enough that checking it takes a moment. (Two files, so the torrent keeps its folder.)
+    std::fs::write(folder.join("big.bin"), pseudo_random_bytes(80_000_000, 41)).unwrap();
+    std::fs::write(folder.join("small.txt"), b"hello").unwrap();
+    let created = create_torrent(
+        &folder,
+        CreateTorrentOptions {
+            piece_length: Some(1024 * 1024),
+            ..Default::default()
+        },
+        &BlockingSpawner::new(1),
+    )
+    .await
+    .unwrap();
+    let torrent = work.path().join("big.torrent");
+    std::fs::write(&torrent, created.as_bytes().unwrap()).unwrap();
+
+    let engine = offline_engine(&download_dir).await;
+    let options = dinghy_core::AddOptions {
+        peers: Vec::new(),
+        use_existing_files: true,
+    };
+    let id = engine
+        .add_any_with(&torrent.display().to_string(), options)
+        .await
+        .unwrap();
+    // Catch it while it checks the 80 MB already there.
+    let seen = wait_until(&engine, "checking or finished", |s| {
+        (s.status == DownloadStatus::Checking && s.save_folder.is_some())
+            || s.status == DownloadStatus::Finished
+    })
+    .await;
+    if seen.status == DownloadStatus::Checking {
+        engine.pause(id).await.unwrap();
+        wait_until(&engine, "paused, not checking forever", really_paused).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            really_paused(&engine.snapshot()[0]),
+            "{:?}",
+            engine.snapshot()
+        );
+        engine.resume(id).await.unwrap();
+    }
+    // Resumed (or too quick to catch): it checks everything and finishes from the files.
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished, DownloadStatus::Failed]).await;
+    assert_eq!(done.status, DownloadStatus::Finished, "{:?}", done.error);
+    assert_eq!(done.progress_bytes, 80_000_005);
+    engine.shutdown().await;
+}
