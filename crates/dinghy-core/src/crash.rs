@@ -202,6 +202,18 @@ fn os_version() -> String {
     std::env::consts::OS.to_string()
 }
 
+/// Windows' build number (19045 is Windows 10 22H2; 22000 and above are Windows 11).
+#[cfg(windows)]
+pub(crate) fn windows_build() -> Option<u32> {
+    windows_registry_text(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        "CurrentBuildNumber",
+    )?
+    .trim()
+    .parse()
+    .ok()
+}
+
 /// A text value under `HKEY_LOCAL_MACHINE\<key>`, if it can be read.
 #[cfg(windows)]
 fn windows_registry_text(key: &str, name: &str) -> Option<String> {

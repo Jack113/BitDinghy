@@ -89,6 +89,16 @@ fn open_command(exe: &Path) -> String {
     format!("\"{}\" \"%1\"", exe.display())
 }
 
+/// The Default apps link for this Windows build. Windows 11 (build 22000 and later) can open
+/// BitDinghy's own entry; Windows 10 doesn't know `registeredAppUser` (found in the big guided
+/// test: Explorer then opened a folder instead), so it gets the plain Default apps page.
+fn default_apps_link(windows_build: Option<u32>) -> &'static str {
+    match windows_build {
+        Some(build) if build >= 22000 => "ms-settings:defaultapps?registeredAppUser=BitDinghy",
+        _ => "ms-settings:defaultapps",
+    }
+}
+
 /// The program in an open command (the part in the first quotation marks).
 fn exe_in_command(command: &str) -> Option<PathBuf> {
     let rest = command.strip_prefix('"')?;
@@ -332,11 +342,24 @@ mod platform {
     }
 
     pub fn open_default_apps() {
-        // Windows 11 opens BitDinghy's own entry with `registeredAppUser`; Windows 10 shows the
-        // Default apps page.
-        let _ = std::process::Command::new("explorer")
-            .arg("ms-settings:defaultapps?registeredAppUser=BitDinghy")
-            .spawn();
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        // Windows' own "open this link" (Explorer treats a link it doesn't know as a folder).
+        let link = wide(super::default_apps_link(crate::crash::windows_build()));
+        let operation = wide("open");
+        // SAFETY: `operation` and `link` are zero-terminated; the window, parameters and folder
+        // may be null. The result only says whether Windows could open it; nothing to clean up.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                link.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
 }
 
@@ -369,6 +392,16 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_10_gets_the_plain_default_apps_page() {
+        assert_eq!(default_apps_link(Some(19045)), "ms-settings:defaultapps");
+        assert_eq!(default_apps_link(None), "ms-settings:defaultapps");
+        assert_eq!(
+            default_apps_link(Some(22631)),
+            "ms-settings:defaultapps?registeredAppUser=BitDinghy"
+        );
+    }
 
     #[test]
     fn the_open_command_quotes_the_program_and_the_link() {

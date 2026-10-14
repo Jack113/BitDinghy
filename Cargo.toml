@@ -61,7 +61,7 @@ png = "0.18"
 # history's days (M14), and registers BitDinghy for magnet links and .torrent files when asked
 # (M16). Already in the build through
 # several crates; we only switch on the parts we use.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Time", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Time", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Windows only, build time only: puts the icon and the "Details" information into the .exe files.
 winresource = "0.1"
 
