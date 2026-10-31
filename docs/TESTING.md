@@ -56,7 +56,7 @@ Data-free.
 
 | Test | Result |
 |---|---|
-| 1. The note | |
+| 1. The note | Passed |
 
 ## M16: opening magnet links and .torrent files from other programs
 
@@ -116,12 +116,12 @@ Windows user); test 6 undoes it. It uses the queue test torrents from M8.
 
 | Test | Result |
 |---|---|
-| 1. The setting | |
-| 2. Registering, and choosing it in Windows | |
-| 3. A .torrent file from Explorer, window closed | |
-| 4. A .torrent file while the window is open | |
-| 5. A magnet link from the browser | |
-| 6. Undo | |
+| 1. The setting | Passed |
+| 2. Registering, and choosing it in Windows | Failed on Windows 10 (Explorer opened a folder), fixed in 3a9dcb9, then passed |
+| 3. A .torrent file from Explorer, window closed | Passed |
+| 4. A .torrent file while the window is open | Passed |
+| 5. A magnet link from the browser | Passed |
+| 6. Undo | Passed |
 
 ## M15: recommended settings
 
@@ -162,9 +162,9 @@ is precious; the automated tests cover the learning.
 
 | Test | Result |
 |---|---|
-| 1. Before anything is learned | |
-| 2. `--apply` with nothing learned | |
-| 3. Learning and using the recommendation (optional) | |
+| 1. Before anything is learned | Not seen: speeds were already learned (the automated tests cover it) |
+| 2. `--apply` with nothing learned | Not seen, as test 1; `--apply` with learned speeds passed |
+| 3. Learning and using the recommendation (optional) | Passed (learned from the M9 Arch download; Use these and --apply) |
 
 ## M14: history and charts
 
@@ -207,10 +207,10 @@ day's total something to show).
 
 | Test | Result |
 |---|---|
-| 1. The History section | |
-| 2. Removing a download puts it in the history | |
-| 3. `dinghy history` | |
-| 4. The speed chart moves (optional) | |
+| 1. The History section | Passed |
+| 2. Removing a download puts it in the history | Passed |
+| 3. `dinghy history` | Passed |
+| 4. The speed chart moves (optional) | Passed |
 
 ## M13: crash reports
 
@@ -253,10 +253,10 @@ Data-free. The crashes are made on purpose with a setting only used for testing.
 
 | Test | Result |
 |---|---|
-| 1. `dinghy` crashes and says where the report is | |
-| 2. What a report says | |
-| 3. The window crashes, and says so next time | |
-| 4. `dinghy settings` | |
+| 1. `dinghy` crashes and says where the report is | Passed |
+| 2. What a report says | Passed |
+| 3. The window crashes, and says so next time | Passed |
+| 4. `dinghy settings` | Passed |
 
 ## M12: problems in plain words
 
@@ -309,10 +309,10 @@ Data-free. Test 2 uses your FAT32 USB stick (the one the repo is on); skip it if
 
 | Test | Result |
 |---|---|
-| 1. No way to find anyone, said at once | |
-| 2. A 5 GB file on a FAT32 drive | |
-| 3. A file another program holds | |
-| 4. A paused download followed from the command line | |
+| 1. No way to find anyone, said at once | Passed (seen during M7) |
+| 2. A 5 GB file on a FAT32 drive | Passed |
+| 3. A file another program holds | Passed |
+| 4. A paused download followed from the command line | Passed |
 
 ## M11: port and UPnP
 
@@ -366,11 +366,11 @@ Data-free. The window accepts connections as before; this only changes how.
 
 | Test | Result |
 |---|---|
-| 1. The connection settings in the window | |
-| 2. A fixed port | |
-| 3. A port another program uses | |
-| 4. Not accepting connections | |
-| 5. The command line | |
+| 1. The connection settings in the window | Passed |
+| 2. A fixed port | Passed |
+| 3. A port another program uses | Failed (BitDinghy shared the busy port), fixed in f631737, then passed |
+| 4. Not accepting connections | Passed |
+| 5. The command line | Passed |
 
 ## M10: sharing limits
 
@@ -428,11 +428,11 @@ BitDinghy M6 test (**Delete the files too**).
 
 | Test | Result |
 |---|---|
-| 1. What a finished download says about sharing | |
-| 2. A time limit | |
-| 3. It stays stopped after a restart | |
-| 4. Share again | |
-| 5. The command line | |
+| 1. What a finished download says about sharing | Passed (without --no-dht, see the test) |
+| 2. A time limit | Passed |
+| 3. It stays stopped after a restart | Passed |
+| 4. Share again | Passed |
+| 5. The command line | Passed |
 
 ## M9: speed limits
 
@@ -486,12 +486,12 @@ low speed and paused after half a minute).
 
 | Test | Result |
 |---|---|
-| 1. The totals line and the limit boxes | |
-| 2. Too low is refused | |
-| 3. A limit | |
-| 4. The limit holds | |
-| 5. Changing it from the command line | |
-| 6. Back to no limit | |
+| 1. The totals line and the limit boxes | Passed |
+| 2. Too low is refused | Passed |
+| 3. A limit | Passed |
+| 4. The limit holds | Passed |
+| 5. Changing it from the command line | Passed |
+| 6. Back to no limit | Passed |
 
 ## M8: the queue
 
@@ -557,13 +557,13 @@ Data-free: three little test torrents nobody shares, so each download simply wai
 
 | Test | Result |
 |---|---|
-| 1. One at a time | |
-| 2. Moving changes which one runs | |
-| 3. Pausing frees the place | |
-| 4. Two at a time | |
-| 5. The command line | |
-| 6. The order is remembered | |
-| 7. A setting from the command line reaches the open window | |
+| 1. One at a time | Passed |
+| 2. Moving changes which one runs | Passed |
+| 3. Pausing frees the place | Passed |
+| 4. Two at a time | Passed |
+| 5. The command line | Passed |
+| 6. The order is remembered | Passed |
+| 7. A setting from the command line reaches the open window | Passed |
 
 ## M7: checking files, and using files already there
 
@@ -632,16 +632,17 @@ nothing is ever downloaded; the files already there do all the work.
 
 | Test | Result |
 |---|---|
-| 1. Use the files already there | |
-| 2. Check files | |
-| 3. A damaged file is found | |
-| 4. `dinghy check`, window open | |
-| 5. `dinghy check`, window closed | |
-| 6. `dinghy get --use-existing-files` | |
+| 1. Use the files already there | Passed |
+| 2. Check files | Passed |
+| 3. A damaged file is found | Passed (the orange colour from 3c44473 is re-checked at the end) |
+| 4. `dinghy check`, window open | Passed |
+| 5. `dinghy check`, window closed | Passed |
+| 6. `dinghy get --use-existing-files` | Passed (without --no-dht, see the test) |
 
 ## M6: choosing which files to download
 
 Tests are done one at a time: do the test, compare with "You should see", then go to the next.
+(The big guided test of M6 to M18 ran from 2026-10-11 to 2026-10-14; the results tables show it.)
 **No download data is used:** the test torrent is made on your PC and nobody shares it, so it
 stays at 0%. The window still knows its four files at once, because they are in the `.torrent`.
 (That only the chosen files' bytes arrive, byte for byte, is checked by the automated tests.)
@@ -752,17 +753,17 @@ in BitDinghy's list), and `%TEMP%\bitdinghy-m6-test` if you like.
 
 | Test | Result |
 |---|---|
-| 1. The Files button | |
-| 2. The file list | |
-| 3. Untick a file | |
-| 4. The last file can't be unticked | |
-| 5. Unticked files are hidden in the folder | |
-| 6. The choice is remembered | |
-| 7. Choose with the command line, window closed | |
-| 8. Choose with the command line, window open | |
-| 9. Mistakes are refused | |
-| 10. Remove, delete the files too | |
-| 11. Remove, keep the files | |
+| 1. The Files button | Passed |
+| 2. The file list | Passed |
+| 3. Untick a file | Passed |
+| 4. The last file can't be unticked | Passed |
+| 5. Unticked files are hidden in the folder | Passed |
+| 6. The choice is remembered | Passed |
+| 7. Choose with the command line, window closed | Passed |
+| 8. Choose with the command line, window open | Passed |
+| 9. Mistakes are refused | Passed |
+| 10. Remove, delete the files too | Passed |
+| 11. Remove, keep the files | Passed |
 
 ## M5: .torrent files and links
 

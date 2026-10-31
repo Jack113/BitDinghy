@@ -15,6 +15,18 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
   before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
+## Found in the big guided test (2026-10-11 to 2026-10-14)
+- librqbit can take many seconds to pause a busy download (26 s measured at 200 KiB/s; usually
+  instant). The window no longer waits for it, but `dinghy pause` still does. Find out why (a
+  lock held while waiting for the speed limiter?) and report it upstream if it is librqbit's.
+- After fast pause/resume clicking during that freeze (fixed), Arch found nobody for the rest of
+  that window session, even after remove and re-add (other torrents were fine; a fresh session
+  found ~40 people). Not reproduced since the freeze fix; watch for it.
+- librqbit's sockets set SO_REUSEADDR on Windows, so it shares a port another program listens on
+  (BitDinghy now checks first). Worth reporting upstream: two programs on one port is never wanted.
+- The development build of the window has a console window (on purpose, for messages); opened
+  by a double-click it shows a black window behind it. The release build has none.
+
 ## Noticed while building M10
 - In a test, a leecher that connected while BitDinghy was still downloading never learned about
   the pieces BitDinghy got afterwards (it stayed at 0%). Connected when BitDinghy already had
