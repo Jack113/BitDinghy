@@ -64,14 +64,10 @@ project is built **one feature at a time**.
 - Done in M12: `dinghy get` following a paused download says "paused at N%".
 
 ## Noticed while building M4
-- Another user on the same PC could create a pipe with BitDinghy's channel name before the window
-  opens. The window then says its channel is in use (it never shares it), but `dinghy` would talk
-  to the impostor, which could see the links sent and answer falsely. Checking that the pipe
-  belongs to the same user (`GetNamedPipeServerProcessId` + the process's user) closes it.
-  Low risk on a one-person PC; do it before the first release. Simplest check (from the M4
-  security review): read the pipe's owner with `GetSecurityInfo` on the client handle and require
-  the current user's SID. The pipe name isn't secret (anyone can list pipes), and the client
-  already uses SECURITY_IDENTIFICATION, so an impostor can't act as the user.
+- Done before v0.1.0 (2026-10-31): `dinghy` reads the pipe's owner (`GetSecurityInfo`) and talks
+  only to a pipe made by its own user (or, run as administrator, by the Administrators group =
+  its own default owner), so another user's look-alike pipe is refused (`remote::platform::
+  check_owner`).
 - Linux: the socket gets mode 0600 just after `bind`; for the Linux port, create it inside a
   0700 folder or check the caller with `SO_PEERCRED`.
 - `dinghy get --no-dht/--no-listen` with the window open: the window's settings apply (a note is

@@ -593,7 +593,10 @@ mod platform {
         let give_up = Instant::now() + Duration::from_secs(2);
         loop {
             match ClientOptions::new().open(address.path()) {
-                Ok(client) => return Ok(Some(client)),
+                Ok(client) => {
+                    check_owner(&client)?;
+                    return Ok(Some(client));
+                }
                 // No pipe with that name: the window isn't open.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < give_up => {
@@ -609,6 +612,119 @@ mod platform {
                 }
                 Err(e) => return Err(channel_error("connecting", e)),
             }
+        }
+    }
+
+    /// Makes sure the pipe was made by this same Windows user. The pipe's name isn't secret, so
+    /// another user of this PC could make a pipe with BitDinghy's name before the window opens;
+    /// `dinghy` would then send its links to that program and believe its answers. A pipe's
+    /// owner is the user who made it (or, for a program run as administrator, the
+    /// Administrators group: the same as this program's own "default owner" when it is run the
+    /// same way).
+    fn check_owner(client: &NamedPipeClient) -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        let ours = this_user().map_err(|e| channel_error("checking who made the channel", e))?;
+        let owner = owner_of(client.as_raw_handle())
+            .map_err(|e| channel_error("checking who made the channel", e))?;
+        if is_ours(&owner, &ours) {
+            Ok(())
+        } else {
+            Err(Error::Remote(
+                "Something that isn't BitDinghy's window, started by another user of this PC, \
+                 is using BitDinghy's channel, so dinghy won't talk to it. Restarting the PC \
+                 clears it."
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// True when `owner` is one of `ours`.
+    pub(super) fn is_ours(owner: &[u8], ours: &[Vec<u8>]) -> bool {
+        ours.iter().any(|sid| sid.as_slice() == owner)
+    }
+
+    /// A security identifier (SID) copied into plain bytes. Two SIDs are the same when their
+    /// bytes are the same.
+    unsafe fn sid_bytes(sid: *mut core::ffi::c_void) -> Vec<u8> {
+        use windows_sys::Win32::Security::GetLengthSid;
+        // SAFETY: the caller passes a valid SID; `GetLengthSid` gives its exact size.
+        unsafe {
+            let length = GetLengthSid(sid) as usize;
+            std::slice::from_raw_parts(sid as *const u8, length).to_vec()
+        }
+    }
+
+    /// The owner of the object behind `handle`.
+    pub(super) fn owner_of(handle: std::os::windows::io::RawHandle) -> std::io::Result<Vec<u8>> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+        use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
+        let mut owner = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `handle` is an open pipe handle (opened for reading, which includes the right
+        // to read its owner); Windows allocates the descriptor, which is freed below.
+        unsafe {
+            let status = GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            );
+            if status != 0 {
+                return Err(std::io::Error::from_raw_os_error(status as i32));
+            }
+            let bytes = sid_bytes(owner);
+            LocalFree(descriptor);
+            Ok(bytes)
+        }
+    }
+
+    /// This program's user, and the owner it gives to things it makes (its "default owner",
+    /// which is the Administrators group when it runs as administrator).
+    pub(super) fn this_user() -> std::io::Result<Vec<Vec<u8>>> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: plain Windows calls on this process's own token; buffers are sized by asking
+        // Windows first, and the token handle is closed before returning.
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let read = |class| -> std::io::Result<Vec<u64>> {
+                let mut needed = 0u32;
+                GetTokenInformation(token, class, std::ptr::null_mut(), 0, &mut needed);
+                // u64 parts keep the buffer aligned for the structure Windows writes into it.
+                let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+                if GetTokenInformation(
+                    token,
+                    class,
+                    buffer.as_mut_ptr().cast(),
+                    needed,
+                    &mut needed,
+                ) == 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(buffer)
+            };
+            let result = (|| {
+                let user = read(TokenUser)?;
+                let owner = read(TokenOwner)?;
+                Ok(vec![
+                    sid_bytes((*user.as_ptr().cast::<TOKEN_USER>()).User.Sid),
+                    sid_bytes((*owner.as_ptr().cast::<TOKEN_OWNER>()).Owner),
+                ])
+            })();
+            CloseHandle(token);
+            result
         }
     }
 }
@@ -750,6 +866,31 @@ mod tests {
         let text = serde_json::to_string(&request).unwrap();
         assert!(!text.contains('\n'), "one message is one line");
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dinghy_talks_to_a_pipe_made_by_the_same_user() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let work = tempfile::tempdir().unwrap();
+        let address = Address::for_data_dir(work.path());
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(address.path())
+            .unwrap();
+        assert!(platform::connect(&address).await.unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_owned_by_someone_else_is_not_ours() {
+        let ours = platform::this_user().unwrap();
+        assert_eq!(ours.len(), 2);
+        assert!(platform::is_ours(&ours[0], &ours));
+        // S-1-5-18, the "Local System" account: never the person running the tests.
+        let system = [1u8, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        assert!(!ours.contains(&system.to_vec()));
+        assert!(!platform::is_ours(&system, &ours));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

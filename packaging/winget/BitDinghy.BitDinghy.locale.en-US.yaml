@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: BitDinghy.BitDinghy
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: BitDinghy
+PublisherUrl: https://bitdinghy.com
+PublisherSupportUrl: https://bitdinghy.com/feedback/
+PrivacyUrl: https://bitdinghy.com/privacy/
+PackageName: BitDinghy
+PackageUrl: https://bitdinghy.com
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/Jack113/BitDinghy/blob/main/LICENSE-MIT
+ShortDescription: A fast, lightweight, portable BitTorrent client (magnet links and .torrent files).
+Description: |-
+  BitDinghy downloads magnet links and .torrent files. It is portable (its settings and lists stay
+  in a "data" folder next to the program), has a window and a command line (dinghy), and collects
+  no data: nothing leaves the PC except BitTorrent traffic.
+Tags:
+- bittorrent
+- torrent
+- magnet
+- portable
+- downloader
+ReleaseNotesUrl: https://github.com/Jack113/BitDinghy/releases/tag/v0.1.0
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

@@ -1,0 +1,33 @@
+{
+    "version": "0.1.0",
+    "description": "A fast, lightweight, portable BitTorrent client (magnet links and .torrent files).",
+    "homepage": "https://bitdinghy.com",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/Jack113/BitDinghy/releases/download/v0.1.0/BitDinghy-0.1.0-windows-x64.zip",
+            "hash": "FILL-IN-WITH-fill-hashes.ps1"
+        }
+    },
+    "extract_dir": "BitDinghy-0.1.0-windows-x64",
+    "bin": "dinghy.exe",
+    "shortcuts": [
+        [
+            "BitDinghy.exe",
+            "BitDinghy"
+        ]
+    ],
+    "persist": "data",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/Jack113/BitDinghy/releases/download/v$version/BitDinghy-$version-windows-x64.zip"
+            }
+        },
+        "extract_dir": "BitDinghy-$version-windows-x64",
+        "hash": {
+            "url": "$baseurl/SHA256SUMS.txt"
+        }
+    }
+}
