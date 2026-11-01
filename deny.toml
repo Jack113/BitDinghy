@@ -13,6 +13,9 @@ targets = [
 version = 2
 ignore = [
     { id = "RUSTSEC-2026-0293", reason = "ringbuf 0.4.8 double free if an element's Drop panics in Consumer::skip/clear. Comes in via librqbit-utp 0.7.0 (the newest), which pins ringbuf ^0.4 and the fix needs 0.5.2. Its only ring buffer is SharedRb<Heap<u8>> (stream_tx.rs): plain bytes have no Drop, so the trigger cannot happen. Revisit when librqbit-utp moves to ringbuf 0.5." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: 'unmaintained' only (no known vulnerability), merged into zbus 6. Linux only (D-Bus), via zbus 5 used by eframe 0.36's screen-reader support (accesskit_unix) and rfd's desktop portal; not built into the Windows programs. Revisit when eframe/accesskit and rfd move to zbus 6, and at the Linux port." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: same as RUSTSEC-2026-0370 (merged into zbus 6; Linux only; no known vulnerability)." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: same as RUSTSEC-2026-0370 (merged into zbus 6; Linux only; no known vulnerability)." },
 ]
 
 [licenses]
