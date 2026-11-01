@@ -32,8 +32,12 @@ makes something public (marked **owner's decision**) is done by hand, after a ye
    - `SHA256SUMS.txt` (the zip's checksum),
    - `BitDinghy-0.1.0-windows-x64-debug-symbols.zip` (the `.pdb` files: keep them, they turn
      crash-report backtraces into function names; there's no need to publish them).
+   The workflow also signs a **build proof** (a GitHub artifact attestation) for the zips.
 3. Download the zip from the draft, unzip it on a clean Windows PC (or a virtual machine without
-   a graphics card, to check the window still opens), run both programs once.
+   a graphics card, to check the window still opens), run both programs once. Check the build
+   proof: `gh attestation verify BitDinghy-<version>-windows-x64.zip --repo Jack113/BitDinghy`.
+4. Write the release notes (download, checksum, the SmartScreen note, what's new), and remove the
+   debug-symbols zip from the draft after keeping a copy (see "Never" below).
 
 ## 4. Signing (once the project qualifies)
 

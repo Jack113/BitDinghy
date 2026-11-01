@@ -1,0 +1,30 @@
+# zizmor: checks the GitHub workflow files themselves for security mistakes (leaked tokens,
+# unpinned actions, untrusted text used in commands, too-broad permissions, ...). Runs when a
+# workflow changes; findings appear in the Security tab.
+# https://github.com/zizmorcore/zizmor
+name: Workflow security
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/**"]
+  pull_request:
+    paths: [".github/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: Check the workflows (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # to put the findings in the Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0

@@ -22,8 +22,14 @@ jobs:
   build-windows:
     name: Build the Windows release
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write # to sign the build proof (attestation) below
+      attestations: write # to store it with the repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # nothing here pushes, so don't leave the token on disk
 
       - name: Install Rust (stable)
         run: |
@@ -58,6 +64,13 @@ jobs:
           Get-Content dist/SHA256SUMS.txt
           Get-ChildItem dist | Format-Table Name, Length
 
+      # Build proof: GitHub signs a statement that these zips were built by this workflow, from
+      # this repository at this commit. Anyone can check a download with
+      #   gh attestation verify BitDinghy-<version>-windows-x64.zip --repo Jack113/BitDinghy
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-release
@@ -88,4 +101,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --title "BitDinghy $TAG" \
-            --notes "Draft. Check the files and the checksums, sign them (docs/RELEASE.md), then publish."
+            --notes "Draft. Check the files and the checksums, write the release notes, remove the debug-symbols zip (keep a copy), then publish (docs/RELEASE.md)."

@@ -32,6 +32,8 @@ jobs:
     steps:
       # Third-party actions are pinned to an exact commit, so a hijacked tag can't change what runs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # nothing here pushes, so don't leave the token on disk
 
       - name: Install Linux packages needed to build the window
         if: runner.os == 'Linux'
@@ -62,6 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # nothing here pushes, so don't leave the token on disk
 
       - name: Install Linux packages needed to build the window
         run: |
@@ -86,4 +90,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # nothing here pushes, so don't leave the token on disk
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
