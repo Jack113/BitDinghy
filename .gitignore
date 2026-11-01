@@ -21,3 +21,7 @@ Thumbs.db
 
 # Local tool settings
 .claude/settings.local.json
+
+# The assistant's private project notes: kept on the owner's PC only, never published.
+CLAUDE.md
+CLAUDE.local.md
