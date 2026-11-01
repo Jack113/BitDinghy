@@ -39,8 +39,8 @@ Status colors follow the pack's tokens: **teal** for "in progress", **green** fo
 - **Inter typeface.** The brand font is Inter, but the pack ships no font file, so the window uses
   egui's built-in font. Adding Inter (SIL OFL license) costs about 300 KB per weight and its license
   text has to go into the third-party notices.
-- **`assets/source/`** holds two large original boards (about 1.4 MB each). They are tracked in git
-  and stay in its history (the owner's decision, 2026-10-10).
+- **The original source boards** (two large AI-made images) are not in the public repository
+  (the owner's decision, 2026-11-01); the vector logos and icons in `assets/` are what is used.
 - **Brand-colored widgets.** Only the basics are themed (backgrounds, text, borders, buttons,
   progress, status colors). Tags, cards and the navigation style from the UI preview come with the
   tabbed layout (Downloads, History and charts, Settings).

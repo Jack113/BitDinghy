@@ -5,7 +5,7 @@ project is built **one feature at a time**.
 
 ## Owner checks still open
 - Done: M2 tested OK by the owner, window included (2026-10-10).
-- Done: `assets/source/` stays in git history (owner's decision, 2026-10-10).
+- Done: the original source boards are not published (owner's decision, 2026-11-01).
 - Done: the project folder is renamed to `BitDinghy`.
 - Done: the M1 download was checked against the published SHA256 and matched (2026-10-09).
 

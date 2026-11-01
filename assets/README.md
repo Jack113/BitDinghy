@@ -18,11 +18,10 @@ A separated asset pack based on the BitDinghy brand-board artwork.
 - `themes/` - functional light/dark CSS variables and optional initial theme script.
 - `previews/` - separately cropped **exact** sections of the original brand board (reference/concepts only).
 - `web/` - web manifest, HTML head snippet, social preview OG image.
-- `source/` - original unchanged brand board and the original binary sailboat concept.
 
 ## Important notes
 
-- The original artwork was raster AI-generated. `previews/` and `source/` preserve its look exactly.
+- The original artwork was raster AI-generated. `previews/` keeps cut-outs of its look (the original boards are not in the repository).
 - `logos/*.svg` and `icons/*.svg` are **clean vector adaptations**, not traced, pixel-perfect copies of the source artwork. These are transparent and easier to scale.
 - Theme screenshots are visual mockups, not finished screens or complete implementations.
 - The green shown as Primary Green (`#57F000`) comes from the supplied reference. For light-theme UI button/text contrast, the CSS uses Deep Green (`#1F8F46`) instead.
