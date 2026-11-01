@@ -73,7 +73,7 @@ eframe = { version = "0.36", default-features = false, features = ["accesskit", 
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # The history's charts (M14): speed over the last minutes and daily totals. The version made for
 # egui 0.36.
-egui_plot = "0.37"
+egui_plot = "0.38"
 
 [profile.dev]
 # Line numbers only (not every variable): backtraces and crash reports still show file and line,
