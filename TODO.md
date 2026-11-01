@@ -108,12 +108,31 @@ project is built **one feature at a time**.
 - "Check for updates" button that looks at the website.
 - "Only download while my VPN is connected".
 
+## Upgrade librqbit to 9.1.0 (released 2026-10-29; owner: later, not now)
+- Mostly crash and security fixes: a remote peer could crash librqbit with deeply nested
+  bencode, an out-of-range ut_metadata request, or a panic in the listener. Also BEP 52 hybrid
+  torrents, `socks5h://` proxies, and fixes near our own workarounds (the state lock in
+  `update_only_files`, sparse files on Windows, the piece queue).
+- Its one listed API change (`PeerConnectionOptions::max_request_window`) doesn't touch us: we
+  never build that struct. Expected: change the `=9.0.1` pin in `Cargo.toml`, run every test
+  (the engine tests several times in a row), `cargo deny`, CI, the security review, then a short
+  data-free guided test (add, pause/resume, choose files, check files, queue, restart). About
+  half a day, plus about 30 minutes for the owner. Could ship as v0.1.1.
+
 ## Encryption (M17, waiting for upstream)
-- librqbit 9.0.1 (the newest, checked 2026-10-11) has no Message Stream Encryption; the pull
-  request ikatson/rqbit#633 is still open (last updated 2026-09-18). Settings and `dinghy settings`
+- librqbit 9.1.0 (the newest, checked 2026-11-01) still has no Message Stream Encryption; the pull
+  request ikatson/rqbit#633 is still open, now conflicts with upstream, and was last updated
+  2026-09-18 (reviewed, changes made, not approved yet). Settings and `dinghy settings`
   say connections aren't encrypted. When it is merged and released: upgrade librqbit (a
   deliberate step: re-run every test and the security review), add an "Encryption: prefer /
-  require / off" setting, and update the note and the website.
+  require / off" setting, and update the note and the website. About a day of work then.
+- Other routes, looked at 2026-11-01 and not chosen: (1) our own copy of librqbit with #633 on
+  top (2-4 days, then re-merged at every librqbit update; ships unapproved network code);
+  (2) a small encrypting middleman inside BitDinghy using librqbit's SOCKS5 proxy setting for
+  outgoing connections and a front listener for incoming ones (fragile: librqbit would see every
+  peer as 127.0.0.1, and uTP (UDP) connections aren't covered); (3) a different engine
+  (libtorrent, C++): weeks of work and a harder portable build; (4) helping #633 upstream by
+  testing it on Windows (cheap, the owner posts).
 
 ## Features noted during planning
 - Let the window attach to an engine already running in the command line (v1 just says so).
