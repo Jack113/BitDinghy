@@ -21,6 +21,9 @@ Data-free. This checks what a person downloading BitDinghy would get.
   (for example on your Desktop) and start `BitDinghy.exe` there.
 - You should see: the window opens quickly, with no black console window behind it; a `data`
   folder appears next to the programs (portable). Close it. Delete that test folder.
+- Windows Firewall may ask about BitDinghy first ("Publisher: Unknown", because the program isn't
+  code-signed yet). That's Windows' own question for a program that accepts incoming connections
+  from a new folder. For this test press **Cancel**; in real use, tick **Private networks** only.
 
 **Test 3: the notices**
 - Do: open `THIRD-PARTY-NOTICES.html` (in the repo folder) in your browser.
@@ -36,10 +39,10 @@ Data-free. This checks what a person downloading BitDinghy would get.
 
 | Test | Result |
 |---|---|
-| 1. The version | |
-| 2. The window, as released | |
-| 3. The notices | |
-| 4. A screen reader (optional) | |
+| 1. The version | Passed (2026-11-01) |
+| 2. The window, as released | Passed (Windows Firewall asked first; Cancel) |
+| 3. The notices | Passed |
+| 4. A screen reader (optional) | Skipped by the owner (Narrator started) |
 
 ## M17: encryption (a note, until the engine supports it)
 
