@@ -9,7 +9,9 @@ format is called out here.
 
 ## [Unreleased]
 
-Version 0.1.0 is prepared (the first release, not published yet; see docs/RELEASE.md).
+## [0.1.0] - 2026-11-01
+
+The first release.
 
 ### Added
 - The version is 0.1.0. A release workflow builds the Windows zip, a checksum file and the
