@@ -12,8 +12,9 @@ project is built **one feature at a time**.
 ## Revisit at the end (owner's decision, 2026-10-10)
 - The window is **dark only** for now. The light theme and the "follow Windows' light/dark setting"
   behaviour are still in the code (`brand.rs`, one line in `apply`: `ctx.set_theme(Dark)`), so
-  bringing them back means choosing: follow the system, a Settings choice, or stay dark. Decide
-  before the first release (M18). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
+  bringing them back means choosing: follow the system, a Settings choice, or stay dark.
+  **Decided 2026-11-01: v0.1.0 ships dark only**; the light theme is for a later version (it's on
+  the website's roadmap). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
 
 ## Found in the big guided test (2026-10-11 to 2026-10-14)
 - librqbit can take many seconds to pause a busy download (26 s measured at 200 KiB/s; usually
