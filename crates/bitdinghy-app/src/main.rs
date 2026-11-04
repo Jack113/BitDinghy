@@ -254,6 +254,44 @@ fn open_folder(folder: &Path) {
     let _ = std::process::Command::new(program).arg(folder).spawn();
 }
 
+/// Opens a web page in the person's own browser. Only BitDinghy's own fixed `https://` links
+/// are ever passed here, never text from a download or the network.
+fn open_web_page(link: &str) {
+    if !link.starts_with("https://") {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let wide = |text: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(text)
+                .encode_wide()
+                .chain([0])
+                .collect()
+        };
+        let (operation, target) = (wide("open"), wide(link));
+        // SAFETY: both texts are zero-terminated; the window, parameters and folder may be null.
+        // Windows' own "open this" starts the default browser; nothing to clean up.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(link).spawn();
+    }
+}
+
 /// Whether, and on which port, BitDinghy accepts connections right now.
 fn listening_text(port: Option<u16>) -> String {
     match port {
@@ -1339,8 +1377,16 @@ impl BitDinghyApp {
                         {
                             open_folder(dir.path());
                         }
-                        ui.hyperlink_to("Support BitDinghy", SUPPORT_LINK)
-                            .on_hover_text(SUPPORT_LINK);
+                        // Not `hyperlink_to`: egui only asks for the link to be opened, and the
+                        // part of eframe that would do it is switched off in this build, so the
+                        // click did nothing (found in the guided test). Windows opens it.
+                        if ui
+                            .link("Support BitDinghy")
+                            .on_hover_text(SUPPORT_LINK)
+                            .clicked()
+                        {
+                            open_web_page(SUPPORT_LINK);
+                        }
                     });
                 });
             });

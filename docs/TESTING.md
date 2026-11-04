@@ -120,18 +120,22 @@ own `data` folder, so its download list starts empty; the development copy keeps
 
 | Test | Result |
 |---|---|
-| 1. The new look, and the one-time question | |
-| 2. What Windows opens links with | |
-| 3. Yes | |
-| 4. A download card, and the boat sails | |
-| 5. Finishing from files already there | |
-| 6. History and the groups in Settings | |
-| 7. Light colors | |
-| 8. Stop once "Check files" finds it complete | |
-| 9. Stop right away | |
-| 10. The same setting from the command line | |
-| 11. The folder buttons and the Support link | |
-| 12. Less motion (optional) | |
+The owner's test, 2026-11-04 (on the release build of branch `ui-redesign`):
+
+| Test | Result |
+|---|---|
+| 1. The new look, and the one-time question | Passed |
+| 2. What Windows opens links with | Passed (checked after Yes: both lines green) |
+| 3. Yes | Passed |
+| 4. A download card, and the boat sails | Passed |
+| 5. Finishing from files already there | Passed (redone after the files were deleted by mistake with "Delete the files too", which is correct behaviour) |
+| 6. History and the groups in Settings | Passed |
+| 7. Light colors | Passed |
+| 8. Stop once "Check files" finds it complete | Passed |
+| 9. Stop right away | Passed on a fresh download; the first try stayed sharing because that download had been "shared again" (by design, see `TODO.md`) |
+| 10. The same setting from the command line | Passed |
+| 11. The folder buttons and the Support link | Passed after a fix: the link did nothing (eframe's link opening is off in this build), now Windows opens it |
+| 12. Less motion (optional) | Skipped |
 
 ## M18: the release build
 

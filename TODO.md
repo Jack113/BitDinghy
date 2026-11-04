@@ -101,6 +101,12 @@ project is built **one feature at a time**.
 - A setting changed with `dinghy settings set` while the window is open reaches the engine at
   once, but the window's Settings page keeps showing the old value until the next start (it
   doesn't re-read `settings.toml`). Older than the redesign; found while writing its guided test.
+- **Resume** and **Share again** sit in the same spot on a card. With "stop right away" (or a
+  sharing limit already reached), a double-click on Resume resumes, the download is stopped
+  within a second, and the second click lands on Share again, which exempts it from the limits
+  for good (seen in the redesign's guided test). Ideas: ignore a second click on the same card
+  for a moment, or show Share again elsewhere. Also: choosing "keep sharing" doesn't undo an
+  earlier Share again (it doesn't need to, but it can't be undone in the window either).
 - "Stop it right away" (when a download is finished) stops downloads that are already finished
   and sharing too, the moment it is chosen. If people find that surprising, it could apply only
   to downloads that finish from then on.
