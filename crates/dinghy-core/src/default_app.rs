@@ -15,7 +15,9 @@
 //! silent take-over Windows forbids). [`unregister`] removes exactly these keys and values again.
 //! What the person chose in Default apps belongs to Windows; after undoing, Windows asks again.
 //!
-//! The portable copy can be moved, so [`status`] says which BitDinghy.exe is registered.
+//! The portable copy can be moved, so [`status`] says which BitDinghy.exe is registered, and
+//! [`opener`] says which program Windows really uses for each (it only reads; the person's choice
+//! in Default apps is Windows' own, kept under a protected `UserChoice` key).
 
 // Only Windows registers file types this way; elsewhere these parts are unused (Linux will use
 // a .desktop file with the port, see TODO.md).
@@ -30,6 +32,9 @@ use crate::error::Result;
 #[derive(Debug, Clone)]
 pub struct Place {
     base: String,
+    /// Also look in the whole computer's file types (`HKEY_CLASSES_ROOT`) when reading which
+    /// program opens something. Only the real place does; tests must not see the PC's own.
+    whole_computer: bool,
 }
 
 impl Place {
@@ -37,6 +42,7 @@ impl Place {
     pub fn real() -> Self {
         Self {
             base: "Software".to_string(),
+            whole_computer: true,
         }
     }
 
@@ -44,6 +50,7 @@ impl Place {
     pub fn for_tests(base: &str) -> Self {
         Self {
             base: base.to_string(),
+            whole_computer: false,
         }
     }
 
@@ -62,6 +69,75 @@ const APP_KEY: &str = "BitDinghy";
 pub enum Status {
     NotRegistered,
     Registered { exe: PathBuf },
+}
+
+/// The two kinds of thing BitDinghy can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    MagnetLinks,
+    TorrentFiles,
+}
+
+/// Which program Windows opens magnet links or `.torrent` files with, as chosen in Default apps
+/// (or with "Open with" and "Always").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opener {
+    /// Nothing chosen for this Windows user (Windows asks, or uses a computer-wide program).
+    NotChosen,
+    /// A BitDinghy.exe (`None`: Windows' entry for it doesn't say where it is).
+    BitDinghy { exe: Option<PathBuf> },
+    /// Another program, by its file name (`qbittorrent.exe`) or Windows' name for it.
+    Other { name: String },
+}
+
+/// Which program Windows opens `kind` with for this user. It only reads.
+pub fn opener(place: &Place, kind: Kind) -> Opener {
+    platform::opener(place, kind)
+}
+
+/// Where Windows keeps the person's choice for `kind`, under the place's base key.
+fn user_choice_key(kind: Kind) -> &'static str {
+    match kind {
+        Kind::MagnetLinks => {
+            r"Microsoft\Windows\Shell\Associations\UrlAssociations\magnet\UserChoice"
+        }
+        Kind::TorrentFiles => {
+            r"Microsoft\Windows\CurrentVersion\Explorer\FileExts\.torrent\UserChoice"
+        }
+    }
+}
+
+/// What a chosen program id (`BitDinghy.Magnet`, `Applications\BitDinghy.exe`, ...) and its open
+/// command (if one was found) mean.
+fn opener_from(progid: &str, command: Option<&str>) -> Opener {
+    let exe = command.and_then(exe_in_any_command);
+    let named = exe
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .or_else(|| progid.strip_prefix(r"Applications\").map(str::to_string));
+    let is_bitdinghy = progid == TORRENT_PROGID
+        || progid == MAGNET_PROGID
+        || named
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("BitDinghy.exe"));
+    if is_bitdinghy {
+        Opener::BitDinghy { exe }
+    } else {
+        Opener::Other {
+            name: named.unwrap_or_else(|| progid.to_string()),
+        }
+    }
+}
+
+/// The program in an open command, quoted (`"C:\x\a.exe" "%1"`) or not (`C:\x\a.exe %1`).
+fn exe_in_any_command(command: &str) -> Option<PathBuf> {
+    let command = command.trim();
+    if command.starts_with('"') {
+        return exe_in_command(command);
+    }
+    let end = command.to_ascii_lowercase().find(".exe")? + ".exe".len();
+    Some(PathBuf::from(&command[..end]))
 }
 
 /// Registers `exe` (BitDinghy.exe) as able to open `.torrent` files and magnet links.
@@ -113,14 +189,15 @@ mod platform {
 
     use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteKeyW, RegDeleteTreeW,
-        RegGetValueW, RegSetValueExW,
+        HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteKeyW,
+        RegDeleteTreeW, RegGetValueW, RegSetValueExW,
     };
     use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
     use super::{
-        APP_KEY, MAGNET_PROGID, Place, Status, TORRENT_PROGID, exe_in_command, open_command,
+        APP_KEY, Kind, MAGNET_PROGID, Opener, Place, Status, TORRENT_PROGID, exe_in_command,
+        open_command, opener_from, user_choice_key,
     };
     use crate::error::{Error, Result};
 
@@ -185,6 +262,11 @@ mod platform {
 
     /// Reads a text value (`None`: the key's own value) under `HKCU\<key>`.
     fn get(key: &str, name: Option<&str>) -> Option<String> {
+        get_in(HKEY_CURRENT_USER, key, name)
+    }
+
+    /// Reads a text value under `root\<key>`.
+    fn get_in(root: HKEY, key: &str, name: Option<&str>) -> Option<String> {
         let key_name = wide(key);
         let value_name = name.map(wide);
         let mut buffer = vec![0u16; 2048];
@@ -193,7 +275,7 @@ mod platform {
         // Windows writes at most that many.
         let status = unsafe {
             RegGetValueW(
-                HKEY_CURRENT_USER,
+                root,
                 key_name.as_ptr(),
                 value_name
                     .as_ref()
@@ -341,6 +423,22 @@ mod platform {
         }
     }
 
+    pub fn opener(place: &Place, kind: Kind) -> Opener {
+        let progid = get(&place.key(user_choice_key(kind)), Some("ProgId")).unwrap_or_default();
+        if progid.is_empty() {
+            return Opener::NotChosen;
+        }
+        let command_key = format!(r"{progid}\shell\open\command");
+        // The person's own file types first, then (real place only) the whole computer's.
+        let command = get(&place.key(&format!(r"Classes\{command_key}")), None).or_else(|| {
+            place
+                .whole_computer
+                .then(|| get_in(HKEY_CLASSES_ROOT, &command_key, None))
+                .flatten()
+        });
+        opener_from(&progid, command.as_deref())
+    }
+
     pub fn open_default_apps() {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -367,7 +465,7 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    use super::{Place, Status};
+    use super::{Kind, Opener, Place, Status};
     use crate::error::{Error, Result};
 
     fn not_here() -> Error {
@@ -384,6 +482,10 @@ mod platform {
 
     pub fn status(_place: &Place) -> Status {
         Status::NotRegistered
+    }
+
+    pub fn opener(_place: &Place, _kind: Kind) -> Opener {
+        Opener::NotChosen
     }
 
     pub fn open_default_apps() {}
@@ -410,6 +512,104 @@ mod tests {
         assert_eq!(command, r#""C:\Apps\BitDinghy\BitDinghy.exe" "%1""#);
         assert_eq!(exe_in_command(&command), Some(exe.to_path_buf()));
         assert_eq!(exe_in_command("no quotes"), None);
+    }
+
+    #[test]
+    fn the_chosen_program_is_recognised() {
+        let ours = Path::new(r"C:\cargo-target\debug\BitDinghy.exe").to_path_buf();
+        assert_eq!(
+            opener_from(
+                "BitDinghy.Magnet",
+                Some(r#""C:\cargo-target\debug\BitDinghy.exe" "%1""#)
+            ),
+            Opener::BitDinghy {
+                exe: Some(ours.clone())
+            }
+        );
+        // Chosen with "Open with": Windows' own entry, named after the program file.
+        assert_eq!(
+            opener_from(
+                r"Applications\BitDinghy.exe",
+                Some(r#""C:\cargo-target\debug\BitDinghy.exe" "%1""#)
+            ),
+            Opener::BitDinghy { exe: Some(ours) }
+        );
+        assert_eq!(
+            opener_from(r"Applications\bitdinghy.EXE", None),
+            Opener::BitDinghy { exe: None }
+        );
+        assert_eq!(
+            opener_from(
+                "qBittorrent.File.Torrent",
+                Some(r#""C:\Program Files\qBittorrent\qbittorrent.exe" "%1""#)
+            ),
+            Opener::Other {
+                name: "qbittorrent.exe".to_string()
+            }
+        );
+        // A Store app has no open command: Windows' own name for it is all there is.
+        assert_eq!(
+            opener_from("AppXabc123", None),
+            Opener::Other {
+                name: "AppXabc123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_program_is_found_in_quoted_and_unquoted_commands() {
+        assert_eq!(
+            exe_in_any_command(r"C:\Tools\Old.EXE %1"),
+            Some(PathBuf::from(r"C:\Tools\Old.EXE"))
+        );
+        assert_eq!(
+            exe_in_any_command(r#""C:\A B\x.exe" "%1""#),
+            Some(PathBuf::from(r"C:\A B\x.exe"))
+        );
+        assert_eq!(exe_in_any_command("rundll32 something"), None);
+    }
+
+    /// Writes a pretend "UserChoice" under a key of its own (the real one is never touched) and
+    /// reads it back like Windows' own.
+    #[cfg(windows)]
+    #[test]
+    fn what_windows_opens_is_read_from_its_user_choice() {
+        let base = format!(
+            "Software\\BitDinghy-test-choice-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let place = Place::for_tests(&base);
+        assert_eq!(opener(&place, Kind::MagnetLinks), Opener::NotChosen);
+        let exe = Path::new(r"C:\Apps\BitDinghy\BitDinghy.exe");
+        register(&place, exe).unwrap();
+        let reg_add = |key: &str, value: &str| {
+            let done = std::process::Command::new("reg")
+                .args(["add", &format!("HKCU\\{base}\\{key}"), "/v", "ProgId"])
+                .args(["/d", value, "/f"])
+                .output()
+                .unwrap();
+            assert!(done.status.success(), "{done:?}");
+        };
+        reg_add(user_choice_key(Kind::MagnetLinks), MAGNET_PROGID);
+        reg_add(user_choice_key(Kind::TorrentFiles), "Some.Other.Program");
+        assert_eq!(
+            opener(&place, Kind::MagnetLinks),
+            Opener::BitDinghy {
+                exe: Some(exe.to_path_buf())
+            }
+        );
+        assert_eq!(
+            opener(&place, Kind::TorrentFiles),
+            Opener::Other {
+                name: "Some.Other.Program".to_string()
+            }
+        );
+        let _ = std::process::Command::new("reg")
+            .args(["delete", &format!("HKCU\\{base}"), "/f"])
+            .output();
     }
 
     /// Uses a key of its own under HKEY_CURRENT_USER and deletes it, so the real registration

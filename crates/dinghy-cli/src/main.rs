@@ -12,6 +12,7 @@ use dinghy_core::display::{
     format_bytes, format_eta, format_speed, fraction, history_line, ratio_text, waiting_text,
 };
 use dinghy_core::input::{self, Input};
+use dinghy_core::settings::WhenFinished;
 use dinghy_core::{
     AddOptions, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile, SavedDownload,
     SavedList, file_choice, owned_files, remote, torrent_file, web_link,
@@ -178,6 +179,9 @@ enum SettingKey {
     ListenPort,
     /// Ask the router to forward the port (UPnP): "on" or "off" (used at the next start)
     Upnp,
+    /// When a download is finished: "keep-sharing" (standard), "stop" (right away), or
+    /// "stop-after-check" (once "dinghy check" finds it complete)
+    WhenFinished,
 }
 
 #[derive(Args)]
@@ -288,6 +292,16 @@ fn show_settings(profile: &Profile) {
             "on  (plain http:// links to .torrent files are opened too)"
         } else {
             "off  (only secure https:// links)"
+        }
+    );
+    println!(
+        "when-finished:  {}",
+        match profile.settings().when_finished {
+            WhenFinished::KeepSharing => "keep-sharing  (finished downloads share with others)",
+            WhenFinished::StopRightAway => "stop  (a finished download stops right away)",
+            WhenFinished::StopAfterCheck => {
+                "stop-after-check  (a download stops once \"check\" finds it complete)"
+            }
         }
     );
     println!(
@@ -418,6 +432,13 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        SettingKey::WhenFinished => match WhenFinished::from_word(&value) {
+            Some(choice) => profile.set_when_finished(choice),
+            None => {
+                eprintln!("when-finished is \"keep-sharing\", \"stop\" or \"stop-after-check\".");
+                return ExitCode::FAILURE;
+            }
+        },
         SettingKey::MaxActiveDownloads => match value.trim().parse::<u32>() {
             Ok(limit) => profile.set_max_active_downloads(limit),
             Err(_) => {
@@ -508,6 +529,9 @@ async fn settings(args: SettingsArgs) -> ExitCode {
                 | SettingKey::Upnp => None,
                 SettingKey::AllowHttpLinks => Some(remote::Command::SetAllowHttpLinks {
                     allow: profile.settings().allow_http_links,
+                }),
+                SettingKey::WhenFinished => Some(remote::Command::SetWhenFinished {
+                    choice: profile.settings().when_finished,
                 }),
                 SettingKey::MaxActiveDownloads => Some(remote::Command::SetMaxActiveDownloads {
                     limit: profile.settings().max_active_downloads as usize,

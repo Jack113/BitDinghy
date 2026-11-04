@@ -103,7 +103,7 @@ pub fn sharing_text(download: &crate::DownloadSnapshot) -> String {
         )))
     );
     if download.sharing_stopped {
-        format!("Stopped sharing: it reached the sharing limit ({shared}). Resume shares it again.")
+        format!("Stopped sharing, as chosen in Settings ({shared}). Resume shares it again.")
     } else {
         format!(
             "Sharing back to {} people ({shared}). Closing BitDinghy stops sharing.",

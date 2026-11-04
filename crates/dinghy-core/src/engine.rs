@@ -48,7 +48,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -72,6 +72,7 @@ use crate::plain;
 use crate::recommend::{self, Fastest};
 use crate::safety::{self, Platform};
 use crate::saved_list::{DayTotal, HistoryEntry, SavedDownload, SavedList, Sharing};
+use crate::settings::WhenFinished;
 use crate::torrent_file::{self, CheckedTorrent};
 use crate::web_link;
 
@@ -117,6 +118,9 @@ pub struct EngineConfig {
     /// The address to listen on. Every network (the standard); tests use this computer only, so
     /// no firewall question pops up while they run.
     pub listen_ip: IpAddr,
+    /// What happens when a download is finished: keep sharing, stop right away, or stop once
+    /// "Check files" finds it complete (the setting).
+    pub when_finished: WhenFinished,
 }
 
 impl EngineConfig {
@@ -138,6 +142,7 @@ impl EngineConfig {
             listen_port: 0,
             upnp: false,
             listen_ip: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            when_finished: WhenFinished::KeepSharing,
         }
     }
 }
@@ -442,6 +447,8 @@ struct Shared {
     speeds: Mutex<VecDeque<(u64, u64)>>,
     /// The fastest 10-second averages seen (M15), as remembered in the saved list.
     fastest: Mutex<Fastest>,
+    /// What happens when a download is finished (the setting), as [`WhenFinished`]'s number.
+    when_finished: AtomicU8,
 }
 
 /// How many seconds a speed is averaged over before it counts as "seen".
@@ -508,7 +515,25 @@ impl Shared {
                     {
                         if entry.check_requested.swap(false, Ordering::SeqCst) {
                             let check_only = entry.check_only.load(Ordering::SeqCst);
-                            *lock(&entry.note) = Some(check_note(&handle, check_only));
+                            let (mut note, damaged) = check_note(&handle, check_only);
+                            // The setting "pause after Check files": complete and correct, so it
+                            // is paused like the Pause button does (it stays paused after a
+                            // restart too, until the person resumes it).
+                            if !check_only
+                                && !damaged
+                                && !handle.is_paused()
+                                && shared.when_finished() == WhenFinished::StopAfterCheck
+                            {
+                                entry.wants_pause.store(true, Ordering::SeqCst);
+                                shared.with_list(|list| list.set_paused(&entry.info_hash, true));
+                                entry.held.store(false, Ordering::SeqCst);
+                                if shared.session.pause(&handle).await.is_ok() || handle.is_paused()
+                                {
+                                    note.push_str(PAUSED_AFTER_CHECK);
+                                }
+                                shared.rebalance();
+                            }
+                            *lock(&entry.note) = Some((note, damaged));
                         }
                         let _ = tokio::task::spawn_blocking(move || mark_leftovers(&entry)).await;
                     }
@@ -642,9 +667,20 @@ impl Shared {
 
     /// Counts uploads and sharing time (once a second, `elapsed` since the last time), and applies
     /// the sharing limits (see the module notes).
+    /// The "when a download is finished" setting.
+    fn when_finished(&self) -> WhenFinished {
+        match self.when_finished.load(Ordering::SeqCst) {
+            1 => WhenFinished::StopRightAway,
+            2 => WhenFinished::StopAfterCheck,
+            _ => WhenFinished::KeepSharing,
+        }
+    }
+
     fn account(self: &Arc<Self>, elapsed: Duration) {
         let ratio_percent = u64::from(self.sharing_ratio_percent.load(Ordering::SeqCst));
         let minutes = u64::from(self.sharing_minutes.load(Ordering::SeqCst));
+        // "Stop right away" works like a sharing limit reached at once.
+        let stop_right_away = self.when_finished() == WhenFinished::StopRightAway;
         let entries = lock(&self.entries).clone();
         let (mut downloaded, mut uploaded) = (0u64, 0u64);
         let (mut download_speed, mut upload_speed) = (0u64, 0u64);
@@ -702,7 +738,8 @@ impl Shared {
                 counts.unsaved = true;
             }
 
-            let reached = sharing_limit_reached(&counts, stats.total_bytes, ratio_percent, minutes);
+            let reached = stop_right_away
+                || sharing_limit_reached(&counts, stats.total_bytes, ratio_percent, minutes);
             match counts.sharing {
                 Sharing::AsUsual if reached && sharing_now => {
                     counts.sharing = Sharing::StoppedByLimit;
@@ -971,6 +1008,7 @@ impl Engine {
             }),
             speeds: Mutex::new(VecDeque::with_capacity(SPEED_HISTORY_SECONDS)),
             fastest: Mutex::new(Fastest::default()),
+            when_finished: AtomicU8::new(config.when_finished as u8),
         });
         // What earlier runs learned.
         let learned = |name| shared.with_list(|list| list.learned(name)).flatten();
@@ -1248,6 +1286,15 @@ impl Engine {
 
     pub fn set_allow_http_links(&self, allow: bool) {
         self.allow_http_links.store(allow, Ordering::SeqCst);
+    }
+
+    /// Changes what happens when a download is finished, from now on. Downloads already
+    /// finished follow it too: "stop right away" stops them, and going back to "keep sharing"
+    /// lets the ones it stopped share again (like changing a sharing limit).
+    pub fn set_when_finished(&self, choice: WhenFinished) {
+        self.shared
+            .when_finished
+            .store(choice as u8, Ordering::SeqCst);
     }
 
     /// Adds a `.torrent` file that has already been checked and rebuilt (`torrent_file.rs`).
@@ -1919,6 +1966,10 @@ fn port_in_use(ip: IpAddr, port: u16) -> Option<String> {
             .map(|error| error.to_string())
     })
 }
+
+/// Added to the check's note when the setting paused the download.
+pub const PAUSED_AFTER_CHECK: &str =
+    " Paused, as chosen in Settings (resume it to share it again).";
 
 /// What a finished check found, in plain words, and whether something is missing or damaged.
 /// `check_only`: checked by `dinghy check` with the window closed (it is paused only for the check).

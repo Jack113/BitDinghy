@@ -77,6 +77,114 @@ pub struct Settings {
     /// Off unless turned on: BitDinghy doesn't change the router unless asked.
     #[serde(skip_serializing_if = "is_false")]
     pub upnp: bool,
+    /// The window's colours (added with the redesigned window): dark (the standard), light, or
+    /// like Windows' own light/dark choice.
+    #[serde(skip_serializing_if = "Look::is_standard")]
+    pub look: Look,
+    /// Whether the window has already asked once to open magnet links and `.torrent` files with
+    /// BitDinghy (added with the redesigned window). Either answer stops the question.
+    #[serde(skip_serializing_if = "is_false")]
+    pub asked_about_default_app: bool,
+    /// What happens when a download is finished (added with the redesigned window): keep sharing
+    /// it (the standard), stop right away, or stop once "Check files" finds it complete.
+    #[serde(skip_serializing_if = "WhenFinished::is_standard")]
+    pub when_finished: WhenFinished,
+}
+
+/// What happens when a download is finished (every piece is checked as it arrives, so a finished
+/// download is a verified one).
+///
+/// Saved as a word, like [`Look`]; a word this version doesn't know reads as the standard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum WhenFinished {
+    /// It shares with others while BitDinghy runs (until a sharing limit, if one is set).
+    #[default]
+    KeepSharing,
+    /// It stops (is paused) as soon as it is finished.
+    StopRightAway,
+    /// It keeps sharing, but stops once "Check files" finds every chosen file complete.
+    StopAfterCheck,
+}
+
+impl WhenFinished {
+    fn is_standard(&self) -> bool {
+        *self == WhenFinished::KeepSharing
+    }
+
+    /// The word used in the settings file and by `dinghy settings set when-finished`.
+    pub fn word(self) -> &'static str {
+        match self {
+            WhenFinished::KeepSharing => "keep-sharing",
+            WhenFinished::StopRightAway => "stop",
+            WhenFinished::StopAfterCheck => "stop-after-check",
+        }
+    }
+
+    /// The choice for a word, if it is one of the three.
+    pub fn from_word(word: &str) -> Option<WhenFinished> {
+        [
+            WhenFinished::KeepSharing,
+            WhenFinished::StopRightAway,
+            WhenFinished::StopAfterCheck,
+        ]
+        .into_iter()
+        .find(|choice| choice.word() == word.trim().to_ascii_lowercase())
+    }
+}
+
+impl From<String> for WhenFinished {
+    fn from(word: String) -> Self {
+        WhenFinished::from_word(&word).unwrap_or_default()
+    }
+}
+
+impl From<WhenFinished> for String {
+    fn from(choice: WhenFinished) -> Self {
+        choice.word().to_string()
+    }
+}
+
+/// The window's colours.
+///
+/// Saved as a word (`"light"`, `"like-windows"`). A word this version doesn't know (written by a
+/// newer BitDinghy) reads as the standard dark look instead of making the whole file unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Look {
+    /// The brand's main look, and the standard.
+    #[default]
+    Dark,
+    Light,
+    /// Follows Windows' own light/dark setting.
+    LikeWindows,
+}
+
+impl Look {
+    fn is_standard(&self) -> bool {
+        *self == Look::Dark
+    }
+}
+
+impl From<String> for Look {
+    fn from(word: String) -> Self {
+        match word.as_str() {
+            "light" => Look::Light,
+            "like-windows" => Look::LikeWindows,
+            _ => Look::Dark,
+        }
+    }
+}
+
+impl From<Look> for String {
+    fn from(look: Look) -> Self {
+        match look {
+            Look::Dark => "dark",
+            Look::Light => "light",
+            Look::LikeWindows => "like-windows",
+        }
+        .to_string()
+    }
 }
 
 /// The lowest port that can be chosen (lower ones belong to well-known services).
@@ -135,6 +243,9 @@ impl Default for Settings {
             accept_incoming: true,
             listen_port: 0,
             upnp: false,
+            look: Look::Dark,
+            asked_about_default_app: false,
+            when_finished: WhenFinished::KeepSharing,
         }
     }
 }
@@ -560,6 +671,77 @@ mod tests {
         store.save(&Settings::default()).unwrap();
         let text = std::fs::read_to_string(store.path()).unwrap();
         assert!(!text.contains("allow_http_links"), "{text}");
+    }
+
+    #[test]
+    fn the_window_colours_and_the_asked_once_flag_are_remembered() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        let loaded = store.load().settings;
+        assert_eq!(loaded.look, Look::Dark, "dark is the standard");
+        assert!(!loaded.asked_about_default_app);
+        for look in [Look::Light, Look::LikeWindows, Look::Dark] {
+            let settings = Settings {
+                look,
+                asked_about_default_app: true,
+                ..Settings::default()
+            };
+            store.save(&settings).unwrap();
+            let loaded = store.load().settings;
+            assert_eq!(loaded.look, look);
+            assert!(loaded.asked_about_default_app);
+        }
+        // The standards aren't written down.
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!text.contains("look"), "{text}");
+        assert!(!text.contains("asked_about"), "{text}");
+    }
+
+    #[test]
+    fn what_happens_when_finished_is_remembered_and_keep_sharing_is_the_standard() {
+        let work = tempfile::tempdir().unwrap();
+        let store = store_in(work.path());
+        assert_eq!(
+            store.load().settings.when_finished,
+            WhenFinished::KeepSharing
+        );
+        for choice in [WhenFinished::StopRightAway, WhenFinished::StopAfterCheck] {
+            let settings = Settings {
+                when_finished: choice,
+                ..Settings::default()
+            };
+            store.save(&settings).unwrap();
+            assert_eq!(store.load().settings.when_finished, choice);
+            assert_eq!(WhenFinished::from_word(choice.word()), Some(choice));
+        }
+        assert_eq!(
+            WhenFinished::from_word(" STOP "),
+            Some(WhenFinished::StopRightAway)
+        );
+        assert_eq!(WhenFinished::from_word("sometimes"), None);
+        store.save(&Settings::default()).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!text.contains("when_finished"), "{text}");
+        // A word from a newer version: the standard, and the file still loads.
+        std::fs::write(store.path(), "version = 1\nwhen_finished = \"later\"\n").unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.problem, None);
+        assert_eq!(loaded.settings.when_finished, WhenFinished::KeepSharing);
+    }
+
+    #[test]
+    fn a_look_from_a_newer_version_reads_as_dark_and_keeps_the_other_settings() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(
+            work.path().join(FILE_NAME),
+            "version = 1\nlook = \"purple-stripes\"\nupnp = true\n",
+        )
+        .unwrap();
+        let loaded = store_in(work.path()).load();
+        assert_eq!(loaded.problem, None);
+        assert_eq!(loaded.settings.look, Look::Dark);
+        assert!(loaded.settings.upnp);
     }
 
     #[test]

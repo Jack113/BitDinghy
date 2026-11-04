@@ -103,6 +103,10 @@ pub enum Command {
     SetAllowHttpLinks {
         allow: bool,
     },
+    /// Change what happens when a download is finished, for this run (the CLI saves the setting).
+    SetWhenFinished {
+        choice: crate::settings::WhenFinished,
+    },
     /// A link another program asked BitDinghy to open (a browser or Explorer started a second
     /// BitDinghy.exe with it): the window asks the person before adding it.
     Offer {
@@ -446,6 +450,12 @@ async fn answer_or_problem(
         }
         Command::SetAllowHttpLinks { allow } => {
             engine.set_allow_http_links(allow);
+            Reply::Changed {
+                name: String::new(),
+            }
+        }
+        Command::SetWhenFinished { choice } => {
+            engine.set_when_finished(choice);
             Reply::Changed {
                 name: String::new(),
             }

@@ -98,6 +98,7 @@ impl Profile {
             .map(|data_dir| data_dir.file(DHT_STATE_FILE));
         config.saved_list_file = self.saved_list_path();
         config.allow_http_links = self.settings.allow_http_links;
+        config.when_finished = self.settings.when_finished;
         config.max_active_downloads = self.settings.max_active_downloads as usize;
         config.download_limit_kib = self.settings.download_limit_kib;
         config.upload_limit_kib = self.settings.upload_limit_kib;
@@ -129,6 +130,21 @@ impl Profile {
     /// Remembers whether plain `http://` links to `.torrent` files may be opened too.
     pub fn set_allow_http_links(&mut self, allow: bool) -> Result<()> {
         self.change(|settings| settings.allow_http_links = allow)
+    }
+
+    /// Remembers what happens when a download is finished.
+    pub fn set_when_finished(&mut self, choice: crate::settings::WhenFinished) -> Result<()> {
+        self.change(|settings| settings.when_finished = choice)
+    }
+
+    /// Remembers the window's colours.
+    pub fn set_look(&mut self, look: crate::settings::Look) -> Result<()> {
+        self.change(|settings| settings.look = look)
+    }
+
+    /// Remembers that the window has asked once about opening links with BitDinghy.
+    pub fn set_asked_about_default_app(&mut self) -> Result<()> {
+        self.change(|settings| settings.asked_about_default_app = true)
     }
 
     /// Remembers how many downloads run at the same time (0: no limit).

@@ -22,6 +22,10 @@ png.workspace = true
 rfd.workspace = true
 egui_plot.workspace = true
 
+# Windows only: reads whether Windows' "Show animations" is on (the logo stays still if not).
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [build-dependencies]
 winresource.workspace = true
 

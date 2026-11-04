@@ -364,7 +364,7 @@ finishes, and the torrent is taken straight back out.
   shuts down.
 - When a limit is reached the download is paused in librqbit and marked `StoppedByLimit`: the
   queue doesn't wake it, it starts paused after a restart, and it shows as Finished with
-  "Stopped sharing: it reached the sharing limit (...)". **Resume** ("Share again" in the window)
+  "Stopped sharing, as chosen in Settings (...)". **Resume** ("Share again" in the window)
   marks it `KeepSharing`: limits no longer apply to it. If the limits are raised or turned off,
   downloads they stopped share again within a second.
 - These totals are the start of the history in M14.
@@ -471,6 +471,30 @@ finishes, and the torrent is taken straight back out.
   magnet link, so this check matters. Offered links are checked like typed ones first.
 - `dinghy default-app on|off|status` does the same from the command line (it registers the
   BitDinghy.exe next to dinghy.exe).
+- Since the redesigned window, `opener(place, kind)` also **reads** which program Windows really
+  opens magnet links and `.torrent` files with: the person's choice under `UserChoice` (Windows
+  protects it, so BitDinghy only reads it), then that program id's open command (the person's own
+  file types, then the whole computer's). `Applications\BitDinghy.exe` (chosen with "Open with")
+  counts as BitDinghy too. Settings shows one line for each, and at the first start the window
+  asks once "Open magnet links and .torrent files with BitDinghy?" unless this copy already opens
+  both (`asked_about_default_app` remembers the answer). Tests write a pretend `UserChoice` under
+  a key of their own.
+
+## The redesigned window (after v0.1.0)
+
+- `main.rs` draws a sidebar (`egui::Panel::left`) and one page at a time (`Page::Downloads`,
+  `History`, `Settings`) in the central panel; notices (crash report, problems, the default-app
+  question, offers) sit above whichever page is open. The building blocks are in `widgets.rs`,
+  the colors, fonts (Inter) and text sizes in `brand.rs`, the moving logo in `logo.rs` (still
+  pictures moved by code, at about 30 frames a second, only while something downloads). Nothing
+  in `dinghy-core` changed for the layout itself.
+- Settings `look` (dark, light, like Windows) and `when_finished` are new. **When a download is
+  finished:** `KeepSharing` (the standard); `StopRightAway` works like a sharing limit reached at
+  once (`Shared::account`: paused and `StoppedByLimit`, so "Share again" and going back to keep
+  sharing behave exactly like the M10 limits); `StopAfterCheck` pauses a running download, like
+  the Pause button, when a "Check files" finds every chosen file complete, and the check's note
+  says so. The window and `dinghy settings set when-finished` change it while running
+  (`Engine::set_when_finished`, channel `SetWhenFinished`).
 
 ## Encryption (M17): not yet
 
@@ -519,3 +543,4 @@ an honest note (`dinghy_core::ENCRYPTION_NOTE`) in the window's Settings and in 
 | M16 | Opening links and files from other programs |
 | M17 | Encryption: an honest note until librqbit has it |
 | M18 | Release preparation (version 0.1.0, workflow, notices) |
+| After 0.1.0 | The redesigned window, light colors, "when a download is finished" |

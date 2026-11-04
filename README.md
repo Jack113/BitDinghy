@@ -60,6 +60,9 @@ With the window open, `dinghy` adds to and controls the window's list.
 - **Check files** on disk again, and **use files that are already there**.
 - A **queue**, **speed limits**, **sharing limits** (ratio or time), a **port** setting and
   optional **UPnP**.
+- **When a download is finished:** keep sharing it (the standard), stop it right away, or stop
+  it once **Check files** finds it complete.
+- **Dark or light** colors, or like Windows.
 - **Recommended settings** learned from your own downloads (it doesn't run speed tests).
 - **History**: speeds of the last ten minutes, daily totals for 30 days, removed downloads.
 - **Problems in plain language** (a full disk, a file another program holds, a FAT32 drive...).

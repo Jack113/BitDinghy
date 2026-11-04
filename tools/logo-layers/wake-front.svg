@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 60 750 370" width="300" height="148">
+<!-- The front wave. The window rolls it 8 right and 2 down and back every 2 s. -->
+<defs><linearGradient id="sail" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#B6FFC7"/><stop offset=".55" stop-color="#7BFF3A"/><stop offset="1" stop-color="#57F000"/></linearGradient><linearGradient id="hull" x1="0" y1=".2" x2="1" y2="1"><stop stop-color="#7BFF3A"/><stop offset=".5" stop-color="#57F000"/><stop offset="1" stop-color="#1F8F46"/></linearGradient><linearGradient id="wake" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#38C7A3" stop-opacity=".15"/><stop offset=".45" stop-color="#38C7A3"/><stop offset=".83" stop-color="#B6FFC7"/></linearGradient><linearGradient id="trail" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#1F8F46" stop-opacity="0"/><stop offset=".7" stop-color="#57F000" stop-opacity=".7"/><stop offset="1" stop-color="#7BFF3A"/></linearGradient></defs>
+<path d="M141 369 C202 367 252 400 319 381 C378 370 412 413 506 400 C415 425 363 390 319 398 C246 413 180 383 141 369 Z" fill="#38C7A3" opacity=".87"/>
+</svg>

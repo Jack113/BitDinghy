@@ -3,6 +3,136 @@
 One section per feature, newest first. Only use content you are allowed to download. The links
 below are official, openly licensed Linux downloads.
 
+## The redesigned window (after v0.1.0)
+
+Data-free: the test torrent is one nobody shares, and its made-up files are already on your PC.
+It also makes a **release copy** in a folder that stays put and makes that copy the program
+Windows opens magnet links and `.torrent` files with (your choice, 2026-11-04). That copy has its
+own `data` folder, so its download list starts empty; the development copy keeps yours.
+
+**Step 0: get ready**
+1. In the repo folder: `cargo build --release --bins` (it takes several minutes).
+2. Make the folder `C:\Apps\BitDinghy` (or another folder you will keep) and copy
+   `BitDinghy.exe` and `dinghy.exe` from `C:\cargo-target\release` into it.
+3. `cargo run -p dinghy-core --example make_test_torrent` (makes the test torrent and its files
+   in `%TEMP%\bitdinghy-m6-test`).
+4. Point the new copy's download folder at those files:
+   `C:\Apps\BitDinghy\dinghy.exe settings set download-dir "$env:TEMP\bitdinghy-m6-test"`
+
+**Test 1: the new look, and the one-time question**
+- Do: start `C:\Apps\BitDinghy\BitDinghy.exe`.
+- You should see: a sidebar on the left with the logo (the boat stands still), **Downloads**
+  (chosen, in green), **History** and **Settings**, and at the bottom `↓ 0 B/s`, `↑ 0 B/s`,
+  "No speed limits" and "Version 0.1.0". Above the page, a card with a teal stripe: "Open magnet
+  links and .torrent files with BitDinghy?" with **Yes** and **Not now**. (It asks because
+  Windows still opens them with the development copy.) Don't answer yet.
+
+**Test 2: what Windows opens links with**
+- Do: click **Settings** in the sidebar and scroll to **Magnet links and .torrent files**.
+- You should see: two orange lines, "Magnet links open in another copy of BitDinghy:
+  C:\cargo-target\debug\BitDinghy.exe" and the same for ".torrent files".
+
+**Test 3: Yes**
+- Do: press **Yes** on the question card.
+- You should see: the card is replaced by "Registered. Windows' Default apps is open: choose
+  BitDinghy for .torrent and for MAGNET there." with **OK**, and Windows' Default apps opens.
+  The Magnet links line now turns green ("Magnet links open in this BitDinghy."), because
+  Windows already had BitDinghy chosen for magnet links.
+- Then in Default apps: "Choose default apps by file type" > `.torrent` > pick **BitDinghy**,
+  and check that "Choose default apps by protocol" > **MAGNET** shows BitDinghy. If two
+  BitDinghy entries are offered for `.torrent`, pick one and look at BitDinghy's Settings line: if
+  it still says "another copy", pick the other one.
+- You should see: back in BitDinghy's Settings, both lines green: "... open in this BitDinghy."
+  Close BitDinghy and start it again: no question this time.
+
+**Test 4: a download card, and the boat sails**
+- Do: on **Downloads**, drag `%TEMP%\bitdinghy-m6-test\queue-1.torrent` onto the window.
+- You should see: a card "Queue test 1" with a teal **Downloading** badge, an empty bar at 0.0%,
+  "... 0 people connected ..." (nobody shares it, so nothing is downloaded), and on the right
+  **Files**, **Check files**, **Pause**, **Remove**. The boat in the logo now rocks and bobs and
+  the digits blow towards the sail; the sidebar's Downloads shows 1.
+- Do: press **Pause**.
+- You should see: a gray **Paused** badge, the button says **Resume**, and the boat stops where
+  it was (no jump).
+- Do: **Remove** > **Keep the files**.
+
+**Test 5: finishing from files already there**
+- Do: drag `%TEMP%\bitdinghy-m6-test\bitdinghy-m6-test.torrent` onto the window.
+- You should see: a card "BitDinghy M6 test" with a red **Problem** badge, the message that a
+  file with the same name is already there, and **Use the files already there** next to
+  **Remove**.
+- Do: press **Use the files already there**.
+- You should see: a teal **Checking** badge for a moment, then a full green bar, 100.0%, a green
+  "Finished: ..." line and a green **Finished, sharing** badge.
+
+**Test 6: History and the groups in Settings**
+- Do: click **History**, then **Settings**.
+- You should see: History has four tiles (Today, downloaded / uploaded; 30 days, downloaded /
+  uploaded), the speed chart and the daily chart, and "Removed downloads". Settings shows cards:
+  Downloads, Speed, Sharing, Connections, Magnet links and .torrent files, Look, About.
+
+**Test 7: light colors**
+- Do: Settings > **Look** > **Light**, then **Like Windows**, then **Dark**.
+- You should see: the whole window turns light at once (white cards, dark text, the progress bar
+  still visible), then follows Windows' own setting, then is dark again. Each time, a teal line
+  at the bottom: "Saved: the new colors are used from now on."
+
+**Test 8: stop once "Check files" finds it complete**
+- Do: Settings > **Sharing** > choose "Stop it once "Check files" finds it complete and correct".
+  Go to **Downloads** and press **Check files** on the test download.
+- You should see: after a moment the badge says **Paused**, and a teal note "Checked: every
+  chosen file is complete and correct. Paused, as chosen in Settings (resume it to share it
+  again)." The button now says **Resume**.
+
+**Test 9: stop right away**
+- Do: Settings > Sharing > **Stop it right away**. On Downloads, press **Resume**.
+- You should see: within a second or two the badge says **Finished** and the line under it
+  starts with "Stopped sharing, as chosen in Settings"; the button says **Share again**.
+- Do: Settings > Sharing > **Keep sharing it with others while BitDinghy runs (the standard)**.
+- You should see: on Downloads, within a second or two the badge says **Finished, sharing** again.
+
+**Test 10: the same setting from the command line**
+- Do: `C:\Apps\BitDinghy\dinghy.exe settings`
+- You should see: a line `when-finished:  keep-sharing  (finished downloads share with others)`.
+- Do: `C:\Apps\BitDinghy\dinghy.exe settings set when-finished sometimes`
+- You should see: `when-finished is "keep-sharing", "stop" or "stop-after-check".`
+
+**Test 11: the folder buttons and the Support link**
+- Do: on Downloads press **Open folder**; in Settings > About press **Open data folder**, then
+  click **Support BitDinghy**.
+- You should see: Explorer opens the test folder, then `C:\Apps\BitDinghy\data`; your browser
+  opens bitdinghy.com/support/.
+
+**Test 12 (optional): less motion**
+- Do: drag `queue-1.torrent` onto the window again (the boat sails). Then Windows Settings > Ease
+  of Access (Windows 11: Accessibility) > Display > turn off **Show animations in Windows**.
+- You should see: the boat stops. Turn the Windows setting back on: it sails again. Remove
+  "Queue test 1" with **Keep the files**.
+
+**Last step: tidy up**
+- Do: on Downloads, **Remove** the test download with **Keep the files**. In Settings >
+  Downloads, press **Use the standard folder** (from the next start, downloads go to your normal
+  Downloads\BitDinghy folder). `C:\Apps\BitDinghy` stays: it is now the copy Windows opens links
+  with. The development copy (`C:\cargo-target\debug`) asks the same question once, the next time
+  it starts, because links now open in the other copy: press **Not now** there.
+
+### Results
+
+| Test | Result |
+|---|---|
+| 1. The new look, and the one-time question | |
+| 2. What Windows opens links with | |
+| 3. Yes | |
+| 4. A download card, and the boat sails | |
+| 5. Finishing from files already there | |
+| 6. History and the groups in Settings | |
+| 7. Light colors | |
+| 8. Stop once "Check files" finds it complete | |
+| 9. Stop right away | |
+| 10. The same setting from the command line | |
+| 11. The folder buttons and the Support link | |
+| 12. Less motion (optional) | |
+
 ## M18: the release build
 
 Data-free. This checks what a person downloading BitDinghy would get.

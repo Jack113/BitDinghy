@@ -15,6 +15,9 @@ project is built **one feature at a time**.
   bringing them back means choosing: follow the system, a Settings choice, or stay dark.
   **Decided 2026-11-01: v0.1.0 ships dark only**; the light theme is for a later version (it's on
   the website's roadmap). Update `docs/BRAND.md`, `CLAUDE.md` and the website wording then.
+  **Done with the redesigned window (branch `ui-redesign`):** Settings > Look offers Dark (the
+  standard), Light and Like Windows. Still to do once it is released: the website's roadmap and
+  screenshots.
 
 ## Found in the big guided test (2026-10-11 to 2026-10-14)
 - librqbit can take many seconds to pause a busy download (26 s measured at 200 KiB/s; usually
@@ -92,7 +95,15 @@ project is built **one feature at a time**.
   engine and the saved list get reworked.
 - No folder-picker button yet: the folder is typed. A native dialog (`rfd`) is the way, but its
   Linux back end needs GTK or a portal, so decide with the Linux port.
-- The Inter font from the brand sheet: no font file in the pack, so egui's built-in font is used.
+- Done (redesigned window): the Inter font from the brand sheet is used (Regular and SemiBold).
+- The moving logo's digits are tiny at sidebar size (as on the website's header). If people
+  notice nothing moving, they could be drawn bigger than the website's.
+- A setting changed with `dinghy settings set` while the window is open reaches the engine at
+  once, but the window's Settings page keeps showing the old value until the next start (it
+  doesn't re-read `settings.toml`). Older than the redesign; found while writing its guided test.
+- "Stop it right away" (when a download is finished) stops downloads that are already finished
+  and sharing too, the moment it is chosen. If people find that surprising, it could apply only
+  to downloads that finish from then on.
 - Linux AppImage: the program sits inside a read-only image, so the portable data folder must be
   placed next to the `.AppImage` file itself (use the `APPIMAGE` environment variable), not next to
   the program inside it.

@@ -5,22 +5,26 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod brand;
+mod logo;
+mod widgets;
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dinghy_core::default_app::{self, Kind, Opener};
 use dinghy_core::display::{
     format_bytes, format_eta, format_speed, fraction, history_line, sharing_text, waiting_text,
 };
 use dinghy_core::input::{self, Input};
-use dinghy_core::settings::{MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB};
+use dinghy_core::settings::{Look, MAX_ACTIVE_DOWNLOADS_LIMIT, MAX_SPEED_LIMIT_KIB, WhenFinished};
 use dinghy_core::{
     DayTotal, DownloadId, DownloadSnapshot, DownloadStatus, Engine, FileChoice, Move, Profile,
     days, remote,
 };
 use eframe::egui;
+use widgets::{Tone, banner, button, card, card_title, primary_button, quiet_button, spinner};
 
 /// The brand's error color for the current theme (light or dark), so it stays readable on both
 /// backgrounds.
@@ -33,20 +37,9 @@ fn warning_color(ui: &egui::Ui) -> egui::Color32 {
     brand::palette(ui.ctx().theme()).warning
 }
 
-/// Green: something finished successfully.
-fn success_color(ui: &egui::Ui) -> egui::Color32 {
-    brand::palette(ui.ctx().theme()).success
-}
-
 /// Teal: something is in progress.
 fn info_color(ui: &egui::Ui) -> egui::Color32 {
     brand::palette(ui.ctx().theme()).info
-}
-
-/// The "busy" spinner, in the teal of the line beside it. Not `ui.spinner()`: egui paints that in
-/// the pressed-button color, which the brand makes dark navy, so it vanished on the background.
-fn spinner(ui: &mut egui::Ui) {
-    ui.add(egui::Spinner::new().color(info_color(ui)));
 }
 
 /// A speed-limit number box (KiB/s). Returns whether the person has finished changing it (not in
@@ -60,114 +53,161 @@ fn limit_box(ui: &mut egui::Ui, kib: &mut u32) -> bool {
     !editing.dragged() && !editing.has_focus()
 }
 
-/// The history (M14): speeds of the last ten minutes, the last 30 days' totals, and downloads
-/// that were removed. Folded away until opened.
-fn draw_history(ui: &mut egui::Ui, engine: &Engine) {
-    egui::CollapsingHeader::new("History")
-        .default_open(false)
+/// The History page (M14): today's and the last 30 days' totals, speeds of the last ten minutes,
+/// each day's totals, and downloads that were removed.
+fn draw_history_page(ui: &mut egui::Ui, engine: &Engine) {
+    let palette = brand::palette(ui.ctx().theme());
+    let (down_color, up_color) = (palette.accent, palette.info);
+    let today = days::today();
+    let totals = engine.daily_totals(30);
+    let sums = day_sums(&totals, today);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            let palette = brand::palette(ui.ctx().theme());
-            let (down_color, up_color) = (palette.accent, palette.info);
-
-            ui.label("Speed in the last 10 minutes (MiB/s):");
-            let speeds = engine.speed_history();
-            let count = speeds.len();
-            let line = |pick: fn(&(u64, u64)) -> u64| -> Vec<[f64; 2]> {
-                speeds
-                    .iter()
-                    .enumerate()
-                    .map(|(at, sample)| {
-                        let seconds_ago = at as f64 - count as f64 + 1.0;
-                        [seconds_ago, pick(sample) as f64 / MIB]
-                    })
-                    .collect()
-            };
-            egui_plot::Plot::new("speeds")
-                .height(110.0)
-                .allow_drag(false)
-                .allow_zoom(false)
-                .allow_scroll(false)
-                .include_y(0.0)
-                .x_axis_label("seconds ago")
-                .legend(egui_plot::Legend::default())
-                .show(ui, |plot| {
-                    plot.line(
-                        egui_plot::Line::new("Downloading", line(|sample| sample.0))
-                            .color(down_color),
-                    );
-                    plot.line(
-                        egui_plot::Line::new("Uploading", line(|sample| sample.1)).color(up_color),
-                    );
-                });
-
-            let totals = engine.daily_totals(30);
-            ui.label(day_totals_text(&totals, days::today()));
-            let today = days::today();
-            let bars = |pick: fn(&DayTotal) -> u64, offset: f64| -> Vec<egui_plot::Bar> {
-                totals
-                    .iter()
-                    .map(|total| {
-                        egui_plot::Bar::new(
-                            (total.day - today) as f64 + offset,
-                            pick(total) as f64 / MIB,
-                        )
-                        .width(0.4)
-                    })
-                    .collect()
-            };
-            egui_plot::Plot::new("days")
-                .height(110.0)
-                .allow_drag(false)
-                .allow_zoom(false)
-                .allow_scroll(false)
-                .include_x(-29.5)
-                .include_x(0.5)
-                .include_y(0.0)
-                .x_axis_label("days ago (MiB per day)")
-                .legend(egui_plot::Legend::default())
-                .show(ui, |plot| {
-                    plot.bar_chart(
-                        egui_plot::BarChart::new("Downloaded", bars(|t| t.downloaded_bytes, -0.2))
-                            .color(down_color),
-                    );
-                    plot.bar_chart(
-                        egui_plot::BarChart::new("Uploaded", bars(|t| t.uploaded_bytes, 0.2))
-                            .color(up_color),
-                    );
-                });
-
-            ui.add_space(4.0);
-            let removed = engine.history(20);
-            if removed.is_empty() {
-                ui.weak("Downloads you remove are listed here.");
-            } else {
-                ui.label("Removed downloads:");
+            // Four small tiles with the totals.
+            ui.columns(4, |columns| {
+                let tiles = [
+                    ("Today, downloaded", sums.today_down),
+                    ("Today, uploaded", sums.today_up),
+                    ("30 days, downloaded", sums.month_down),
+                    ("30 days, uploaded", sums.month_up),
+                ];
+                for (column, (label, bytes)) in columns.iter_mut().zip(tiles) {
+                    card(column, |ui| {
+                        ui.small(label);
+                        ui.label(
+                            egui::RichText::new(format_bytes(bytes))
+                                .font(brand::semibold(18.0))
+                                .color(palette.text),
+                        );
+                    });
+                }
+            });
+            ui.add_space(8.0);
+            card(ui, |ui| {
+                card_title(ui, "Speed in the last 10 minutes (MiB/s)");
+                draw_speed_chart(ui, engine, down_color, up_color);
+            });
+            ui.add_space(8.0);
+            card(ui, |ui| {
+                card_title(ui, "Each day, last 30 days (MiB)");
+                draw_days_chart(ui, &totals, today, down_color, up_color);
+            });
+            ui.add_space(8.0);
+            card(ui, |ui| {
+                card_title(ui, "Removed downloads");
+                let removed = engine.history(20);
+                if removed.is_empty() {
+                    ui.weak("Downloads you remove are listed here.");
+                }
                 for entry in &removed {
                     ui.label(history_line(entry));
                 }
-            }
+            });
+        });
+}
+
+/// The speed lines of the last ten minutes.
+fn draw_speed_chart(
+    ui: &mut egui::Ui,
+    engine: &Engine,
+    down_color: egui::Color32,
+    up_color: egui::Color32,
+) {
+    let speeds = engine.speed_history();
+    let count = speeds.len();
+    let line = |pick: fn(&(u64, u64)) -> u64| -> Vec<[f64; 2]> {
+        speeds
+            .iter()
+            .enumerate()
+            .map(|(at, sample)| {
+                let seconds_ago = at as f64 - count as f64 + 1.0;
+                [seconds_ago, pick(sample) as f64 / MIB]
+            })
+            .collect()
+    };
+    egui_plot::Plot::new("speeds")
+        .height(110.0)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .include_y(0.0)
+        .x_axis_label("seconds ago")
+        .legend(egui_plot::Legend::default())
+        .show(ui, |plot| {
+            plot.line(
+                egui_plot::Line::new("Downloading", line(|sample| sample.0)).color(down_color),
+            );
+            plot.line(egui_plot::Line::new("Uploading", line(|sample| sample.1)).color(up_color));
+        });
+}
+
+/// One pair of bars (downloaded, uploaded) for each of the last 30 days.
+fn draw_days_chart(
+    ui: &mut egui::Ui,
+    totals: &[DayTotal],
+    today: i64,
+    down_color: egui::Color32,
+    up_color: egui::Color32,
+) {
+    let bars = |pick: fn(&DayTotal) -> u64, offset: f64| -> Vec<egui_plot::Bar> {
+        totals
+            .iter()
+            .map(|total| {
+                egui_plot::Bar::new(
+                    (total.day - today) as f64 + offset,
+                    pick(total) as f64 / MIB,
+                )
+                .width(0.4)
+            })
+            .collect()
+    };
+    egui_plot::Plot::new("days")
+        .height(110.0)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .include_x(-29.5)
+        .include_x(0.5)
+        .include_y(0.0)
+        .x_axis_label("days ago (MiB per day)")
+        .legend(egui_plot::Legend::default())
+        .show(ui, |plot| {
+            plot.bar_chart(
+                egui_plot::BarChart::new("Downloaded", bars(|t| t.downloaded_bytes, -0.2))
+                    .color(down_color),
+            );
+            plot.bar_chart(
+                egui_plot::BarChart::new("Uploaded", bars(|t| t.uploaded_bytes, 0.2))
+                    .color(up_color),
+            );
         });
 }
 
 /// Bytes in a MiB (the charts' unit).
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// "Today: downloaded X, uploaded Y. Last 30 days: downloaded X, uploaded Y."
-fn day_totals_text(totals: &[DayTotal], today: i64) -> String {
-    let sum = |days: &mut dyn Iterator<Item = &DayTotal>| {
-        days.fold((0u64, 0u64), |(down, up), day| {
-            (down + day.downloaded_bytes, up + day.uploaded_bytes)
-        })
-    };
-    let (today_down, today_up) = sum(&mut totals.iter().filter(|day| day.day == today));
-    let (all_down, all_up) = sum(&mut totals.iter());
-    format!(
-        "Today: downloaded {}, uploaded {}. Last 30 days: downloaded {}, uploaded {}.",
-        format_bytes(today_down),
-        format_bytes(today_up),
-        format_bytes(all_down),
-        format_bytes(all_up)
-    )
+/// The History page's four totals.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DaySums {
+    today_down: u64,
+    today_up: u64,
+    month_down: u64,
+    month_up: u64,
+}
+
+/// Adds up today's and all the given days' totals.
+fn day_sums(totals: &[DayTotal], today: i64) -> DaySums {
+    let mut sums = DaySums::default();
+    for day in totals {
+        sums.month_down += day.downloaded_bytes;
+        sums.month_up += day.uploaded_bytes;
+        if day.day == today {
+            sums.today_down += day.downloaded_bytes;
+            sums.today_up += day.uploaded_bytes;
+        }
+    }
+    sums
 }
 
 /// What an offered link is, in a few words.
@@ -181,6 +221,18 @@ fn offer_text(link: &str) -> String {
         Ok(Input::WebLink(link)) => format!("A .torrent file from {}", url_host(&link)),
         Err(error) => error.to_string(),
     }
+}
+
+/// Registers this BitDinghy and opens Windows' Default apps, where the person chooses it.
+fn make_default() -> dinghy_core::Result<&'static str> {
+    std::env::current_exe()
+        .map_err(|e| dinghy_core::Error::Settings(e.to_string()))
+        .and_then(|exe| default_app::register(&default_app::Place::real(), &exe))
+        .map(|()| {
+            default_app::open_default_apps();
+            "Registered. Windows' Default apps is open: choose BitDinghy for .torrent and for \
+             MAGNET there."
+        })
 }
 
 /// What the window says after a crash.
@@ -216,7 +268,7 @@ fn default_app_text(status: &dinghy_core::default_app::Status, this_exe: Option<
         dinghy_core::default_app::Status::NotRegistered => {
             "BitDinghy isn't set up to open them yet.".to_string()
         }
-        dinghy_core::default_app::Status::Registered { exe } if Some(exe.as_path()) == this_exe => {
+        dinghy_core::default_app::Status::Registered { exe } if same_exe(exe, this_exe) => {
             "BitDinghy is registered to open them. To make it the default, choose it in Windows' \
              Default apps."
                 .to_string()
@@ -266,6 +318,36 @@ fn sharing_limits_text(ratio_percent: u32, minutes: u32) -> String {
     }
 }
 
+/// The three choices for "when a download is finished", as the Settings page shows them.
+const WHEN_FINISHED_CHOICES: [(WhenFinished, &str); 3] = [
+    (
+        WhenFinished::KeepSharing,
+        "Keep sharing it with others while BitDinghy runs (the standard)",
+    ),
+    (WhenFinished::StopRightAway, "Stop it right away"),
+    (
+        WhenFinished::StopAfterCheck,
+        "Stop it once \"Check files\" finds it complete and correct",
+    ),
+];
+
+/// What a new "when a download is finished" choice means, after a change.
+fn when_finished_text(choice: WhenFinished) -> &'static str {
+    match choice {
+        WhenFinished::KeepSharing => {
+            "Finished downloads share with others, from now on (and the ones this setting \
+             stopped share again)."
+        }
+        WhenFinished::StopRightAway => {
+            "Finished downloads stop right away, from now on (also the ones sharing now). \
+             \"Share again\" lets one share anyway."
+        }
+        WhenFinished::StopAfterCheck => {
+            "From now on, a download stops once \"Check files\" finds it complete and correct."
+        }
+    }
+}
+
 /// A limit in words: "none", or "500 KiB/s".
 fn limit_words(kib: u32) -> String {
     match kib {
@@ -274,30 +356,126 @@ fn limit_words(kib: u32) -> String {
     }
 }
 
-/// The line with the total speeds and the limits.
-fn totals_text(downloads: &[DownloadSnapshot], (download_kib, upload_kib): (u32, u32)) -> String {
-    let down: u64 = downloads.iter().map(|d| d.download_bytes_per_second).sum();
-    let up: u64 = downloads.iter().map(|d| d.upload_bytes_per_second).sum();
-    let limit = |kib: u32| match kib {
-        0 => String::new(),
-        kib => format!(" (limit {})", format_speed(u64::from(kib) * 1024)),
-    };
-    format!(
-        "In total: downloading {}{}, uploading {}{}.",
-        format_speed(down),
-        limit(download_kib),
-        format_speed(up),
-        limit(upload_kib)
-    )
+/// All downloads' speeds added up: (downloading, uploading), in bytes per second.
+fn total_speeds(downloads: &[DownloadSnapshot]) -> (u64, u64) {
+    downloads.iter().fold((0, 0), |(down, up), download| {
+        (
+            down + download.download_bytes_per_second,
+            up + download.upload_bytes_per_second,
+        )
+    })
 }
 
-/// The up and down symbols. egui's own fonts have these two (and not the usual arrows); a test
-/// checks it, so a font change can't turn them into empty boxes.
+/// The speed limits in a few words, for the sidebar.
+fn limits_text((download_kib, upload_kib): (u32, u32)) -> String {
+    if download_kib == 0 && upload_kib == 0 {
+        "No speed limits".to_string()
+    } else {
+        format!(
+            "Limits: {} down, {} up",
+            limit_words(download_kib),
+            limit_words(upload_kib)
+        )
+    }
+}
+
+/// The small up and down triangles on the "move in the list" buttons, and the arrows beside the
+/// speeds. A test checks the fonts have them, so a font change can't turn them into empty boxes.
 const UP: &str = "\u{23F6}";
 const DOWN: &str = "\u{23F7}";
+const ARROW_UP: &str = "\u{2191}";
+const ARROW_DOWN: &str = "\u{2193}";
 
-/// How tall the logo is drawn at the top of the window, in points.
-const LOGO_HEIGHT: f32 = 48.0;
+/// The sidebar's page symbols (from egui's own symbol font, behind Inter).
+const DOWNLOADS_SYMBOL: &str = "\u{2913}";
+const HISTORY_SYMBOL: &str = "\u{1F5E0}";
+const SETTINGS_SYMBOL: &str = "\u{2699}";
+
+/// How tall the logo is drawn at the top of the sidebar, in points.
+const LOGO_HEIGHT: f32 = 34.0;
+
+/// Where "Support BitDinghy" leads (the website's page, so the app never needs changing when the
+/// ways to support it do).
+const SUPPORT_LINK: &str = "https://bitdinghy.com/support/";
+
+/// The window's pages, chosen in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Downloads,
+    History,
+    Settings,
+}
+
+/// The status badge on a download's card: its word and color.
+fn status_badge(download: &DownloadSnapshot) -> (&'static str, Tone) {
+    match download.status {
+        DownloadStatus::GettingInfo => ("Starting", Tone::Busy),
+        DownloadStatus::Checking => ("Checking", Tone::Busy),
+        DownloadStatus::Downloading => ("Downloading", Tone::Busy),
+        DownloadStatus::Queued => ("Queued", Tone::Waiting),
+        DownloadStatus::Paused => ("Paused", Tone::Quiet),
+        DownloadStatus::Finished if download.sharing_stopped => ("Finished", Tone::Done),
+        DownloadStatus::Finished => ("Finished, sharing", Tone::Done),
+        DownloadStatus::Failed => ("Problem", Tone::Problem),
+    }
+}
+
+/// One line saying which program Windows opens magnet links or `.torrent` files with.
+fn opener_text(kind: Kind, opener: &Opener, this_exe: Option<&Path>) -> (String, Tone) {
+    let what = match kind {
+        Kind::MagnetLinks => "Magnet links",
+        Kind::TorrentFiles => ".torrent files",
+    };
+    match opener {
+        Opener::BitDinghy { exe: Some(exe) } if same_exe(exe, this_exe) => {
+            (format!("{what} open in this BitDinghy."), Tone::Done)
+        }
+        Opener::BitDinghy { exe: Some(exe) } => (
+            format!(
+                "{what} open in another copy of BitDinghy: {}",
+                exe.display()
+            ),
+            Tone::Waiting,
+        ),
+        Opener::BitDinghy { exe: None } => (
+            format!("{what} open in a copy of BitDinghy, but Windows doesn't say which."),
+            Tone::Waiting,
+        ),
+        Opener::Other { name } => (format!("{what} open in {name}."), Tone::Quiet),
+        Opener::NotChosen => (
+            format!("{what}: no program chosen in Windows yet."),
+            Tone::Quiet,
+        ),
+    }
+}
+
+/// Whether `exe` is this program (Windows doesn't care about upper and lower case in paths).
+fn same_exe(exe: &Path, this_exe: Option<&Path>) -> bool {
+    this_exe.is_some_and(|this| {
+        if cfg!(windows) {
+            exe.to_string_lossy().to_lowercase() == this.to_string_lossy().to_lowercase()
+        } else {
+            exe == this
+        }
+    })
+}
+
+/// Whether Windows opens both magnet links and `.torrent` files with this very copy.
+fn opens_both_here(magnet: &Opener, torrent: &Opener, this_exe: Option<&Path>) -> bool {
+    let here = |opener: &Opener| matches!(opener, Opener::BitDinghy { exe: Some(exe) } if same_exe(exe, this_exe));
+    here(magnet) && here(torrent)
+}
+
+/// Whether to ask, once, "Open magnet links and .torrent files with BitDinghy?": only on Windows,
+/// only if it was never answered, and not when this copy already opens both.
+fn should_ask_about_default_app(
+    already_asked: bool,
+    magnet: &Opener,
+    torrent: &Opener,
+    this_exe: Option<&Path>,
+) -> bool {
+    cfg!(windows) && !already_asked && !opens_both_here(magnet, torrent, this_exe)
+}
 
 /// The whole window's state.
 ///
@@ -311,8 +489,10 @@ struct BitDinghyApp {
     profile: Profile,
     /// `Err` holds the reason the engine couldn't start, so the window can show it.
     engine: Result<Arc<Engine>, String>,
-    /// The logo pictures. `None` if they couldn't be read, in which case plain text is shown.
+    /// The still logo pictures. `None` if they couldn't be read, in which case plain text is shown.
     logos: Option<brand::Logos>,
+    /// The animated logo at the top of the sidebar (the still one is shown if it can't load).
+    animated_logo: Option<logo::AnimatedLogo>,
     /// The text in the link box.
     link: String,
     /// A problem with the link just pasted.
@@ -345,6 +525,13 @@ struct BitDinghyApp {
     fetching: Option<Fetching>,
     /// Button actions still running in the background (see [`Running`]).
     running: Vec<Running>,
+    /// The page chosen in the sidebar.
+    page: Page,
+    /// Ask once "Open magnet links and .torrent files with BitDinghy?" (decided at start).
+    asking_about_default_app: bool,
+    /// The answer to a question in a banner (the message, and whether it is an error), shown
+    /// until the person presses OK.
+    notice: Option<(String, bool)>,
 }
 
 /// A web link to a `.torrent` file being fetched in the background, so the window never freezes.
@@ -366,14 +553,15 @@ struct Running {
 
 impl BitDinghyApp {
     fn new(creation_context: &eframe::CreationContext<'_>, opened_with: Option<String>) -> Self {
-        brand::apply(&creation_context.egui_ctx);
+        let profile = Profile::load();
+        brand::apply(&creation_context.egui_ctx, profile.settings().look);
         let logos = brand::Logos::load(&creation_context.egui_ctx);
+        let animated_logo = logo::AnimatedLogo::load(&creation_context.egui_ctx);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("couldn't start BitDinghy's background threads");
-        let profile = Profile::load();
         let engine = runtime
             .block_on(Engine::start(profile.engine_config()))
             .map(Arc::new)
@@ -411,11 +599,30 @@ impl BitDinghyApp {
             .download_dir_or_default()
             .display()
             .to_string();
+        let asking_about_default_app = {
+            let place = default_app::Place::real();
+            should_ask_about_default_app(
+                profile.settings().asked_about_default_app,
+                &default_app::opener(&place, Kind::MagnetLinks),
+                &default_app::opener(&place, Kind::TorrentFiles),
+                std::env::current_exe().ok().as_deref(),
+            )
+        };
+        // When the engine couldn't start, the fix is probably in the settings.
+        let page = if engine.is_err() {
+            Page::Settings
+        } else {
+            Page::Downloads
+        };
         Self {
+            page,
+            asking_about_default_app,
+            notice: None,
             runtime,
             profile,
             engine,
             logos,
+            animated_logo,
             link: String::new(),
             link_problem: None,
             folder_text,
@@ -638,25 +845,27 @@ impl BitDinghyApp {
             return;
         };
         let mut answer = None;
-        ui.group(|ui| {
+        banner(ui, Tone::Busy, |ui| {
             ui.colored_label(
                 info_color(ui),
                 "Another program asked BitDinghy to open this. Download it?",
             );
             ui.label(offer_text(&link));
             ui.horizontal(|ui| {
-                if ui.button("Download").clicked() {
+                if primary_button(ui, "Download").clicked() {
                     answer = Some(true);
                 }
-                if ui.button("Not now").clicked() {
+                if button(ui, "Not now").clicked() {
                     answer = Some(false);
                 }
             });
         });
+        ui.add_space(8.0);
         match answer {
             Some(true) => {
                 self.offers.remove(0);
                 self.link = link;
+                self.page = Page::Downloads;
                 self.submit_link(engine);
             }
             Some(false) => {
@@ -673,43 +882,163 @@ impl BitDinghyApp {
         };
         let folder = newest.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut done = false;
-        ui.group(|ui| {
+        banner(ui, Tone::Waiting, |ui| {
             ui.colored_label(warning_color(ui), crash_notice_text(&folder));
             ui.horizontal(|ui| {
-                if ui.button("Open the folder").clicked() {
+                if button(ui, "Open the folder").clicked() {
                     open_folder(&folder);
                 }
-                done = ui.button("OK").clicked();
+                done = button(ui, "OK").clicked();
             });
         });
+        ui.add_space(8.0);
         if done {
             dinghy_core::crash::mark_seen(&self.crash_reports);
             self.crash_reports.clear();
         }
     }
 
-    /// The logo (or, if it couldn't be loaded, the name) with the version beside it.
-    fn draw_header(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            match &self.logos {
-                Some(logos) => {
-                    let texture = logos.for_theme(ui.ctx().theme());
-                    let size = egui::vec2(LOGO_HEIGHT * texture.aspect_ratio(), LOGO_HEIGHT);
-                    ui.add(
-                        egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
-                            .fit_to_exact_size(size),
-                    );
+    /// The once-only question: open magnet links and .torrent files with BitDinghy? Either answer
+    /// is remembered, so it isn't asked again (Settings keeps the buttons for later).
+    fn draw_default_app_question(&mut self, ui: &mut egui::Ui) {
+        if !self.asking_about_default_app {
+            return;
+        }
+        let mut answer = None;
+        banner(ui, Tone::Busy, |ui| {
+            ui.label(
+                egui::RichText::new("Open magnet links and .torrent files with BitDinghy?")
+                    .font(brand::semibold(13.5))
+                    .color(info_color(ui)),
+            );
+            ui.small(
+                "Windows lets you choose this yourself: BitDinghy registers itself (for your \
+                 Windows user only) and opens Windows' Default apps, where you pick BitDinghy. \
+                 You can change it later in Settings.",
+            );
+            ui.horizontal(|ui| {
+                if primary_button(ui, "Yes").clicked() {
+                    answer = Some(true);
                 }
-                None => {
-                    ui.heading(dinghy_core::APP_NAME);
+                if button(ui, "Not now").clicked() {
+                    answer = Some(false);
                 }
-            }
-            ui.weak(format!("version {}", dinghy_core::VERSION));
+            });
+        });
+        ui.add_space(8.0);
+        let Some(yes) = answer else {
+            return;
+        };
+        self.asking_about_default_app = false;
+        let remembered = self.profile.set_asked_about_default_app();
+        let outcome = if yes {
+            make_default()
+        } else {
+            Ok("OK. If you change your mind: Settings, \"Magnet links and .torrent files\".")
+        };
+        self.notice = Some(match (outcome, remembered) {
+            (Err(error), _) | (Ok(_), Err(error)) => (error.to_string(), true),
+            (Ok(message), Ok(())) => (message.to_string(), false),
         });
     }
 
-    /// The settings section: where BitDinghy keeps its files, and the download folder.
-    fn draw_settings(&mut self, ui: &mut egui::Ui) {
+    /// Everything shown above the page: crash report, problems, questions, offers.
+    fn draw_notices(&mut self, ui: &mut egui::Ui, engine: Option<&Arc<Engine>>) {
+        self.draw_crash_notice(ui);
+        let mut problems: Vec<String> = self.profile.notices().to_vec();
+        match (&self.engine, engine) {
+            (Err(message), _) => problems.push(message.clone()),
+            (Ok(_), Some(engine)) => problems.extend(engine.notices()),
+            _ => {}
+        }
+        problems.extend(self.channel_problem.clone());
+        for problem in problems {
+            banner(ui, Tone::Waiting, |ui| {
+                ui.colored_label(warning_color(ui), problem);
+            });
+            ui.add_space(8.0);
+        }
+        self.draw_default_app_question(ui);
+        if let Some((message, is_error)) = self.notice.clone() {
+            let tone = if is_error { Tone::Problem } else { Tone::Done };
+            let mut done = false;
+            banner(ui, tone, |ui| {
+                ui.horizontal(|ui| {
+                    done = button(ui, "OK").clicked();
+                    ui.label(message);
+                });
+            });
+            ui.add_space(8.0);
+            if done {
+                self.notice = None;
+            }
+        }
+        if let Some(engine) = engine {
+            self.draw_offer(ui, engine);
+        }
+    }
+
+    /// The sidebar: the logo, the three pages, and the total speeds at the bottom.
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui, engine: Option<&Arc<Engine>>, count: usize) {
+        let downloading = engine.is_some_and(|engine| {
+            engine
+                .snapshot()
+                .iter()
+                .any(|download| download.status == DownloadStatus::Downloading)
+        });
+        match (&self.animated_logo, &self.logos) {
+            (Some(animated), _) => animated.show(ui, downloading),
+            (None, Some(logos)) => {
+                let texture = logos.for_theme(ui.ctx().theme());
+                let width = (LOGO_HEIGHT * texture.aspect_ratio()).min(ui.available_width());
+                let size = egui::vec2(width, width / texture.aspect_ratio());
+                ui.add(
+                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
+                        .fit_to_exact_size(size),
+                );
+            }
+            (None, None) => {
+                ui.heading(dinghy_core::APP_NAME);
+            }
+        }
+        ui.add_space(14.0);
+        let pages = [
+            (Page::Downloads, DOWNLOADS_SYMBOL, "Downloads", Some(count)),
+            (Page::History, HISTORY_SYMBOL, "History", None),
+            (Page::Settings, SETTINGS_SYMBOL, "Settings", None),
+        ];
+        for (page, symbol, label, count) in pages {
+            let count = count.filter(|&count| count > 0);
+            if widgets::nav_item(ui, self.page == page, symbol, label, count).clicked() {
+                self.page = page;
+            }
+            ui.add_space(2.0);
+        }
+        // From the bottom up: the version, the limits, then the speeds.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.weak(format!("Version {}", dinghy_core::VERSION));
+            let Some(engine) = engine else {
+                return;
+            };
+            ui.small(limits_text(engine.speed_limits()));
+            let palette = brand::palette(ui.ctx().theme());
+            let (down, up) = total_speeds(&engine.snapshot());
+            ui.label(
+                egui::RichText::new(format!("{ARROW_UP} {}", format_speed(up))).color(palette.info),
+            )
+            .on_hover_text("Uploading (sharing), all downloads together");
+            ui.label(
+                egui::RichText::new(format!("{ARROW_DOWN} {}", format_speed(down)))
+                    .color(palette.accent),
+            )
+            .on_hover_text("Downloading, all downloads together");
+            ui.separator();
+        });
+    }
+
+    /// The Settings page: the settings in groups (cards), with the result of the last change in a
+    /// line along the bottom, where it is seen whichever group was changed.
+    fn draw_settings_page(&mut self, ui: &mut egui::Ui) {
         let mut save = false;
         let mut use_standard = false;
         let mut change_http = None;
@@ -719,227 +1048,332 @@ impl BitDinghyApp {
         let mut change_connections = None;
         let mut use_recommended = None;
         let mut default_app = None;
+        let mut change_look = None;
+        let mut change_when_finished = None;
         let fastest = self
             .engine
             .as_ref()
             .ok()
             .map(|engine| engine.fastest_seen());
         let listening_now = self.engine.as_ref().ok().map(|engine| engine.listen_port());
-        // Open it by default when the engine couldn't start, because the fix is probably here.
-        egui::CollapsingHeader::new("Settings")
-            .default_open(self.engine.is_err())
-            .show(ui, |ui| {
-                match self.profile.data_dir() {
-                    Some(dir) => {
-                        ui.label(format!(
-                            "BitDinghy keeps its files in {} ({}).",
-                            dir.path().display(),
-                            dir.kind().describe()
-                        ));
-                    }
-                    None => {
-                        ui.colored_label(
-                            error_color(ui),
-                            "There is nowhere to keep BitDinghy's files, so settings can't be \
-                             remembered.",
-                        );
-                    }
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Download folder:");
-                    let width = (ui.available_width() - 230.0).max(120.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.folder_text).desired_width(width));
-                    save |= ui.button("Save").clicked();
-                    use_standard |= ui.button("Use the standard folder").clicked();
-                });
-                ui.small("A new download folder is used the next time you start BitDinghy.");
-                let mut allow_http = self.profile.settings().allow_http_links;
-                if ui
-                    .checkbox(
-                        &mut allow_http,
-                        "Also open plain http:// links to .torrent files (less safe: they can be \
-                         changed on the way). Secure https:// links always work.",
-                    )
-                    .changed()
-                {
-                    change_http = Some(allow_http);
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Downloads at the same time:");
-                    let editing = ui.add(
-                        egui::DragValue::new(&mut self.max_active_choice)
-                            .range(0..=MAX_ACTIVE_DOWNLOADS_LIMIT),
-                    );
-                    ui.weak("(0 = no limit. The others wait in the queue; finished downloads that are sharing don't count.)");
-                    // Saved once the person has finished changing it (not at every step of a drag).
-                    if self.max_active_choice != self.profile.settings().max_active_downloads
-                        && !editing.dragged()
-                        && !editing.has_focus()
-                    {
-                        change_max_active = Some(self.max_active_choice);
-                    }
-                });
-                let saved_limits = (
-                    self.profile.settings().download_limit_kib,
-                    self.profile.settings().upload_limit_kib,
-                );
-                let mut settled = true;
-                ui.horizontal(|ui| {
-                    ui.label("Download limit:");
-                    settled &= limit_box(ui, &mut self.limits_choice.0);
-                    ui.label("Upload limit:");
-                    settled &= limit_box(ui, &mut self.limits_choice.1);
-                    ui.weak("(KiB/s, for all downloads together; 0 = no limit, else at least 32)");
-                });
-                if settled && self.limits_choice != saved_limits {
-                    change_limits = Some(self.limits_choice);
-                }
-                let saved_sharing = (
-                    self.profile.settings().stop_sharing_ratio_percent,
-                    self.profile.settings().stop_sharing_after_minutes,
-                );
-                let mut settled = true;
-                ui.horizontal(|ui| {
-                    ui.label("Stop sharing a finished download at ratio");
-                    let ratio = ui.add(
-                        egui::DragValue::new(&mut self.sharing_choice.0)
-                            .range(0.0..=1000.0)
-                            .speed(0.05)
-                            .fixed_decimals(2),
-                    );
-                    settled &= !ratio.dragged() && !ratio.has_focus();
-                    ui.label("or after");
-                    let minutes = ui.add(
-                        egui::DragValue::new(&mut self.sharing_choice.1)
-                            .range(0..=dinghy_core::settings::MAX_SHARING_MINUTES),
-                    );
-                    settled &= !minutes.dragged() && !minutes.has_focus();
-                    ui.label("minutes");
-                    ui.weak("(0 = never. Ratio 1 = it has shared as much as its size.)");
-                });
-                let chosen_sharing = (
-                    (self.sharing_choice.0 * 100.0).round() as u32,
-                    self.sharing_choice.1,
-                );
-                if settled && chosen_sharing != saved_sharing {
-                    change_sharing = Some(chosen_sharing);
-                }
 
-                ui.separator();
-                ui.label("Recommended settings (learned from your own downloads):");
-                match fastest.and_then(dinghy_core::recommend::recommend) {
-                    None => {
-                        ui.weak(dinghy_core::recommend::NOTHING_LEARNED);
-                    }
-                    Some(recommended) => {
-                        ui.label(dinghy_core::recommend::fastest_text(
-                            fastest.unwrap_or_default(),
-                        ));
-                        ui.horizontal(|ui| {
-                            ui.label(recommended_text(&recommended));
-                            if ui.button("Use these").clicked() {
-                                use_recommended = Some(recommended);
-                            }
-                        });
-                        ui.small(dinghy_core::recommend::REASONS);
-                    }
-                }
-
-                ui.separator();
-                ui.label("Magnet links and .torrent files:");
-                let this_exe = std::env::current_exe().ok();
-                let place = dinghy_core::default_app::Place::real();
-                let status = dinghy_core::default_app::status(&place);
-                ui.label(default_app_text(&status, this_exe.as_deref()));
-                ui.horizontal(|ui| {
-                    let registered_here = matches!(
-                        &status,
-                        dinghy_core::default_app::Status::Registered { exe }
-                            if Some(exe.as_path()) == this_exe.as_deref()
-                    );
-                    if !registered_here
-                        && ui
-                            .button("Make BitDinghy the default...")
-                            .on_hover_text(
-                                "Registers BitDinghy (for your Windows user only) and opens \
-                                 Windows' Default apps, where you choose it.",
-                            )
-                            .clicked()
-                    {
-                        default_app = Some(true);
-                    }
-                    if registered_here && ui.button("Open Default apps").clicked() {
-                        dinghy_core::default_app::open_default_apps();
-                    }
-                    if status != dinghy_core::default_app::Status::NotRegistered
-                        && ui
-                            .button("Undo")
-                            .on_hover_text("Removes everything BitDinghy registered.")
-                            .clicked()
-                    {
-                        default_app = Some(false);
-                    }
-                });
-
-                ui.separator();
-                ui.label("Connections (used the next time you start BitDinghy):");
-                let saved_connections = (
-                    self.profile.settings().accept_incoming,
-                    self.profile.settings().listen_port,
-                    self.profile.settings().upnp,
-                );
-                ui.checkbox(
-                    &mut self.connections_choice.0,
-                    "Accept connections from other people (sharing works much better)",
-                );
-                let mut settled = true;
-                ui.add_enabled_ui(self.connections_choice.0, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Port:");
-                        let port = ui.add(egui::DragValue::new(&mut self.connections_choice.1));
-                        settled &= !port.dragged() && !port.has_focus();
-                        ui.weak("(0 = automatic: a different free port at each start)");
-                    });
-                    ui.checkbox(
-                        &mut self.connections_choice.2,
-                        "Ask my router to forward this port (UPnP), so people outside your home \
-                         network can connect",
-                    );
-                });
-                if settled && self.connections_choice != saved_connections {
-                    change_connections = Some(self.connections_choice);
-                }
-                ui.small(listening_text(listening_now.flatten()));
-                ui.small(dinghy_core::ENCRYPTION_NOTE);
-                ui.small(
-                    "The first time BitDinghy accepts connections, Windows Firewall may ask \
-                     whether to allow it. At home, allowing it on private networks is enough.",
-                );
-                if let Some((message, is_error)) = &self.settings_message {
-                    let color = if *is_error {
-                        error_color(ui)
-                    } else {
-                        ui.visuals().text_color()
-                    };
+        if let Some((message, is_error)) = &self.settings_message {
+            let color = if *is_error {
+                error_color(ui)
+            } else {
+                info_color(ui)
+            };
+            egui::Panel::bottom("settings-message")
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
                     ui.colored_label(color, message);
-                }
+                });
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                card(ui, |ui| {
+                    card_title(ui, "Downloads");
+                    ui.horizontal(|ui| {
+                        ui.label("Download folder:");
+                        // Room for the two buttons beside it, so the card never gets wider than
+                        // the page.
+                        let width = (ui.available_width() - 290.0).max(120.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.folder_text).desired_width(width),
+                        );
+                        save |= button(ui, "Save").clicked();
+                        use_standard |= quiet_button(ui, "Use the standard folder").clicked();
+                    });
+                    ui.small("A new download folder is used the next time you start BitDinghy.");
+                    ui.horizontal(|ui| {
+                        ui.label("Downloads at the same time:");
+                        let editing = ui.add(
+                            egui::DragValue::new(&mut self.max_active_choice)
+                                .range(0..=MAX_ACTIVE_DOWNLOADS_LIMIT),
+                        );
+                        // Saved once the person has finished changing it (not at every step of a
+                        // drag).
+                        if self.max_active_choice != self.profile.settings().max_active_downloads
+                            && !editing.dragged()
+                            && !editing.has_focus()
+                        {
+                            change_max_active = Some(self.max_active_choice);
+                        }
+                    });
+                    ui.small(
+                        "0 = no limit. The others wait in the queue; finished downloads that are \
+                         sharing don't count.",
+                    );
+                    let mut allow_http = self.profile.settings().allow_http_links;
+                    if ui
+                        .checkbox(
+                            &mut allow_http,
+                            "Also open plain http:// links to .torrent files (less safe: they can \
+                             be changed on the way). Secure https:// links always work.",
+                        )
+                        .changed()
+                    {
+                        change_http = Some(allow_http);
+                    }
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "Speed");
+                    let saved_limits = (
+                        self.profile.settings().download_limit_kib,
+                        self.profile.settings().upload_limit_kib,
+                    );
+                    let mut settled = true;
+                    ui.horizontal(|ui| {
+                        ui.label("Download limit:");
+                        settled &= limit_box(ui, &mut self.limits_choice.0);
+                        ui.label("Upload limit:");
+                        settled &= limit_box(ui, &mut self.limits_choice.1);
+                    });
+                    ui.small("KiB/s, for all downloads together; 0 = no limit, else at least 32.");
+                    if settled && self.limits_choice != saved_limits {
+                        change_limits = Some(self.limits_choice);
+                    }
+                    ui.add_space(4.0);
+                    ui.label("Recommended settings (learned from your own downloads):");
+                    match fastest.and_then(dinghy_core::recommend::recommend) {
+                        None => {
+                            ui.weak(dinghy_core::recommend::NOTHING_LEARNED);
+                        }
+                        Some(recommended) => {
+                            ui.label(dinghy_core::recommend::fastest_text(
+                                fastest.unwrap_or_default(),
+                            ));
+                            ui.horizontal(|ui| {
+                                ui.label(recommended_text(&recommended));
+                                if button(ui, "Use these").clicked() {
+                                    use_recommended = Some(recommended);
+                                }
+                            });
+                            ui.small(dinghy_core::recommend::REASONS);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "Sharing");
+                    ui.label("When a download is finished (and so checked):");
+                    let now = self.profile.settings().when_finished;
+                    for (choice, label) in WHEN_FINISHED_CHOICES {
+                        if ui.radio(now == choice, label).clicked() && now != choice {
+                            change_when_finished = Some(choice);
+                        }
+                    }
+                    ui.add_space(4.0);
+                    let saved_sharing = (
+                        self.profile.settings().stop_sharing_ratio_percent,
+                        self.profile.settings().stop_sharing_after_minutes,
+                    );
+                    let mut settled = true;
+                    ui.horizontal(|ui| {
+                        ui.label("Stop sharing a finished download at ratio");
+                        let ratio = ui.add(
+                            egui::DragValue::new(&mut self.sharing_choice.0)
+                                .range(0.0..=1000.0)
+                                .speed(0.05)
+                                .fixed_decimals(2),
+                        );
+                        settled &= !ratio.dragged() && !ratio.has_focus();
+                        ui.label("or after");
+                        let minutes = ui.add(
+                            egui::DragValue::new(&mut self.sharing_choice.1)
+                                .range(0..=dinghy_core::settings::MAX_SHARING_MINUTES),
+                        );
+                        settled &= !minutes.dragged() && !minutes.has_focus();
+                        ui.label("minutes");
+                    });
+                    ui.small("0 = never. Ratio 1 = it has shared as much as its size.");
+                    let chosen_sharing = (
+                        (self.sharing_choice.0 * 100.0).round() as u32,
+                        self.sharing_choice.1,
+                    );
+                    if settled && chosen_sharing != saved_sharing {
+                        change_sharing = Some(chosen_sharing);
+                    }
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "Connections");
+                    ui.small("Used the next time you start BitDinghy.");
+                    let saved_connections = (
+                        self.profile.settings().accept_incoming,
+                        self.profile.settings().listen_port,
+                        self.profile.settings().upnp,
+                    );
+                    ui.checkbox(
+                        &mut self.connections_choice.0,
+                        "Accept connections from other people (sharing works much better)",
+                    );
+                    let mut settled = true;
+                    ui.add_enabled_ui(self.connections_choice.0, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Port:");
+                            let port = ui.add(egui::DragValue::new(&mut self.connections_choice.1));
+                            settled &= !port.dragged() && !port.has_focus();
+                            ui.weak("(0 = automatic: a different free port at each start)");
+                        });
+                        ui.checkbox(
+                            &mut self.connections_choice.2,
+                            "Ask my router to forward this port (UPnP), so people outside your \
+                             home network can connect",
+                        );
+                    });
+                    if settled && self.connections_choice != saved_connections {
+                        change_connections = Some(self.connections_choice);
+                    }
+                    ui.small(listening_text(listening_now.flatten()));
+                    ui.small(dinghy_core::ENCRYPTION_NOTE);
+                    ui.small(
+                        "The first time BitDinghy accepts connections, Windows Firewall may ask \
+                         whether to allow it. At home, allowing it on private networks is enough.",
+                    );
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "Magnet links and .torrent files");
+                    let this_exe = std::env::current_exe().ok();
+                    let place = default_app::Place::real();
+                    for kind in [Kind::MagnetLinks, Kind::TorrentFiles] {
+                        let (text, tone) = opener_text(
+                            kind,
+                            &default_app::opener(&place, kind),
+                            this_exe.as_deref(),
+                        );
+                        let color = tone.color(&widgets::palette(ui));
+                        ui.colored_label(color, text);
+                    }
+                    let status = default_app::status(&place);
+                    ui.small(default_app_text(&status, this_exe.as_deref()));
+                    ui.horizontal(|ui| {
+                        let registered_here = matches!(
+                            &status,
+                            default_app::Status::Registered { exe }
+                                if same_exe(exe, this_exe.as_deref())
+                        );
+                        if !registered_here
+                            && button(ui, "Make BitDinghy the default...")
+                                .on_hover_text(
+                                    "Registers BitDinghy (for your Windows user only) and opens \
+                                     Windows' Default apps, where you choose it.",
+                                )
+                                .clicked()
+                        {
+                            default_app = Some(true);
+                        }
+                        if registered_here && button(ui, "Open Default apps").clicked() {
+                            default_app::open_default_apps();
+                        }
+                        if status != default_app::Status::NotRegistered
+                            && quiet_button(ui, "Undo")
+                                .on_hover_text("Removes everything BitDinghy registered.")
+                                .clicked()
+                        {
+                            default_app = Some(false);
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "Look");
+                    let now = self.profile.settings().look;
+                    ui.horizontal(|ui| {
+                        ui.label("Colors:");
+                        for (look, label) in [
+                            (Look::Dark, "Dark"),
+                            (Look::Light, "Light"),
+                            (Look::LikeWindows, "Like Windows"),
+                        ] {
+                            if ui.selectable_label(now == look, label).clicked() && now != look {
+                                change_look = Some(look);
+                            }
+                        }
+                    });
+                    ui.small("\"Like Windows\" follows Windows' own light or dark setting.");
+                });
+                ui.add_space(8.0);
+
+                card(ui, |ui| {
+                    card_title(ui, "About");
+                    ui.label(format!(
+                        "{} {}: a fast, lightweight download tool for magnet links and .torrent \
+                         files.",
+                        dinghy_core::APP_NAME,
+                        dinghy_core::VERSION
+                    ));
+                    match self.profile.data_dir() {
+                        Some(dir) => {
+                            ui.label(format!(
+                                "BitDinghy keeps its files in {} ({}).",
+                                dir.path().display(),
+                                dir.kind().describe()
+                            ));
+                        }
+                        None => {
+                            ui.colored_label(
+                                error_color(ui),
+                                "There is nowhere to keep BitDinghy's files, so settings can't \
+                                 be remembered.",
+                            );
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if let Some(dir) = self.profile.data_dir()
+                            && quiet_button(ui, "Open data folder").clicked()
+                        {
+                            open_folder(dir.path());
+                        }
+                        ui.hyperlink_to("Support BitDinghy", SUPPORT_LINK)
+                            .on_hover_text(SUPPORT_LINK);
+                    });
+                });
             });
+
+        if let Some(choice) = change_when_finished {
+            self.settings_message = Some(match self.profile.set_when_finished(choice) {
+                Ok(()) => {
+                    if let Ok(engine) = &self.engine {
+                        engine.set_when_finished(choice);
+                    }
+                    (when_finished_text(choice).to_string(), false)
+                }
+                Err(error) => (error.to_string(), true),
+            });
+        }
+        if let Some(look) = change_look {
+            brand::set_look(ui.ctx(), look);
+            self.settings_message = Some(match self.profile.set_look(look) {
+                Ok(()) => (
+                    "Saved: the new colors are used from now on.".to_string(),
+                    false,
+                ),
+                Err(error) => (error.to_string(), true),
+            });
+        }
         if save || use_standard {
             self.save_download_folder(use_standard);
         }
-        if let Some(make_default) = default_app {
-            let place = dinghy_core::default_app::Place::real();
-            let result = if make_default {
-                std::env::current_exe()
-                    .map_err(|e| dinghy_core::Error::Settings(e.to_string()))
-                    .and_then(|exe| dinghy_core::default_app::register(&place, &exe))
-                    .map(|()| {
-                        dinghy_core::default_app::open_default_apps();
-                        "Registered. Windows' Default apps is open: choose BitDinghy for .torrent \
-                         and for MAGNET there."
-                    })
+        if let Some(make_it_default) = default_app {
+            let result = if make_it_default {
+                make_default()
             } else {
-                dinghy_core::default_app::unregister(&place).map(|()| {
+                default_app::unregister(&default_app::Place::real()).map(|()| {
                     "BitDinghy is no longer registered. Windows asks which program to use the \
                      next time you open a magnet link or a .torrent file."
                 })
@@ -1075,52 +1509,9 @@ impl BitDinghyApp {
     }
 }
 
-impl eframe::App for BitDinghyApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        dinghy_core::crash::crash_if_testing();
-        self.draw_header(ui);
-        self.draw_crash_notice(ui);
-        for notice in self.profile.notices() {
-            ui.colored_label(warning_color(ui), notice);
-        }
-        self.draw_settings(ui);
-        ui.separator();
-
-        // If the engine couldn't start there is nothing else to show.
-        let engine = match &self.engine {
-            Ok(engine) => engine.clone(),
-            Err(message) => {
-                ui.add_space(8.0);
-                ui.colored_label(error_color(ui), message);
-                return;
-            }
-        };
-
-        // Problems with the saved download list, for example.
-        for notice in engine.notices() {
-            ui.colored_label(warning_color(ui), notice);
-        }
-        if let Some(problem) = &self.channel_problem {
-            ui.colored_label(warning_color(ui), problem);
-        }
-
-        // Redraw a couple of times a second so progress keeps moving.
-        ui.ctx().request_repaint_after(Duration::from_millis(500));
-
-        // Links from other programs (a browser, Explorer): ask first. A new one brings the
-        // window to the front.
-        let arrived = engine.take_offers();
-        if !arrived.is_empty() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
-            self.offers.extend(arrived);
-        }
-        self.draw_offer(ui, &engine);
-
-        ui.label(format!("Saving to: {}", engine.download_dir().display()));
-        let downloads_now = engine.snapshot();
-        ui.label(totals_text(&downloads_now, engine.speed_limits()));
-        ui.add_space(8.0);
-
+impl BitDinghyApp {
+    /// The Downloads page: the link box at the top, then one card per download.
+    fn draw_downloads_page(&mut self, ui: &mut egui::Ui, engine: &Arc<Engine>, hovering: bool) {
         ui.horizontal(|ui| {
             let box_width = (ui.available_width() - 250.0).max(120.0);
             let link_box = ui.add(
@@ -1130,21 +1521,37 @@ impl eframe::App for BitDinghyApp {
             );
             let enter_pressed =
                 link_box.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("Download").clicked() || enter_pressed {
-                self.submit_link(&engine);
+            if primary_button(ui, "Download").clicked() || enter_pressed {
+                self.submit_link(engine);
             }
-            if ui.button("Open .torrent file...").clicked() {
+            if button(ui, "Open .torrent file...").clicked() {
                 // Windows' own file dialog. The window waits while it is open.
                 let chosen = rfd::FileDialog::new()
                     .set_title("Open .torrent files")
                     .add_filter(".torrent files", &["torrent"])
                     .pick_files()
                     .unwrap_or_default();
-                self.add_files(&engine, &chosen);
+                self.add_files(engine, &chosen);
             }
         });
-        ui.small("You can also drag .torrent files onto this window.");
-        self.collect_fetch();
+        let folder = engine.download_dir();
+        egui::Sides::new().shrink_left().truncate().show(
+            ui,
+            |ui| {
+                ui.small(format!(
+                    "You can also drag .torrent files onto this window. Saving to: {}",
+                    folder.display()
+                ));
+            },
+            |ui| {
+                if quiet_button(ui, "Open folder")
+                    .on_hover_text("Opens the download folder")
+                    .clicked()
+                {
+                    open_folder(folder);
+                }
+            },
+        );
         if let Some(fetching) = &self.fetching {
             ui.horizontal(|ui| {
                 spinner(ui);
@@ -1157,8 +1564,65 @@ impl eframe::App for BitDinghyApp {
         if let Some(problem) = &self.link_problem {
             ui.colored_label(error_color(ui), problem);
         }
+        if hovering {
+            ui.colored_label(info_color(ui), "Drop the .torrent files here to add them.");
+        }
+        if let Some((message, is_error)) = &self.control_message {
+            let color = if *is_error {
+                error_color(ui)
+            } else {
+                ui.visuals().text_color()
+            };
+            ui.colored_label(color, message);
+        }
+        ui.add_space(8.0);
 
-        // Files dragged over the window: say what dropping them does; add them when dropped.
+        let downloads = engine.snapshot();
+        if downloads.is_empty() {
+            card(ui, |ui| {
+                ui.label("Nothing downloading yet. Paste a magnet link above and press Download.");
+            });
+            return;
+        }
+        let mut clicked = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for download in &downloads {
+                    let confirming = self.confirming_remove == Some(download.id);
+                    let files = self
+                        .showing_files
+                        .contains(&download.id)
+                        .then(|| engine.files(download.id).map_err(|error| error.to_string()));
+                    let movable = downloads.len() > 1;
+                    // Greyed out while one of its actions is still running.
+                    let busy = self.running.iter().any(|running| running.id == download.id);
+                    let pressed = card(ui, |ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            draw_download(ui, download, confirming, files, movable)
+                        })
+                        .inner
+                    });
+                    clicked = pressed.or(clicked.take());
+                    ui.add_space(8.0);
+                }
+            });
+        // Act on a button only after drawing, so the list isn't changed halfway through.
+        if let Some(control) = clicked {
+            self.act(engine, &downloads, control);
+        }
+    }
+}
+
+impl eframe::App for BitDinghyApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        dinghy_core::crash::crash_if_testing();
+        // Redraw a couple of times a second so progress keeps moving.
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        let engine = self.engine.as_ref().ok().cloned();
+
+        // Files dragged over the window: say what dropping them does (on the Downloads page);
+        // add them when dropped, whichever page is showing.
         let (hovering, dropped) = ui.ctx().input(|input| {
             (
                 !input.raw.hovered_files.is_empty(),
@@ -1171,55 +1635,54 @@ impl eframe::App for BitDinghyApp {
             )
         });
         if hovering {
-            ui.colored_label(info_color(ui), "Drop the .torrent files here to add them.");
+            self.page = Page::Downloads;
         }
-        if !dropped.is_empty() {
-            self.add_files(&engine, &dropped);
-        }
-
-        ui.add_space(4.0);
-        ui.separator();
-
-        self.collect_running();
-        if let Some((message, is_error)) = &self.control_message {
-            let color = if *is_error {
-                error_color(ui)
-            } else {
-                ui.visuals().text_color()
-            };
-            ui.colored_label(color, message);
-        }
-        draw_history(ui, &engine);
-        let downloads = engine.snapshot();
-        if downloads.is_empty() {
-            ui.add_space(8.0);
-            ui.label("Nothing downloading yet. Paste a magnet link above and press Download.");
-            return;
-        }
-        let mut clicked = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for download in &downloads {
-                let confirming = self.confirming_remove == Some(download.id);
-                let files = self
-                    .showing_files
-                    .contains(&download.id)
-                    .then(|| engine.files(download.id).map_err(|error| error.to_string()));
-                let movable = downloads.len() > 1;
-                // Greyed out while one of its actions is still running.
-                let busy = self.running.iter().any(|running| running.id == download.id);
-                let pressed = ui
-                    .add_enabled_ui(!busy, |ui| {
-                        draw_download(ui, download, confirming, files, movable)
-                    })
-                    .inner;
-                clicked = pressed.or(clicked.take());
-                ui.separator();
+        let mut count = 0;
+        if let Some(engine) = &engine {
+            // Links from other programs (a browser, Explorer): ask first. A new one brings the
+            // window to the front.
+            let arrived = engine.take_offers();
+            if !arrived.is_empty() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.offers.extend(arrived);
             }
-        });
-        // Act on a button only after drawing, so the list isn't changed halfway through.
-        if let Some(control) = clicked {
-            self.act(&engine, &downloads, control);
+            if !dropped.is_empty() {
+                self.page = Page::Downloads;
+                self.add_files(engine, &dropped);
+            }
+            self.collect_fetch();
+            self.collect_running();
+            count = engine.snapshot().len();
         }
+
+        let palette = brand::palette(ui.ctx().theme());
+        egui::Panel::left("pages")
+            .exact_size(196.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.background)
+                    .inner_margin(egui::Margin::symmetric(10, 14)),
+            )
+            .show(ui, |ui| self.draw_sidebar(ui, engine.as_ref(), count));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.background)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| {
+                self.draw_notices(ui, engine.as_ref());
+                match (self.page, &engine) {
+                    (Page::Settings, _) => self.draw_settings_page(ui),
+                    (Page::Downloads, Some(engine)) => {
+                        self.draw_downloads_page(ui, engine, hovering);
+                    }
+                    (Page::History, Some(engine)) => draw_history_page(ui, engine),
+                    // The engine couldn't start: the reason is in the notices above.
+                    (_, None) => {}
+                }
+            });
     }
 
     /// Called when the window closes: stop sharing and close connections tidily.
@@ -1399,7 +1862,7 @@ fn chosen_after_click(files: &[FileChoice], clicked: usize) -> BTreeSet<usize> {
 /// can't be unticked: to stop the whole download, pause or remove it.
 fn draw_files(ui: &mut egui::Ui, id: DownloadId, files: &[FileChoice]) -> Option<Control> {
     let mut clicked = None;
-    ui.group(|ui| {
+    banner(ui, Tone::Busy, |ui| {
         let chosen_count = files.iter().filter(|file| file.chosen).count();
         ui.horizontal(|ui| {
             ui.label(format!(
@@ -1477,9 +1940,23 @@ fn finished_text(download: &DownloadSnapshot, folder: &str) -> String {
     }
 }
 
-/// Draws one download: its name and buttons, then a progress bar and numbers (or a message).
-/// `confirming` shows the "Remove?" question under it; `files` is its file list when that is
-/// open. Returns the button press, if any.
+/// The numbers under a running download's progress bar.
+fn progress_details(download: &DownloadSnapshot) -> String {
+    format!(
+        "{} of {}  ·  {}  ·  {} left  ·  {} people connected ({} known)",
+        format_bytes(download.progress_bytes),
+        format_bytes(download.total_bytes),
+        format_speed(download.download_bytes_per_second),
+        format_eta(download.eta),
+        download.peers_connected,
+        download.peers_known,
+    )
+}
+
+/// Draws one download's card: its name and status badge, a progress bar (or what is happening
+/// instead), then the details on the left and its buttons on the right. `confirming` shows the
+/// "Remove?" question under it; `files` is its file list when that is open. Returns the button
+/// press, if any.
 fn draw_download(
     ui: &mut egui::Ui,
     download: &DownloadSnapshot,
@@ -1488,114 +1965,71 @@ fn draw_download(
     movable: bool,
 ) -> Option<Control> {
     let mut clicked = None;
-    ui.horizontal(|ui| {
-        // Up and down the list: the queue starts downloads in this order.
-        if movable {
-            if ui
-                .small_button(UP)
-                .on_hover_text("Move up the list (downloads start in list order)")
-                .clicked()
-            {
-                clicked = Some(Control::Move {
-                    id: download.id,
-                    to: Move::Up,
-                });
-            }
-            if ui
-                .small_button(DOWN)
-                .on_hover_text("Move down the list")
-                .clicked()
-            {
-                clicked = Some(Control::Move {
-                    id: download.id,
-                    to: Move::Down,
-                });
-            }
-        }
-        // Not `.strong()`: egui paints that in the pressed-button color, which the brand makes
-        // dark navy (for text on the green button), so the name vanished on the navy background.
-        let name_color = brand::palette(ui.ctx().theme()).text;
-        ui.label(
-            egui::RichText::new(&download.name)
-                .size(15.0)
-                .color(name_color),
-        );
-        // Right to left: the first button added sits at the far right.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Remove").clicked() {
-                clicked = Some(Control::AskRemove(download.id));
-            }
-            let (label, control) = control_for(download);
-            if ui.button(label).clicked() {
-                clicked = Some(control);
-            }
-            if can_check(download)
-                && ui
-                    .button("Check files")
-                    .on_hover_text(
-                        "Reads its files on disk again and compares them with the torrent. \
-                         Anything missing or damaged is downloaded again.",
-                    )
+    let palette = brand::palette(ui.ctx().theme());
+
+    // The name, with the "move in the list" buttons before it and the status badge after it.
+    egui::Sides::new().shrink_left().truncate().show(
+        ui,
+        |ui| {
+            // Up and down the list: the queue starts downloads in this order.
+            if movable {
+                if ui
+                    .small_button(UP)
+                    .on_hover_text("Move up the list (downloads start in list order)")
                     .clicked()
-            {
-                clicked = Some(Control::Check(download.id));
-            }
-            // Only a torrent with several files has anything to choose.
-            if download.files_total > 1
-                && ui
-                    .button(files_button_text(download, files.is_some()))
-                    .clicked()
-            {
-                clicked = Some(Control::ToggleFiles(download.id));
-            }
-        });
-    });
-    if confirming {
-        ui.group(|ui| {
-            ui.colored_label(
-                warning_color(ui),
-                format!("Remove \"{}\" from the list?", download.name),
-            );
-            ui.small(
-                "\"Delete the files too\" deletes only the files BitDinghy downloaded for it. \
-                 Nothing else in the folder is touched. \"Keep the files\" also shows any \
-                 hidden leftovers of unticked files again.",
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Keep the files").clicked() {
-                    clicked = Some(Control::Remove {
+                {
+                    clicked = Some(Control::Move {
                         id: download.id,
-                        delete_files: false,
+                        to: Move::Up,
                     });
                 }
-                if ui.button("Delete the files too").clicked() {
-                    clicked = Some(Control::Remove {
+                if ui
+                    .small_button(DOWN)
+                    .on_hover_text("Move down the list")
+                    .clicked()
+                {
+                    clicked = Some(Control::Move {
                         id: download.id,
-                        delete_files: true,
+                        to: Move::Down,
                     });
                 }
-                if ui.button("Cancel").clicked() {
-                    clicked = Some(Control::CancelRemove);
-                }
-            });
-        });
-    }
+            }
+            // Not `.strong()`: egui paints that in the pressed-button color, which the brand
+            // makes dark navy (for text on the green button), so the name vanished.
+            ui.label(
+                egui::RichText::new(&download.name)
+                    .font(brand::semibold(14.5))
+                    .color(palette.text),
+            )
+            .on_hover_text(&download.name);
+        },
+        |ui| {
+            let (word, tone) = status_badge(download);
+            widgets::badge(ui, word, tone);
+        },
+    );
 
-    match &files {
-        Some(Ok(files)) => clicked = draw_files(ui, download.id, files).or(clicked),
-        Some(Err(problem)) => {
-            ui.colored_label(error_color(ui), problem);
-        }
-        None => {}
-    }
-
+    // The progress bar, or what is happening instead.
     match download.status {
-        DownloadStatus::Queued => {
-            ui.colored_label(
-                info_color(ui),
-                "Queued: it starts when another download finishes (Settings: downloads at the \
-                  same time).",
-            );
+        DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Finished => {
+            let done = fraction(download.progress_bytes, download.total_bytes);
+            ui.horizontal(|ui| {
+                // The percentage sits beside the bar, where it is always readable.
+                let bar_width = (ui.available_width() - 56.0).max(80.0);
+                let fill = if download.status == DownloadStatus::Paused {
+                    palette.accent.gamma_multiply(0.45)
+                } else {
+                    palette.accent
+                };
+                ui.add(
+                    egui::ProgressBar::new(done)
+                        .fill(fill)
+                        .desired_height(8.0)
+                        .corner_radius(4)
+                        .desired_width(bar_width),
+                );
+                ui.label(format!("{:.1}%", done * 100.0));
+            });
         }
         DownloadStatus::GettingInfo => {
             ui.horizontal(|ui| {
@@ -1612,58 +2046,131 @@ fn draw_download(
                 ui.colored_label(info_color(ui), checking_text(download));
             });
         }
-        DownloadStatus::Failed => {
-            let message = download.error.as_deref().unwrap_or("The download failed.");
-            ui.colored_label(error_color(ui), message);
-            if download.can_use_existing_files
-                && ui
-                    .button("Use the files already there")
-                    .on_hover_text(
-                        "BitDinghy checks the files that are already there and completes them; \
-                         parts that don't match the torrent are replaced. From then on they \
-                         count as this download's files (\"Delete the files too\" would delete \
-                         them).",
-                    )
-                    .clicked()
-            {
-                clicked = Some(Control::UseExistingFiles(download.id));
-            }
-        }
-        DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Finished => {
-            let done = fraction(download.progress_bytes, download.total_bytes);
-            ui.horizontal(|ui| {
-                // The percentage sits beside the bar, where it is always readable.
-                let bar_width = (ui.available_width() - 64.0).max(80.0);
-                ui.add(
-                    egui::ProgressBar::new(done)
-                        .fill(brand::palette(ui.ctx().theme()).accent)
-                        .desired_width(bar_width),
-                );
-                ui.label(format!("{:.1}%", done * 100.0));
-            });
-            if download.status == DownloadStatus::Paused {
-                ui.label(paused_text(download));
-            } else if download.status == DownloadStatus::Finished {
-                let folder = download
-                    .save_folder
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                ui.colored_label(success_color(ui), finished_text(download, &folder));
-                ui.label(sharing_text(download));
-            } else {
-                ui.label(format!(
-                    "{} of {}   |   {}   |   {} left   |   {} people connected ({} known)",
-                    format_bytes(download.progress_bytes),
-                    format_bytes(download.total_bytes),
-                    format_speed(download.download_bytes_per_second),
-                    format_eta(download.eta),
-                    download.peers_connected,
-                    download.peers_known,
-                ));
-            }
-        }
+        DownloadStatus::Queued | DownloadStatus::Failed => {}
     }
+
+    // The details on the left, the buttons on the right.
+    let details: Vec<(String, egui::Color32)> = match download.status {
+        DownloadStatus::Queued => vec![(
+            "Queued: it starts when another download finishes (Settings: downloads at the same \
+             time)."
+                .to_string(),
+            palette.info,
+        )],
+        DownloadStatus::Failed => vec![(
+            download
+                .error
+                .clone()
+                .unwrap_or_else(|| "The download failed.".to_string()),
+            palette.danger,
+        )],
+        DownloadStatus::Paused => vec![(paused_text(download), palette.text_muted)],
+        DownloadStatus::Finished => {
+            let folder = download
+                .save_folder
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            vec![
+                (finished_text(download, &folder), palette.success),
+                (sharing_text(download), palette.text_muted),
+            ]
+        }
+        DownloadStatus::Downloading => vec![(progress_details(download), palette.text_muted)],
+        DownloadStatus::GettingInfo | DownloadStatus::Checking => Vec::new(),
+    };
+    egui::Sides::new()
+        .shrink_left()
+        .wrap_mode(egui::TextWrapMode::Wrap)
+        .show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    for (text, color) in details {
+                        ui.colored_label(color, text);
+                    }
+                });
+            },
+            |ui| {
+                // Right to left: the first button added sits at the far right.
+                if quiet_button(ui, "Remove").clicked() {
+                    clicked = Some(Control::AskRemove(download.id));
+                }
+                let (label, control) = control_for(download);
+                if button(ui, label).clicked() {
+                    clicked = Some(control);
+                }
+                if can_check(download)
+                    && quiet_button(ui, "Check files")
+                        .on_hover_text(
+                            "Reads its files on disk again and compares them with the torrent. \
+                             Anything missing or damaged is downloaded again.",
+                        )
+                        .clicked()
+                {
+                    clicked = Some(Control::Check(download.id));
+                }
+                // Only a torrent with several files has anything to choose.
+                if download.files_total > 1
+                    && quiet_button(ui, &files_button_text(download, files.is_some())).clicked()
+                {
+                    clicked = Some(Control::ToggleFiles(download.id));
+                }
+                if download.status == DownloadStatus::Failed
+                    && download.can_use_existing_files
+                    && button(ui, "Use the files already there")
+                        .on_hover_text(
+                            "BitDinghy checks the files that are already there and completes \
+                             them; parts that don't match the torrent are replaced. From then on \
+                             they count as this download's files (\"Delete the files too\" would \
+                             delete them).",
+                        )
+                        .clicked()
+                {
+                    clicked = Some(Control::UseExistingFiles(download.id));
+                }
+            },
+        );
+
+    if confirming {
+        banner(ui, Tone::Waiting, |ui| {
+            ui.colored_label(
+                warning_color(ui),
+                format!("Remove \"{}\" from the list?", download.name),
+            );
+            ui.small(
+                "\"Delete the files too\" deletes only the files BitDinghy downloaded for it. \
+                 Nothing else in the folder is touched. \"Keep the files\" also shows any \
+                 hidden leftovers of unticked files again.",
+            );
+            ui.horizontal(|ui| {
+                if button(ui, "Keep the files").clicked() {
+                    clicked = Some(Control::Remove {
+                        id: download.id,
+                        delete_files: false,
+                    });
+                }
+                if button(ui, "Delete the files too").clicked() {
+                    clicked = Some(Control::Remove {
+                        id: download.id,
+                        delete_files: true,
+                    });
+                }
+                if quiet_button(ui, "Cancel").clicked() {
+                    clicked = Some(Control::CancelRemove);
+                }
+            });
+        });
+    }
+
+    match &files {
+        Some(Ok(files)) => clicked = draw_files(ui, download.id, files).or(clicked),
+        Some(Err(problem)) => {
+            ui.colored_label(error_color(ui), problem);
+        }
+        None => {}
+    }
+
     // Something to know that isn't a failure (for example: the drive may be too full).
     if let Some(warning) = &download.warning {
         ui.colored_label(warning_color(ui), warning);
@@ -1722,8 +2229,8 @@ fn main() -> eframe::Result {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([820.0, 600.0])
-        .with_min_inner_size([480.0, 340.0]);
+        .with_inner_size([960.0, 660.0])
+        .with_min_inner_size([640.0, 420.0]);
     if let Some(icon) = brand::window_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
     }
@@ -1782,8 +2289,13 @@ mod tests {
         };
         let totals = [day(99, 1024, 0), day(100, 2048, 512)];
         assert_eq!(
-            day_totals_text(&totals, 100),
-            "Today: downloaded 2.0 KiB, uploaded 512 B. Last 30 days: downloaded 3.0 KiB, uploaded 512 B."
+            day_sums(&totals, 100),
+            DaySums {
+                today_down: 2048,
+                today_up: 512,
+                month_down: 3072,
+                month_up: 512,
+            }
         );
         let entry = dinghy_core::HistoryEntry {
             info_hash: "ab".repeat(20),
@@ -1894,34 +2406,158 @@ mod tests {
     }
 
     #[test]
-    fn the_totals_line_adds_up_and_shows_the_limits() {
+    fn the_sidebar_adds_up_the_speeds_and_says_the_limits() {
         let mut one = snapshot(DownloadStatus::Downloading, 0, 0);
         one.download_bytes_per_second = 1024 * 1024;
         one.upload_bytes_per_second = 2048;
         let mut two = one.clone();
         two.download_bytes_per_second = 512 * 1024;
-        assert_eq!(
-            totals_text(&[one.clone(), two], (0, 0)),
-            "In total: downloading 1.5 MiB/s, uploading 4.0 KiB/s."
-        );
-        assert_eq!(
-            totals_text(&[one], (2048, 64)),
-            "In total: downloading 1.0 MiB/s (limit 2.0 MiB/s), uploading 2.0 KiB/s (limit 64.0 KiB/s)."
-        );
+        assert_eq!(total_speeds(&[one, two]), (1536 * 1024, 4096));
+        assert_eq!(limits_text((0, 0)), "No speed limits");
+        assert_eq!(limits_text((2048, 0)), "Limits: 2.0 MiB/s down, none up");
         assert_eq!(limit_words(0), "none");
     }
 
     #[test]
-    fn the_up_and_down_symbols_can_be_drawn() {
+    fn the_numbers_under_a_download_read_well() {
+        let mut download = snapshot(DownloadStatus::Downloading, 1024, 4096);
+        download.peers_connected = 3;
+        download.peers_known = 40;
+        let text = progress_details(&download);
+        assert!(text.starts_with("1.0 KiB of 4.0 KiB  ·  0 B/s"), "{text}");
+        assert!(text.ends_with("3 people connected (40 known)"), "{text}");
+    }
+
+    /// The brand fonts are installed as in the real window, so a font change can't turn the
+    /// symbols the window uses into empty boxes.
+    #[test]
+    fn every_symbol_the_window_uses_can_be_drawn() {
         let ctx = egui::Context::default();
+        brand::apply(&ctx, Look::Dark);
         let mut first = ctx.run_ui(Default::default(), |_| {});
         first.textures_delta.clear();
-        for symbol in [UP, DOWN] {
-            assert!(
-                ctx.fonts_mut(|fonts| fonts.has_glyphs(&egui::FontId::default(), symbol)),
-                "{symbol}"
-            );
+        let symbols = [
+            UP,
+            DOWN,
+            ARROW_UP,
+            ARROW_DOWN,
+            DOWNLOADS_SYMBOL,
+            HISTORY_SYMBOL,
+            SETTINGS_SYMBOL,
+            "·",
+        ];
+        for symbol in symbols {
+            for font in [egui::FontId::proportional(14.0), brand::semibold(14.0)] {
+                assert!(
+                    ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, symbol)),
+                    "{symbol} in {font:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn each_status_has_its_own_badge() {
+        let words = |status| status_badge(&snapshot(status, 0, 0));
+        assert_eq!(
+            words(DownloadStatus::Downloading),
+            ("Downloading", Tone::Busy)
+        );
+        assert_eq!(words(DownloadStatus::Queued), ("Queued", Tone::Waiting));
+        assert_eq!(words(DownloadStatus::Paused), ("Paused", Tone::Quiet));
+        assert_eq!(words(DownloadStatus::Failed), ("Problem", Tone::Problem));
+        assert_eq!(
+            words(DownloadStatus::Finished),
+            ("Finished, sharing", Tone::Done)
+        );
+        let mut stopped = snapshot(DownloadStatus::Finished, 1, 1);
+        stopped.sharing_stopped = true;
+        assert_eq!(status_badge(&stopped), ("Finished", Tone::Done));
+    }
+
+    #[test]
+    fn the_settings_say_which_program_opens_links() {
+        let here = Path::new(r"C:\Apps\BitDinghy\BitDinghy.exe");
+        let this_copy = Opener::BitDinghy {
+            exe: Some(r"c:\apps\bitdinghy\BITDINGHY.EXE".into()),
+        };
+        assert_eq!(
+            opener_text(Kind::MagnetLinks, &this_copy, Some(here)),
+            (
+                "Magnet links open in this BitDinghy.".to_string(),
+                Tone::Done
+            )
+        );
+        let other_copy = Opener::BitDinghy {
+            exe: Some(r"C:\cargo-target\debug\BitDinghy.exe".into()),
+        };
+        let (text, tone) = opener_text(Kind::TorrentFiles, &other_copy, Some(here));
+        assert_eq!(
+            text,
+            r".torrent files open in another copy of BitDinghy: C:\cargo-target\debug\BitDinghy.exe"
+        );
+        assert_eq!(tone, Tone::Waiting);
+        let other = Opener::Other {
+            name: "qbittorrent.exe".into(),
+        };
+        assert_eq!(
+            opener_text(Kind::MagnetLinks, &other, Some(here)).0,
+            "Magnet links open in qbittorrent.exe."
+        );
+        assert!(
+            opener_text(Kind::MagnetLinks, &Opener::NotChosen, Some(here))
+                .0
+                .contains("no program chosen")
+        );
+    }
+
+    #[test]
+    fn the_default_app_question_is_asked_once_and_only_when_useful() {
+        let here = Path::new(r"C:\Apps\BitDinghy\BitDinghy.exe");
+        let this_copy = Opener::BitDinghy {
+            exe: Some(here.to_path_buf()),
+        };
+        let other = Opener::Other {
+            name: "qbittorrent.exe".into(),
+        };
+        // Never asked, and something else opens .torrent files: ask (on Windows).
+        assert_eq!(
+            should_ask_about_default_app(false, &this_copy, &other, Some(here)),
+            cfg!(windows)
+        );
+        // Already answered: never again.
+        assert!(!should_ask_about_default_app(
+            true,
+            &other,
+            &other,
+            Some(here)
+        ));
+        // This copy already opens both: nothing to ask.
+        assert!(!should_ask_about_default_app(
+            false,
+            &this_copy,
+            &this_copy,
+            Some(here)
+        ));
+    }
+
+    #[test]
+    fn the_when_finished_choices_are_all_offered_and_explained() {
+        let offered: Vec<WhenFinished> = WHEN_FINISHED_CHOICES
+            .iter()
+            .map(|(choice, _)| *choice)
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                WhenFinished::KeepSharing,
+                WhenFinished::StopRightAway,
+                WhenFinished::StopAfterCheck
+            ]
+        );
+        assert!(WHEN_FINISHED_CHOICES[0].1.contains("(the standard)"));
+        assert!(when_finished_text(WhenFinished::StopRightAway).contains("Share again"));
+        assert!(when_finished_text(WhenFinished::StopAfterCheck).contains("Check files"));
     }
 
     #[test]

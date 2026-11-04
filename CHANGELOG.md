@@ -9,6 +9,36 @@ format is called out here.
 
 ## [Unreleased]
 
+### Changed
+- **A redesigned window.** A sidebar with the three pages (Downloads, History, Settings), the
+  total speeds and the version; each download on its own card with a colored status badge and
+  its buttons grouped; History with four totals tiles and the charts in cards; Settings in groups.
+  The text uses the brand typeface, Inter. Everything the window did before, it still does.
+- **A moving logo** at the top of the sidebar, the same as on the website: the boat sails while
+  something is downloading and stands still otherwise (and always when Windows' "Show
+  animations" is off).
+- Settings > **Magnet links and .torrent files** now says which program Windows really opens each
+  with (this BitDinghy, another copy, or another program), not only whether BitDinghy is
+  registered. Windows itself isn't changed until you press a button.
+- A download stopped by a sharing limit now says "Stopped sharing, as chosen in Settings (...)".
+
+### Added
+- **Light colors.** Settings > Look: Dark (the standard), Light, or Like Windows.
+- **What happens when a download is finished** (Settings > Sharing, or `dinghy settings set
+  when-finished keep-sharing|stop|stop-after-check`): keep sharing it (the standard), stop it
+  right away, or stop it once "Check files" finds it complete and correct.
+- **A one-time question** at the first start: "Open magnet links and .torrent files with
+  BitDinghy?" (Yes opens Windows' Default apps, as the Settings button does; Not now doesn't ask
+  again). It isn't asked when this copy already opens both.
+- "Open folder" (the download folder) on the Downloads page, and "Open data folder" and a
+  "Support BitDinghy" link (bitdinghy.com/support) in Settings > About.
+
+### Saved formats
+- Three new settings: `look`, `asked_about_default_app` and `when_finished`. Each is only written
+  when it differs from the standard, so older settings files load unchanged; a value this version
+  doesn't know (written by a newer one) reads as the standard instead of making the file
+  unreadable. The download list is unchanged.
+
 ## [0.1.0] - 2026-11-01
 
 The first release.

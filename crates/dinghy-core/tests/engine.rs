@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dinghy_core::display::sharing_text;
 use dinghy_core::owned_files::is_hidden;
+use dinghy_core::settings::WhenFinished;
 use dinghy_core::{DownloadSnapshot, DownloadStatus, Engine, EngineConfig};
 use librqbit::spawn_utils::BlockingSpawner;
 use librqbit::storage::StorageFactoryExt;
@@ -1905,6 +1907,72 @@ async fn turning_the_limit_off_lets_a_stopped_download_share_again() {
     })
     .await;
     assert!(sharing.save_folder.is_some());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_right_away_stops_a_finished_download_and_keep_sharing_undoes_it() {
+    let work = tempfile::tempdir().unwrap();
+    let seeder = one_file_torrent(work.path(), 300_000).await;
+    let mut config = offline_config(&work.path().join("downloads"));
+    config.saved_list_file = Some(work.path().join("downloads.db"));
+    config.when_finished = WhenFinished::StopRightAway;
+    let engine = Engine::start(config).await.unwrap();
+    engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let stopped = wait_until(&engine, "stopped once finished", |s| s.sharing_stopped).await;
+    assert_eq!(stopped.status, DownloadStatus::Finished, "{stopped:?}");
+    assert!(sharing_text(&stopped).contains("as chosen in Settings"));
+
+    // Back to the standard: it shares again.
+    engine.set_when_finished(WhenFinished::KeepSharing);
+    wait_until(&engine, "sharing again", |s| {
+        !s.sharing_stopped && s.status == DownloadStatus::Finished
+    })
+    .await;
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_after_check_pauses_only_once_the_check_finds_it_complete() {
+    let work = tempfile::tempdir().unwrap();
+    let (seeder, _files) = small_shared_torrent(work.path()).await;
+    let download_dir = work.path().join("downloads");
+    let list = work.path().join("downloads.db");
+    let engine = remembering_engine(&download_dir, &list, true).await;
+    engine.set_when_finished(WhenFinished::StopAfterCheck);
+    let id = engine
+        .add_magnet(&seeder.magnet(), vec![seeder.address])
+        .unwrap();
+    let done = wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+    // Finishing alone doesn't stop it: only a check does.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let still = engine.snapshot()[0].clone();
+    assert!(
+        !really_paused(&still) && !still.sharing_stopped,
+        "{still:?}"
+    );
+
+    // Damaged: it is repaired, not paused.
+    damage(&done.save_folder.clone().unwrap().join("a.bin"));
+    engine.check(id).await.unwrap();
+    let checked = wait_for_note(&engine).await;
+    assert!(checked.note_is_warning);
+    assert!(!really_paused(&checked), "{checked:?}");
+    wait_for_status(&engine, &[DownloadStatus::Finished]).await;
+
+    // Complete and correct: paused, and the note says why.
+    engine.check(id).await.unwrap();
+    let checked = wait_for_note(&engine).await;
+    let note = checked.note.clone().unwrap();
+    assert!(
+        note.starts_with("Checked: every chosen file is complete and correct."),
+        "{note}"
+    );
+    assert!(note.contains("Paused, as chosen in Settings"), "{note}");
+    wait_until(&engine, "paused", really_paused).await;
+    assert!(dinghy_core::SavedList::read(&list).unwrap()[0].paused);
     engine.shutdown().await;
 }
 

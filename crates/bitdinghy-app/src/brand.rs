@@ -9,6 +9,7 @@
 
 use std::io::Cursor;
 
+pub use dinghy_core::settings::Look;
 use eframe::egui::{self, Color32, Stroke, Theme};
 
 /// The colors of one theme.
@@ -139,16 +140,29 @@ pub struct Logos {
     on_light: egui::TextureHandle,
 }
 
+/// A PNG picture made ready to draw. `None` if it isn't a PNG we understand.
+pub fn texture_from_png(
+    ctx: &egui::Context,
+    name: &str,
+    bytes: &[u8],
+) -> Option<egui::TextureHandle> {
+    let picture = decode_png(bytes)?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [picture.width as usize, picture.height as usize],
+        &picture.pixels,
+    );
+    Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR))
+}
+
+/// For tests elsewhere in the program: a picture's width, height and RGBA bytes.
+#[cfg(test)]
+pub fn decode_png_for_tests(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    decode_png(bytes).map(|picture| (picture.width, picture.height, picture.pixels))
+}
+
 impl Logos {
     pub fn load(ctx: &egui::Context) -> Option<Logos> {
-        let texture = |name: &str, bytes: &[u8]| {
-            let picture = decode_png(bytes)?;
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [picture.width as usize, picture.height as usize],
-                &picture.pixels,
-            );
-            Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR))
-        };
+        let texture = |name: &str, bytes: &[u8]| texture_from_png(ctx, name, bytes);
         Some(Logos {
             on_dark: texture("logo-on-dark", LOGO_ON_DARK)?,
             on_light: texture("logo-on-light", LOGO_ON_LIGHT)?,
@@ -164,12 +178,88 @@ impl Logos {
     }
 }
 
-/// Gives the window the brand look. For now the window is always dark, whatever the computer's
-/// light/dark setting says (the light theme below is kept ready; see `TODO.md` to bring it back).
-pub fn apply(ctx: &egui::Context) {
+/// The brand typeface, Inter (SIL Open Font License; `assets/fonts/Inter-LICENSE.txt`), in its
+/// regular and semi-bold weights.
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
+
+/// The name of the semi-bold font family (download names, headings, the big numbers).
+pub const SEMIBOLD: &str = "Inter SemiBold";
+
+/// The semi-bold font at `size` points.
+pub fn semibold(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// Gives the window the brand look: the colors, the Inter font, the text sizes and the rounded
+/// corners. `look` is the person's choice in Settings (dark unless they chose otherwise).
+pub fn apply(ctx: &egui::Context, look: Look) {
+    install_fonts(ctx);
     ctx.set_visuals_of(Theme::Dark, visuals_for(Theme::Dark));
     ctx.set_visuals_of(Theme::Light, visuals_for(Theme::Light));
-    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.all_styles_mut(|style| {
+        use egui::{FontFamily, FontId, TextStyle};
+        style.text_styles = [
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(13.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.5, FontFamily::Monospace),
+            ),
+            (TextStyle::Heading, semibold(19.0)),
+        ]
+        .into();
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 4.0);
+        style.spacing.interact_size.y = 24.0;
+    });
+    set_look(ctx, look);
+}
+
+/// Switches between dark, light and "like Windows".
+pub fn set_look(ctx: &egui::Context, look: Look) {
+    ctx.set_theme(match look {
+        Look::Dark => egui::ThemePreference::Dark,
+        Look::Light => egui::ThemePreference::Light,
+        Look::LikeWindows => egui::ThemePreference::System,
+    });
+}
+
+/// Puts Inter first, with egui's own fonts behind it for the few symbols Inter doesn't have.
+fn install_fonts(ctx: &egui::Context) {
+    use std::sync::Arc;
+
+    use egui::{FontData, FontDefinitions, FontFamily};
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "Inter".to_string(),
+        Arc::new(FontData::from_static(INTER_REGULAR)),
+    );
+    fonts.font_data.insert(
+        SEMIBOLD.to_string(),
+        Arc::new(FontData::from_static(INTER_SEMIBOLD)),
+    );
+    let standard = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let mut regular = vec!["Inter".to_string()];
+    regular.extend(standard.iter().cloned());
+    let mut bold = vec![SEMIBOLD.to_string()];
+    bold.extend(standard);
+    fonts.families.insert(FontFamily::Proportional, regular);
+    fonts
+        .families
+        .insert(FontFamily::Name(SEMIBOLD.into()), bold);
+    ctx.set_fonts(fonts);
 }
 
 fn visuals_for(theme: Theme) -> egui::Visuals {
@@ -181,10 +271,11 @@ fn visuals_for(theme: Theme) -> egui::Visuals {
     visuals.panel_fill = p.background;
     visuals.window_fill = p.surface;
     visuals.faint_bg_color = p.surface_raised;
-    // The inside of text boxes: a touch darker than the page in the dark theme, white in the light.
+    // The inside of text boxes and the empty part of progress bars: a touch darker than the page
+    // in the dark theme, the light gray in the light one (white would vanish on the white cards).
     visuals.extreme_bg_color = match theme {
         Theme::Dark => rgb(0x04111D),
-        Theme::Light => p.surface,
+        Theme::Light => p.surface_raised,
     };
     visuals.hyperlink_color = p.link;
     // Secondary text (hints, the version number) is the brand's muted gray.
@@ -194,6 +285,18 @@ fn visuals_for(theme: Theme) -> egui::Visuals {
         Theme::Light => rgb(0xB6FFC7),
     };
     visuals.selection.stroke = Stroke::new(1.0, p.text);
+
+    // Softly rounded corners, like the brand's own mock-ups.
+    let rounded = egui::CornerRadius::same(6);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.corner_radius = rounded;
+    }
 
     let line = Stroke::new(1.0, p.border);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
